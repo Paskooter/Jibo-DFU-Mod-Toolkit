@@ -1,0 +1,2 @@
+# Unified-diff context lines intentionally start with a space before tabs.
+firmware/*.patch -whitespace

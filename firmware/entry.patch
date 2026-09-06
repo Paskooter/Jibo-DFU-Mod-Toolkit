@@ -1,0 +1,54 @@
+--- a/common/main.c
++++ b/common/main.c
+@@ -14,6 +14,10 @@
+ #include <version.h>
+ 
+ DECLARE_GLOBAL_DATA_PTR;
++
++#ifdef CONFIG_JIBO_DFU_ENTRY
++#include "jibo_dfu_entry.h"
++#endif
+ 
+ /*
+  * Board-specific Platform code can reimplement show_boot_progress () if needed
+@@ -45,6 +49,10 @@
+ {
+ 	const char *s;
+ 
++#ifdef CONFIG_JIBO_DFU_ENTRY
++	jibo_dfu_entry();
++#endif
++
+ 	bootstage_mark_name(BOOTSTAGE_ID_MAIN_LOOP, "main_loop");
+ 
+ #ifdef CONFIG_VERSION_VARIABLE
+--- a/include/configs/kein-baseboard.h
++++ b/include/configs/kein-baseboard.h
+@@ -93,4 +93,11 @@
+ #define CONFIG_ARMV7_SECURE_BASE		0xfff00000
+ #define CONFIG_ARMV7_SECURE_RESERVE_SIZE	0x00100000
+ 
++/* Dedicated recovery build: never load/save persistent environment. */
++#define CONFIG_JIBO_DFU_ENTRY
++#undef CONFIG_ENV_IS_IN_MMC
++#define CONFIG_ENV_IS_NOWHERE
++#undef CONFIG_BOOTCOUNT_LIMIT
++#undef CONFIG_BOOTCOUNT_ENV
++
+ #endif /* __CONFIG_H */
+--- a/drivers/dfu/dfu_mmc.c
++++ b/drivers/dfu/dfu_mmc.c
+@@ -26,6 +26,13 @@
+ 	struct mmc *mmc;
+ 	u32 blk_start, blk_count, n = 0;
+ 	int ret, part_num_bkp = 0;
++
++#ifdef CONFIG_JIBO_DFU_ENTRY
++	/* Whole user area and GPT marker are for backups/identification only. */
++	if (op == DFU_OP_WRITE &&
++	    (!strncmp(dfu->name, "emmc-", 5) || !strcmp(dfu->name, "jibo-dfu-v1")))
++		return -EPERM;
++#endif
+ 
+ 	mmc = find_mmc_device(dfu->data.mmc.dev_num);
+ 	if (!mmc) {

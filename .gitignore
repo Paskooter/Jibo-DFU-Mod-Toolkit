@@ -1,0 +1,20 @@
+# Keep the local handoff brief out of any future public source repository.
+PROJECT_SPEC.md
+
+# Do not accidentally add device captures or signing material.
+*.bin
+*.img
+*.raw
+*.dump
+*.pem
+*.der
+*.key
+captures/
+bundles/
+operation-*/
+.build/
+dist/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
