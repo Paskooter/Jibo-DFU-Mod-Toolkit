@@ -30,6 +30,9 @@ class FakeScreen:
     def keypad(self, enabled):
         pass
 
+    def move(self, _y, _x):
+        pass
+
     def getch(self):
         return self.keys.pop(0) if self.keys else ord("q")
 
@@ -106,6 +109,22 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertIn("rootfsA", item.reason)
         self.assertIn("emmc-000", item.reason)
 
+    def test_update_reason_identifies_missing_skills_and_accepts_chunk_alternatives(self):
+        base = ("var", "jibo-dfu-v1", "rootfsA", "rootfsB", "services", "emmc-000")
+        missing = jibo_tui.Readiness("dfu-ready", (), port="1-1", marker_present=True,
+                                     alt_names=base)
+        item = {entry.key: entry for entry in
+                jibo_tui.build_menu_items(missing, ["update.tar.bz2"])}["flash-update"]
+        self.assertFalse(item.enabled)
+        self.assertIn("cannot write skills", item.reason)
+        self.assertIn("compatible signed recovery bundle", item.reason)
+
+        chunked = jibo_tui.Readiness("dfu-ready", (), port="1-1", marker_present=True,
+                                     alt_names=base + ("skills-000", "skills-001"))
+        item = {entry.key: entry for entry in
+                jibo_tui.build_menu_items(chunked, ["update.tar.bz2"])}["flash-update"]
+        self.assertTrue(item.enabled)
+
     def test_enter_does_not_activate_disabled_item(self):
         app = jibo_tui.TerminalMenu(fake_api())
         screen = FakeScreen([curses.KEY_ENTER, ord("q")])
@@ -128,6 +147,130 @@ class TuiReadinessTests(unittest.TestCase):
                 patch.object(curses, "wrapper") as wrapper:
             self.assertIsNone(jibo_tui.run(fake_api()))
         wrapper.assert_not_called()
+
+
+class CursesPromptTests(unittest.TestCase):
+    def run_prompt(self, function, screen):
+        with patch.object(jibo_tui, "_terminal_available", return_value=True), \
+                patch.object(curses, "wrapper", side_effect=lambda callback: callback(screen)):
+            return function()
+
+    def test_select_option_returns_enabled_choice_and_explains_disabled_rows(self):
+        blocked_screen = FakeScreen([curses.KEY_DOWN, curses.KEY_ENTER, 27])
+        blocked = self.run_prompt(
+            lambda: jibo_tui.select_option(
+                "Choose action",
+                (("ready", "Ready action"),
+                 jibo_tui.MenuItem("blocked", "Blocked action", False,
+                                   "Enter DFU first."))),
+            blocked_screen)
+        self.assertIsNone(blocked)
+        self.assertTrue(any("Enter DFU first." in text for _, _, text, _ in blocked_screen.lines))
+
+        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_ENTER,
+                             curses.KEY_DOWN, curses.KEY_ENTER])
+        selected = self.run_prompt(
+            lambda: jibo_tui.select_option(
+                "Choose action",
+                (("ready", "Ready action"),
+                 jibo_tui.MenuItem("blocked", "Blocked action", False,
+                                   "Enter DFU first."))),
+            screen)
+        self.assertEqual(selected, "ready")
+
+    def test_text_input_supports_editing_and_escape_cancels(self):
+        screen = FakeScreen([ord("a"), ord("b"), curses.KEY_BACKSPACE,
+                             ord("c"), curses.KEY_ENTER])
+        value = self.run_prompt(
+            lambda: jibo_tui.text_input("Image path", "Path:", default=""), screen)
+        self.assertEqual(value, "ac")
+
+        cancel_screen = FakeScreen([27])
+        cancelled = self.run_prompt(
+            lambda: jibo_tui.text_input("Image path", "Path:"), cancel_screen)
+        self.assertIsNone(cancelled)
+
+    def test_password_prompt_never_draws_secret_text(self):
+        secret = "robotpass"
+        screen = FakeScreen([*(ord(char) for char in secret), curses.KEY_ENTER])
+        value = self.run_prompt(
+            lambda: jibo_tui.text_input("Wi-Fi", "Password:", password=True), screen)
+        self.assertEqual(value, secret)
+        drawn = "".join(text for _, _, text, _ in screen.lines)
+        self.assertNotIn(secret, drawn)
+        self.assertIn("•", drawn)
+
+    def test_confirmation_defaults_to_cancel_and_requires_explicit_selection(self):
+        cancel_screen = FakeScreen([curses.KEY_ENTER])
+        accepted = self.run_prompt(
+            lambda: jibo_tui.confirm_action("Confirm write", "Write var to port 1-1?"),
+            cancel_screen)
+        self.assertFalse(accepted)
+
+        confirm_screen = FakeScreen([curses.KEY_DOWN, curses.KEY_ENTER])
+        accepted = self.run_prompt(
+            lambda: jibo_tui.confirm_action("Confirm write", "Write var to port 1-1?"),
+            confirm_screen)
+        self.assertTrue(accepted)
+        drawn = "".join(text for _, _, text, _ in confirm_screen.lines)
+        self.assertIn("Write var to port 1-1?", drawn)
+
+    def test_result_screen_shows_content_in_curses(self):
+        screen = FakeScreen([curses.KEY_ENTER])
+        result = self.run_prompt(
+            lambda: jibo_tui.show_screen("Result", {"status": "complete"}), screen)
+        self.assertIsNone(result)
+        drawn = "".join(text for _, _, text, _ in screen.lines)
+        self.assertIn('"status": "complete"', drawn)
+
+    def test_confirmation_summary_keeps_update_and_var_plan_details_visible(self):
+        update = jibo_tui._confirmation_details({
+            "package": "jibo-pvt-flash-build.tar.bz2",
+            "version": "5.4.2",
+            "usb_port": "1-1",
+            "var_policy": "preserve current configuration",
+            "partitions": [{"name": "rootfsA", "bytes": 100},
+                           {"name": "skills", "bytes": 200}],
+        }, "Review the update plan.")
+        self.assertIn("jibo-pvt-flash-build.tar.bz2", update)
+        self.assertIn("preserve current configuration", update)
+        self.assertIn("rootfsA (100 bytes)", update)
+        self.assertIn("skills (200 bytes)", update)
+
+        var = jibo_tui._confirmation_details({
+            "operation": "set mode to developer",
+            "usb_port": "1-1",
+            "before_sha256": "before-hash",
+            "candidate_sha256": "candidate-hash",
+            "baseline_backup": "/backups/var.img",
+        }, "Review the var plan.")
+        self.assertIn("Current var SHA-256: before-hash", var)
+        self.assertIn("Edited var SHA-256: candidate-hash", var)
+        self.assertIn("Rollback backup: /backups/var.img", var)
+
+    def test_cancelled_wifi_ssid_does_not_request_network_type(self):
+        api = SimpleNamespace()
+        with patch.object(jibo_tui, "text_input", return_value=None), \
+                patch.object(jibo_tui, "select_option") as select:
+            result = jibo_tui.execute_action(
+                api, "configure-wifi", jibo_tui.Readiness("dfu-ready", ()))
+        self.assertEqual(result["status"], "cancelled")
+        self.assertIn("Wi-Fi setup", result["message"])
+        select.assert_not_called()
+
+    def test_mode_action_supplies_curses_confirmation_callback_to_backend(self):
+        calls = {}
+        api = SimpleNamespace(
+            set_mode_live=lambda mode, confirmation=None: calls.update(
+                mode=mode, confirmation=confirmation))
+        with patch.object(jibo_tui, "_select_mode", return_value="developer"), \
+                patch.object(jibo_tui, "confirm_action", return_value=True) as confirm:
+            jibo_tui.execute_action(api, "set-mode", jibo_tui.Readiness("dfu-ready", ()))
+            self.assertEqual(calls["mode"], "developer")
+            self.assertTrue(calls["confirmation"]({"partition": "var", "usb_port": "1-1"}))
+            confirmation_text = confirm.call_args.args[1]
+        self.assertIn("Partition: var", confirmation_text)
+        self.assertIn("USB port: 1-1", confirmation_text)
 
 
 if __name__ == "__main__":

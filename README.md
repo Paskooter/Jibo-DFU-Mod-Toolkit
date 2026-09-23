@@ -39,16 +39,16 @@ The recovery bundle is omitted from GitHub because it is a hardware-profile-spec
 
 ## Use the terminal interface
 
-The screen refreshes USB state each time it returns from an action. The first action is available only in RCM/APX. Live partition actions become available when the Jibo DFU loader is detected. Local image actions remain available without a robot. If the program is run without an interactive terminal, it falls back to numbered prompts.
+The screen refreshes USB state each time it returns from an action. The first action is available only in RCM/APX. Live partition actions become available when the Jibo DFU loader is detected. Local image actions remain available without a robot. Every choice, path entry, hidden password, result, and write confirmation uses the same terminal screen. Use **Esc** to cancel a step; confirmation starts on **Cancel**, so select **Confirm** explicitly to write. A terminal is required for the guided interface; scripts can use the command-line subcommands.
 
 | Action | What it does |
 | --- | --- |
 | **Enter DFU from RCM/APX** | Loads the matching recovery program into RAM; available only while the robot is in RCM/APX. |
 | **Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
-| **Set robot mode** | Prepares a mode change, displays the write plan, waits for `WRITE VAR`, then reads the partition back to verify it. |
-| **Configure Wi-Fi** | Adds a network while preserving saved networks, waits for `WRITE VAR`, and verifies by reading back. Password entry is hidden. |
+| **Set robot mode** | Prepares a mode change, displays the write plan, asks for confirmation on the terminal screen, then reads the partition back to verify it. |
+| **Configure Wi-Fi** | Adds a network while preserving saved networks, asks for confirmation on the terminal screen, and verifies by reading back. Password entry is hidden. |
 | **Install an official update package** | Lists packages in `updates/`, asks whether to preserve or replace `var`, saves one original backup per written partition, prepares exact-size images, writes and reads back each partition, then requests a reset. |
-| **Write an edited var image** | Shows the write plan, waits for `WRITE VAR`, and verifies the partition readback. |
+| **Write an edited var image** | Shows the write plan, asks for confirmation on the terminal screen, and verifies the partition readback. |
 | **Inspect or edit a local backup** | Works offline. Inspection hides network details; editing creates a separate image. |
 
 The read and write operations show a spinner and elapsed time. A successful mode or Wi-Fi write leaves the robot in DFU; a successful full-flash update requests a reset after verifying every partition.
@@ -63,9 +63,11 @@ cp /path/to/jibo-pvt-flash-build-5.4.2-production.tar.bz2 updates/
 sudo python3 jibo_dfu.py
 ```
 
-Choose **Install an official update package**, select the package number, and choose how to handle `var`. **Preserve var** keeps the robot's identity, current mode, Wi-Fi, and user configuration; if it currently says `oobe`, preserving it also keeps that setting. **Fresh var** writes the package's `var.ext4`, discarding those local settings and returning to the package's initial setup state. The tool saves a rollback copy of the original `var` before either kind of update. It saves one original backup for each other partition it writes and reuses a verified backup on later updates, so it does not create another full backup every time. Backups stay under `~/Jibo-Backups/`; large temporary prepared images and readbacks are removed after the operation. Allow ample free disk space and time for the multi-gigabyte transfers.
+Choose **Install an official update package**, select the package with the arrow keys, and choose how to handle `var`. **Preserve var** keeps the robot's identity, current mode, Wi-Fi, and user configuration; if it currently says `oobe`, preserving it also keeps that setting. **Fresh var** writes the package's `var.ext4`, discarding those local settings and returning to the package's initial setup state. The tool saves a rollback copy of the original `var` before either kind of update. It saves one original backup for each other partition it writes and reuses a verified backup on later updates, so it does not create another full backup every time. Backups stay under `~/Jibo-Backups/`; large temporary prepared images and readbacks are removed after the operation. Allow ample free disk space and time for the multi-gigabyte transfers.
 
 The tool reads the robot's GPT table over DFU and checks the exact partition sizes before preparing images. It expands the ext4 filesystems **on this computer** to those sizes, including the `skills` size reported by that robot. This avoids the manual post-flash resize required by older preserve-var scripts: Jibo's one-time resize marker is stored in `var`, so a preserved `var` may skip that first-boot resize. [Official GPT layout](https://pvindex.org/gitea/PlatformTeam/buildroot.jibo/src/branch/master/board/nvidia/avionic/gpt-table), [first-boot resize script](https://pvindex.org/gitea/PlatformTeam/buildroot.jibo/src/branch/master/board/nvidia/avionic/rootfs_overlay/var/etc/first_boot_resize).
+
+**Recovery loader requirement:** The currently signed `bundles/default` loader exposes `var`, `services`, both root filesystems, and read-only raw eMMC chunks, but omits the roughly 11 GB `skills` partition. The installed stock-update flasher uses a different DFU loader that exposes `skills`. The update action stays unavailable with the current bundle because it cannot safely write that partition. This repository includes source for a recovery loader that exposes bounded `skills-000`, `skills-001`, and later chunks within the GPT `skills` partition; using those changes on a robot requires rebuilding and signing a compatible recovery bundle. No signing key is included in the repository.
 
 For scripts, supply a package path and one explicit var policy:
 
@@ -83,7 +85,7 @@ The first live write preparation saves one rollback image of `var` under `~/Jibo
 
 The backup may contain robot identity, Wi-Fi, keys, and calibration data. Keep it private; the toolkit does not upload it. Inspection avoids printing saved network details, and Wi-Fi passwords are not displayed or written to operation logs.
 
-RCM-to-DFU entry, a `var` read, and one `var` write with immediate DFU readback were tested on one Jibo. The first mode edit reverted after boot because a pending ext4 journal replayed the older `oobe` file over the edit. The current editor replays and checks that journal on a temporary copy **before** changing `mode.json`; this corrected workflow is verified offline but still needs a live reboot test. The saved original backup is unchanged. The menu requires a typed `WRITE VAR` before a var write.
+RCM-to-DFU entry, a `var` read, and a mode change to `int-developer` were tested on one Jibo. The first mode edit reverted after boot because a pending ext4 journal replayed the older `oobe` file over the edit. The current editor replays and checks that journal on a temporary copy **before** changing `mode.json`; the owner reports that the corrected mode-setting option properly changed the robot to `int-developer`. The saved original backup is unchanged. The terminal menu uses an explicit Cancel/Confirm choice before a write; `--confirm` remains available for scripted commands.
 
 ## What is available and what is not
 

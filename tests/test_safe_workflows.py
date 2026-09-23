@@ -14,13 +14,18 @@ import jibo_images as images
 
 
 class SafeWorkflowTests(unittest.TestCase):
-    def test_guided_menu_uses_operational_language(self):
+    def test_guided_menu_requires_terminal_instead_of_numbered_fallback(self):
         display = io.StringIO()
-        with patch.object(j, "devices", return_value=[]), \
-                patch("builtins.input", return_value="q"), redirect_stdout(display):
-            j.interactive()
-        self.assertIn("Confirm DFU or enter recovery", display.getvalue())
-        self.assertNotIn("tested", display.getvalue().lower())
+        with patch("jibo_tui.run", return_value=None), patch.object(j.sys, "stderr", display):
+            self.assertEqual(j._launch_menu(), 2)
+        self.assertIn("interactive terminal", display.getvalue())
+
+    def test_guided_write_confirmation_accepts_callback_and_cancellation(self):
+        plan = {"partition": "var", "operation": "set mode to developer"}
+        received = []
+        self.assertTrue(j._confirm_write(lambda value: received.append(value) or True, plan))
+        self.assertEqual(received, [plan])
+        self.assertFalse(j._confirm_write(lambda _value: False, plan))
 
     def test_partition_read_shows_progress_and_completion(self):
         progress = io.StringIO()
