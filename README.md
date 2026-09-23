@@ -57,10 +57,20 @@ The screen refreshes USB state each time it returns from an action. The first ac
 
 The read and write operations show a spinner and elapsed time. A successful mode or Wi-Fi write leaves the robot in DFU; a successful full-flash update requests a reset after verifying every partition.
 
-For the ShofEL transport, place the built `shofel2_t124` and its `emmc_server.bin` payload together in `tools/` or on `PATH`, or pass the host path explicitly:
+For the ShofEL transport, place the built `shofel2_t124` and its `emmc_server.bin` payload together in `tools/` or on `PATH`, or pass the host path explicitly. The host needs the USB-port and read-framing changes in [this patch](patches/shofel2-rcm-backup.patch), based on the upstream `improvements/IncreasedUSBReadWriteSpeed` branch. Build it from source with GCC, Make, and the `arm-none-eabi` toolchain:
 
 ```sh
-sudo python3 jibo_dfu.py backup-var --transport shofel --shofel /path/to/shofel2_t124 --port 1-2
+git clone --branch improvements/IncreasedUSBReadWriteSpeed https://github.com/devsparx/ShofEL2-for-T124.git ../ShofEL2-for-T124
+cd ../ShofEL2-for-T124
+git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-rcm-backup.patch
+make shofel2_t124 emmc_server.bin
+cd ../Jibo-DFU-Mod-Toolkit
+```
+
+Then run the backup with the exact USB port shown by `python3 jibo_dfu.py detect`:
+
+```sh
+sudo python3 jibo_dfu.py backup-var --transport shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 ```
 
 The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so the adjacent payload resolves correctly. To bundle ShofEL for the `.pyz` menu, pass both `--shofel2 /path/to/shofel2_t124` and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; the pair is stored under `tools/` and the menu discovers it there.

@@ -1,0 +1,285 @@
+diff --git a/exploit/mini_libusb.c b/exploit/mini_libusb.c
+index 5343eaa..c93f826 100644
+--- a/exploit/mini_libusb.c
++++ b/exploit/mini_libusb.c
+@@ -41,7 +41,11 @@ exit:
+ 
+ }
+ 
+-int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
++int usb_port_path_matches( const char *device_path, const char *selected_path ) {
++    return !selected_path || ( device_path && !strcmp( device_path, selected_path ) );
++}
++
++static int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid, const char *port_path ) {
+ 
+     int ret = -1;
+     uint16_t d_vid, d_pid, d_bus, d_num;
+@@ -57,6 +61,9 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
+ 
+         if ( !isdigit( entry->d_name[0] ) || strchr( entry->d_name, ':' ) )
+ 			continue;
++
++        if ( !usb_port_path_matches( entry->d_name, port_path ) )
++            continue;
+         
+         if ( !usb_get_att( &d_vid, entry->d_name, "idVendor", 16 ) && ( vid == d_vid ) &&
+              !usb_get_att( &d_pid, entry->d_name, "idProduct", 16 ) && ( pid == d_pid ) &&
+@@ -77,12 +84,16 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
+ }
+ 
+ int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait ) {
++    return usb_open_by_vid_pid_port( vid, pid, wait, NULL );
++}
++
++int usb_open_by_vid_pid_port( uint16_t vid, uint16_t pid, uint8_t wait, const char *port_path ) {
+ 
+     int ret;
+-    char path[256];
++    char path[256] = { 0 };
+ 
+     do {
+-        ret = usb_find_path_by_vid_pid( path, vid, pid );
++        ret = usb_find_path_by_vid_pid( path, vid, pid, port_path );
+         usleep( 500 );
+     } while ( wait && ( ret < 0 ) );
+     DEBUG_MSG( "USB Path: %s\n", path );
+diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
+index 9e49a2f..142b30e 100644
+--- a/exploit/shofel2_t124.c
++++ b/exploit/shofel2_t124.c
+@@ -28,7 +28,8 @@ void print_hex_memory( void *mem, size_t size ) {
+ 
+ void print_help() {
+ 
+-    fprintf( stderr, "shofel2_t124 ( MEM_DUMP | READ_FUSES | BOOT_BCT | PAYLOAD | DUMP_STACK | EMMC_STATUS | EMMC_READ | EMMC_WRITE | EMMC_READ_EXT_CSD | EMMC_ERASE ) [options]\n"
++    fprintf( stderr, "shofel2_t124 [--usb-port-path PORT] COMMAND [ARGUMENTS]\n"
++                "\t* --usb-port-path PORT -> Select the exact USB sysfs topology path (for example, 1-2.3).\n"
+                 "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
+                 "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
+                 "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
+@@ -65,10 +66,22 @@ int main( int argc, char *argv[] ) {
+     uint32_t emmc_start_sector = 0;
+     uint32_t emmc_num_sectors = 0;
+     char *emmc_filename = NULL;
++    const char *usb_port_path = NULL;
+ 
+ 
+   // ---- PARSE ARGS ----
+ 
++    if ( argc >= 2 && !strcmp( argv[1], "--usb-port-path" ) ) {
++        if ( argc < 4 || !argv[2][0] ) {
++            fprintf( stderr, "Error: --usb-port-path requires a USB topology path and a command.\n\n" );
++            print_help();
++            goto exit;
++        }
++        usb_port_path = argv[2];
++        argc -= 2;
++        argv += 2;
++    }
++
+     if ( argc < 2 ) {
+         fprintf( stderr, "Error: invalid argument count.\n\n" );
+         print_help();
+@@ -195,11 +208,11 @@ int main( int argc, char *argv[] ) {
+ 
+     printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
+     printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
+-    rcm_usb = usb_open_by_vid_pid( (uint16_t)JETSON_TK1_VID, (uint16_t)JETSON_TK1_PID, 0 );
++    rcm_usb = usb_open_by_vid_pid_port( (uint16_t)JETSON_TK1_VID, (uint16_t)JETSON_TK1_PID, 0, usb_port_path );
+     if ( rcm_usb < 0 )
+-        rcm_usb = usb_open_by_vid_pid( (uint16_t)SHIELD_TK1_VID, (uint16_t)SHIELD_TK1_PID, 0 );
++        rcm_usb = usb_open_by_vid_pid_port( (uint16_t)SHIELD_TK1_VID, (uint16_t)SHIELD_TK1_PID, 0, usb_port_path );
+     if ( rcm_usb < 0 )
+-        rcm_usb = usb_open_by_vid_pid( (uint16_t)JIBO_TK1_VID, (uint16_t)JIBO_TK1_PID, 1 );
++        rcm_usb = usb_open_by_vid_pid_port( (uint16_t)JIBO_TK1_VID, (uint16_t)JIBO_TK1_PID, 1, usb_port_path );
+     printf( "K1 in RCM mode connected.\n" );
+     if ( rcm_usb < 0 ) {
+         fprintf( stderr, "Error: Couldn't open the usb.\n" );
+@@ -485,7 +498,7 @@ int main( int argc, char *argv[] ) {
+             time_t start_time = time(NULL);
+ 
+             while ( remaining > 0 ) {
+-                uint32_t batch = remaining > EMMC_CHUNK_SECTORS ? EMMC_CHUNK_SECTORS : remaining;
++                uint32_t batch = emmc_read_batch_sectors(remaining);
+                 uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
+ 
+                 ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_IN, batch_bytes, chunk_buf );
+@@ -546,7 +559,7 @@ int main( int argc, char *argv[] ) {
+             time_t start_time = time(NULL);
+ 
+             while ( remaining > 0 ) {
+-                uint32_t batch = remaining > EMMC_CHUNK_SECTORS ? EMMC_CHUNK_SECTORS : remaining;
++                uint32_t batch = emmc_write_batch_sectors(remaining);
+                 uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
+ 
+                 int n = read( in_fd, chunk_buf, batch_bytes );
+diff --git a/include/emmc_server.h b/include/emmc_server.h
+index 5229e2e..2c6683a 100644
+--- a/include/emmc_server.h
++++ b/include/emmc_server.h
+@@ -15,16 +15,24 @@
+ #define EMMC_CMD_ERASE          0x05  /* Erase a range of sectors (forces reallocation) */
+ #define EMMC_CMD_EXIT           0xFF
+ 
+-/* Transfer chunk sizes basically the amount much data is sent/received per USB transfer was not multiple of 0x1000
+- *
+- * Reads: 8 sectors (4KB) = 1.1 MB/s - OPTIMIZED
+- * Writes: 1 sector (512B) - ORIGINAL (safe)
++/* USB transport frame sizes: reads use up to 8 sectors (4 KiB), writes up to
++ * 6 sectors (3 KiB). Writes are transport-batched, but the payload still
++ * commits each sector with an individual CMD24 operation.
+  */
+ #define EMMC_CHUNK_SECTORS_READ    8
+-#define EMMC_CHUNK_SECTORS_WRITE   1
+-#define EMMC_CHUNK_SECTORS         1   /* Default - single sector for compatibility */
++#define EMMC_CHUNK_SECTORS_WRITE   6
++#define EMMC_CHUNK_SECTORS         1   /* Legacy default retained for compatibility */
+ #define EMMC_SECTOR_SIZE           512
+-#define EMMC_CHUNK_BYTES           (EMMC_CHUNK_SECTORS * EMMC_SECTOR_SIZE)
++#define EMMC_CHUNK_SECTORS_MAX     ((EMMC_CHUNK_SECTORS_READ > EMMC_CHUNK_SECTORS_WRITE) ? EMMC_CHUNK_SECTORS_READ : EMMC_CHUNK_SECTORS_WRITE)
++#define EMMC_CHUNK_BYTES           (EMMC_CHUNK_SECTORS_MAX * EMMC_SECTOR_SIZE)
++
++static inline uint32_t emmc_write_batch_sectors(uint32_t remaining) {
++    return remaining < EMMC_CHUNK_SECTORS_WRITE ? remaining : EMMC_CHUNK_SECTORS_WRITE;
++}
++
++static inline uint32_t emmc_read_batch_sectors(uint32_t remaining) {
++    return remaining < EMMC_CHUNK_SECTORS_READ ? remaining : EMMC_CHUNK_SECTORS_READ;
++}
+ 
+ /* Command structure sent from PC to payload */
+ struct emmc_cmd_s {
+diff --git a/include/mini_libusb.h b/include/mini_libusb.h
+index 7c55998..d9e1e97 100644
+--- a/include/mini_libusb.h
++++ b/include/mini_libusb.h
+@@ -29,6 +29,9 @@
+ #endif
+ 
+ int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait );
++/* port_path is an exact sysfs topology name, such as "1-2.3". */
++int usb_open_by_vid_pid_port( uint16_t vid, uint16_t pid, uint8_t wait, const char *port_path );
++int usb_port_path_matches( const char *device_path, const char *selected_path );
+ int usb_close( int usb );
+ int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data );
+ int usb_send_control_txn( int usb, uint8_t bRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint16_t len, uint8_t *data, int32_t timeout );
+diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
+index 41601b7..9c3c4d8 100644
+--- a/payloads/emmc_server.c
++++ b/payloads/emmc_server.c
+@@ -780,7 +780,7 @@ void entry() {
+             u32 remaining = cmd.num_sectors;
+ 
+             while (remaining > 0) {
+-                u32 batch = remaining > EMMC_CHUNK_SECTORS_READ ? EMMC_CHUNK_SECTORS_READ : remaining;
++                u32 batch = emmc_read_batch_sectors(remaining);
+                 u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
+ 
+                 int result = read_emmc_sectors(sector, batch, (u32*)buffer);
+@@ -805,7 +805,7 @@ void entry() {
+             u32 write_result = 0;
+ 
+             while (remaining > 0) {
+-                u32 batch = remaining > EMMC_CHUNK_SECTORS_WRITE ? EMMC_CHUNK_SECTORS_WRITE : remaining;
++                u32 batch = emmc_write_batch_sectors(remaining);
+                 u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
+ 
+                 ep1_out_read_imm(buffer, batch_bytes, &num_xfer);
+diff --git a/tests/test_emmc_usb_framing.c b/tests/test_emmc_usb_framing.c
+new file mode 100644
+index 0000000..e603cdc
+--- /dev/null
++++ b/tests/test_emmc_usb_framing.c
+@@ -0,0 +1,73 @@
++#include <assert.h>
++#include <stdint.h>
++
++#include "emmc_server.h"
++
++/* Exercise the same batch sizing used by the host USB sender and payload
++ * receiver. Every sector must appear once, in order, with no oversized frame.
++ */
++static void check_write_framing(uint32_t sectors) {
++    uint32_t remaining = sectors;
++    uint32_t next_sector = 0;
++    uint32_t frame_count = 0;
++
++    while (remaining > 0) {
++        uint32_t batch = emmc_write_batch_sectors(remaining);
++        uint32_t frame_bytes = batch * EMMC_SECTOR_SIZE;
++
++        assert(batch > 0);
++        assert(batch <= EMMC_CHUNK_SECTORS_WRITE);
++        assert(frame_bytes <= EMMC_CHUNK_BYTES);
++        assert(next_sector + batch <= sectors);
++
++        next_sector += batch;
++        remaining -= batch;
++        frame_count++;
++    }
++
++    assert(next_sector == sectors);
++    assert(frame_count == (sectors + EMMC_CHUNK_SECTORS_WRITE - 1) / EMMC_CHUNK_SECTORS_WRITE);
++}
++
++static void check_read_framing(uint32_t sectors) {
++    uint32_t remaining = sectors;
++    uint32_t next_sector = 0;
++    uint32_t frame_count = 0;
++
++    while (remaining > 0) {
++        uint32_t batch = emmc_read_batch_sectors(remaining);
++        uint32_t frame_bytes = batch * EMMC_SECTOR_SIZE;
++
++        assert(batch > 0);
++        assert(batch <= EMMC_CHUNK_SECTORS_READ);
++        assert(frame_bytes <= EMMC_CHUNK_BYTES);
++        assert(next_sector + batch <= sectors);
++
++        next_sector += batch;
++        remaining -= batch;
++        frame_count++;
++    }
++
++    assert(next_sector == sectors);
++    assert(frame_count == (sectors + EMMC_CHUNK_SECTORS_READ - 1) / EMMC_CHUNK_SECTORS_READ);
++}
++
++int main(void) {
++    assert(EMMC_CHUNK_BYTES >= EMMC_CHUNK_SECTORS_READ * EMMC_SECTOR_SIZE);
++    assert(EMMC_CHUNK_BYTES >= EMMC_CHUNK_SECTORS_WRITE * EMMC_SECTOR_SIZE);
++    assert(emmc_write_batch_sectors(0) == 0);
++    assert(emmc_write_batch_sectors(1) == 1);
++    assert(emmc_write_batch_sectors(6) == 6);
++    assert(emmc_write_batch_sectors(7) == 6);
++    assert(emmc_read_batch_sectors(0) == 0);
++    assert(emmc_read_batch_sectors(1) == 1);
++    assert(emmc_read_batch_sectors(8) == 8);
++    assert(emmc_read_batch_sectors(9) == 8);
++
++    for (uint32_t sectors = 0; sectors <= 128; sectors++) {
++        check_write_framing(sectors);
++        check_read_framing(sectors);
++    }
++
++    return 0;
++}
+diff --git a/tests/test_usb_port_path.c b/tests/test_usb_port_path.c
+new file mode 100644
+index 0000000..160442a
+--- /dev/null
++++ b/tests/test_usb_port_path.c
+@@ -0,0 +1,12 @@
++#include <assert.h>
++
++#include "mini_libusb.h"
++
++int main(void) {
++    assert(usb_port_path_matches("1-2.3", "1-2.3"));
++    assert(!usb_port_path_matches("1-2.30", "1-2.3"));
++    assert(!usb_port_path_matches("1-3.3", "1-2.3"));
++    assert(usb_port_path_matches("1-2.3", NULL));
++    assert(!usb_port_path_matches(NULL, "1-2.3"));
++    return 0;
++}
