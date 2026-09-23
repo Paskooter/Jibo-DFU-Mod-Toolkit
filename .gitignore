@@ -12,6 +12,11 @@ PROJECT_SPEC.md
 captures/
 bundles/
 operation-*/
+Jibo-Backups/
+var-backup-*/
+set-mode-*/
+configure-wifi-*/
+write-var-*/
 .build/
 dist/
 __pycache__/

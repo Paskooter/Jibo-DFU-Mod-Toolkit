@@ -1,146 +1,97 @@
-# Jibo DFU entry utility
+# Jibo DFU Mod Toolkit
 
-Development candidate: builds and offline tests pass; USB hardware entry is
-not yet verified. This is the DFU entry component of the planned mod toolkit.
+This toolkit helps an owner inspect and back up a Jibo's `var` partition, prepare a small set of changes, and write a changed `var` image back through USB DFU. It is still an engineering candidate. In the owner's current hardware session, RCM-to-DFU entry and a `var` read completed, but the mode change stopped at the read-only filesystem check before any partition write. Partition writes and readback are not yet hardware validated. The recovery bundle remains an untested candidate for the profile recorded in its manifest.
 
-The utility loads a dedicated T124 recovery program into RAM and leaves the
-robot in USB DFU. The runtime uses pre-signed artifacts and contains no private
-signing key. Its operation does not depend on the installed Linux version.
+## Start here
 
-## Run
+On Linux, connect the robot by USB. If you have the packaged app, run the guided menu:
 
-The packaged Linux x86_64 candidate needs Python 3 and the usual system
-libusb, libudev, libstdc++ and glibc libraries. It includes tegrarcm,
-dfu-util, Crypto++ and a pre-signed candidate loader bundle.
+```sh
+python3 dist/jibo-dfu-linux-x86_64.pyz
+```
 
-~~~sh
-python3 dist/jibo-dfu-linux-x86_64.pyz detect
-sudo python3 dist/jibo-dfu-linux-x86_64.pyz enter --allow-untested
-~~~
+The menu explains the current USB state and walks through backup, inspection, mode changes, Wi-Fi setup, and verified write-back. A spinner and elapsed time appear while the 500 MiB partition is read or written. From a source checkout, use `python3 jibo_dfu.py` or `python3 jibo_dfu.py interactive`. If Linux reports USB permission errors, rerun with `sudo`; when launched through `sudo`, backup files are still stored in the invoking user's home directory and remain owned by that user.
 
-Connect the robot by USB and use its recovery/reset controls to enter RCM.
-The utility cannot force a powered-off or disconnected robot into RCM.
-Use --port 1-2 (the Linux USB topology path) if multiple robots are connected.
-On WSL, USB forwarding must retain or reattach the device after re-enumeration.
+The simplest safe first operation is a backup. The robot must already be running this project's recovery loader in DFU mode:
 
-The --allow-untested flag is required for this candidate's hardware validation.
-It must not be removed from the manifest until the particular bundle has a
-recorded successful hardware test. A successful signature check alone is
-not a hardware test.
+```sh
+python3 jibo_dfu.py list
+python3 jibo_dfu.py backup-var
+```
 
-For source use:
+The first backup is placed in a private directory under `~/Jibo-Backups/` and includes the raw 500 MiB image and a SHA-256 manifest. Repeating `backup-var` reuses the verified backup for that same robot instead of creating another copy. Use `python3 jibo_dfu.py backup-var --refresh` when you intentionally want to capture the robot's current state again. Backups are keyed to a hash of the USB serial when available, and otherwise to the USB port path. Treat the image as private: it can contain robot identity, network, key, and calibration data. The tool does not upload it anywhere.
 
-~~~sh
-python3 jibo_dfu.py detect
-python3 jibo_dfu.py verify-bundle bundles/default
-sudo python3 jibo_dfu.py enter --bundle bundles/default \
-  --tegrarcm /path/to/tegrarcm --dfu-util /path/to/dfu-util --allow-untested
-~~~
+## What it can do today
 
-An already-running DFU device is listed without loading a bundle. The tool
-reports whether the custom loader marker is present. It leaves the robot
-in DFU and performs no host-side partition download or automatic reset.
+- Detect Jibo RCM/APX and DFU USB states, and identify the recovery loader marker.
+- Check the local recovery bundle's hashes.
+- Load the current RAM-only DFU candidate from RCM, with an explicit untested-hardware flag.
+- Back up the 500 MiB `var` partition from the marked recovery loader.
+- Inspect the saved mode and whether Wi-Fi is configured, without printing saved network details.
+- Make an offline copy of a var image with an allowlisted mode change or an added Wi-Fi network.
+- Back up, write, and read back a changed var image, requiring a typed `WRITE VAR` confirmation and leaving the robot in DFU afterward.
 
-## Recovery behavior
+The offline editor needs `debugfs` and `e2fsck` from the Linux `e2fsprogs` package. It checks the filesystem, leaves the source image intact, and writes a new copy. If the check fails, the report includes the `e2fsck` exit status and diagnostic output; live mode and Wi-Fi operations also record that no partition write was attempted. Wi-Fi setup adds a network while preserving other saved networks, refuses an SSID that is already present, and never displays or records the password. Protected networks use a derived WPA key in the image; open networks require an explicit choice.
 
-The custom U-Boot entry bypasses preboot, bootcmd, normal Linux boot, and the
-vendor flasher command. Its environment backend is RAM-only, and bootcount
-persistence is disabled. It does not run mmc write, gpt write, saveenv, or
-fuse commands on entry.
+## Common commands
 
-It reads the current GPT and exposes named partitions that fit the old
-DFU implementation's signed 32-bit length limit. This includes the usual var,
-rootfsA, rootfsB, recovery and services partitions. Large partitions such as
-skills remain accessible through the raw eMMC chunks.
+Inspect a backup and prepare a local edit:
 
-- jibo-dfu-v1: upload-only first 34 sectors, including the primary GPT.
-- emmc-000, emmc-001, ...: consecutive upload-only chunks of the eMMC user
-  area, each at most 1 GiB. The last chunk may be smaller.
-- GPT partition names: partition read/write alternatives, obtained from the
-  actual table, without rewriting that table or assuming a particular OS.
+```sh
+python3 jibo_dfu.py inspect-var ~/Jibo-Backups/var-backup-*/var.img
+python3 jibo_dfu.py edit-mode ~/Jibo-Backups/var-backup-123/var.img --mode developer
+python3 jibo_dfu.py edit-wifi ~/Jibo-Backups/var-backup-123/var.img --ssid 'My Wi-Fi'
+```
 
-The raw chunks do not include eMMC boot0 or boot1. A partition write, if the
-operator later invokes dfu-util -D, is persistent by design. The entry utility
-itself does not perform such a write.
+`edit-mode` and `edit-wifi` create a sibling `*-edited.img` file. The Wi-Fi command asks for its password using a hidden prompt. For an open network, add `--open-network`.
 
-## Coverage and remaining work
+To perform a live change, use the matching command after the robot is in marked DFU mode:
 
-The current bundled candidate uses the locally available signing key and the
-Meerkat rev02 BCT. It has not been proven on a connected robot. Do not describe
-it as universal yet.
+```sh
+python3 jibo_dfu.py set-mode --mode developer
+python3 jibo_dfu.py configure-wifi --ssid 'My Wi-Fi'
+```
 
-Jibo's archive explicitly documents development-fused, production-fused and
-unfused robots. A single application can contain pre-signed loaders for those
-populations. One key does not sign for a different fused key. The archive also
-distinguishes EVT and DVT2 hardware configuration. Coverage still requires
-verified loader artifacts and hardware tests for those populations.
+The Wi-Fi password is requested without echo. Each live command reads the current var image into temporary work space, prepares one edited image, shows the write plan and image hash, then asks you to type `WRITE VAR`. The first live write preparation creates one rollback backup if none exists for that robot. Later writes reuse that baseline instead of saving another persistent 500 MiB copy. Each operation still reads the current image temporarily so it can account for changes since the backup; that temporary dump is removed after a verified success, cancellation, or failure before writing. A failure after a write starts keeps its work files for recovery. You can pass `--confirm 'WRITE VAR'` for scripted use. A write is accepted only for the expected 500 MiB image and the project's recovery marker. After writing, the toolkit uploads var again and checks its SHA-256 against the edited image. It does not reset the robot automatically.
 
-There is no implemented ShofEL-to-DFU fallback in this candidate. The existing
-ShofEL raw eMMC server demonstrates unsigned code execution but is not itself
-a DFU loader. A universal exploit-based route remains a separate engineering
-task if matching signed loaders cannot cover the intended robots.
+To write an image prepared earlier, use:
 
-Remaining acceptance work:
+```sh
+python3 jibo_dfu.py write-var /path/to/var-edited.img
+```
 
-1. Observe RCM-to-DFU on a robot matching the current bundle's key/BCT.
-2. Upload the marker and var; confirm sizes and repeat-read hashes.
-3. Compare boot0, boot1/environment and GPT before/after entry using an
-   independent read method to verify preservation on hardware.
-4. Establish which factory population the available key matches and obtain
-   compatible entry artifacts for the other population, or implement the
-   exploit-based DFU loader.
-5. Test board revisions and package automatic profile selection based on
-   evidence available before loading the BCT. Do not blindly cycle BCTs.
+This also reuses the saved rollback backup, creating one only if needed. Successful operation directories keep a small manifest and remove the temporary full-size images; transfer or readback failures preserve the work files for recovery.
 
-## Build and signing
+## Entering recovery
 
-scripts/build_loader.py copies a local Jibo U-Boot source tree to a new build
-directory, validates the relevant baseline source hashes, applies entry.patch,
-and builds using the archived Buildroot host toolchain. It never modifies the
-source directory. It supports the locally available audit tree by removing
-that diagnostic patch in its private build copy.
+The tool cannot turn on a disconnected or powered-off robot. Use the robot's recovery/reset controls to make it appear as RCM/APX, then run:
 
-~~~sh
-python3 scripts/build_loader.py --source /path/to/uboot-master \
-  --host /path/to/output/host --out .build/recovery
-python3 scripts/sign_bundle.py --loader .build/recovery/u-boot-dtb-tegra.bin \
-  --bct /path/to/compatible-flasher.bct --key /external/private-key.pem \
-  --tegrarcm /path/to/tegrarcm --mkbctpart /path/to/mkbctpart \
-  --profile meerkat-rev02-key-profile --out bundles/default
-~~~
+```sh
+python3 jibo_dfu.py enter --allow-untested
+```
 
-The base BCT needs the compatible populated bootloader descriptor, as in the
-known signed-flasher BCT. A BCT without that descriptor is rejected. Signing
-checks the output descriptor, verifies both stored RSA-PSS signatures, and
-generates the pre-signed RCM message set entirely offline. Temporary private
-key conversion is removed after signing; the output contains only five
-public artifacts and a manifest. Manifest hashes detect accidental corruption;
-they are not an independent publisher authenticity signature.
+`--allow-untested` is required because this recovery candidate has not been tried on real hardware. The loader is designed to run from RAM and avoid persistent writes on entry, but that design claim still needs independent hardware validation before anyone should rely on it. If multiple robots are connected, select one with `--port`, for example `--port 1-2`.
 
-~~~sh
+For source use, the host needs Python 3.8+, `tegrarcm`, `dfu-util`, and (for image editing) `debugfs` and `e2fsck` from `e2fsprogs`. The single-file Linux x86_64 package under `dist/` bundles the Python application, host tools, and current local recovery bundle. It still needs compatible system libraries for libusb, libudev, Crypto++, libstdc++, and glibc.
+
+## What is still unfinished
+
+- Real-robot testing of RCM entry, var upload, data preservation, write, and readback.
+- Verified bundles for additional Jibo signing populations and board revisions.
+- Version-profiled SSH/firewall changes for both root filesystem slots.
+- Full filesystem backup and the optional ShofEL raw eMMC backup path.
+- Restore/recovery procedures and a clean public release with source and license notices for bundled components.
+
+There is no SSH/firewall patch command or full eMMC dump command yet. The toolkit will not guess at firewall rules or label a set of named filesystem partitions as a complete device backup.
+
+## Package and development
+
+The package builder uses an explicit allowlist and refuses bundled private-key material. Bundle signing is a separate offline developer operation; end users do not need or receive the signing key.
+
+```sh
 python3 scripts/package.py --bundle bundles/default \
   --tegrarcm /path/to/tegrarcm --dfu-util /path/to/dfu-util \
   --libcryptopp /path/to/libcryptopp.so --out dist/jibo-dfu-linux-x86_64.pyz
-python3 -m unittest discover -s tests -v
-~~~
+```
 
-The package builder uses an explicit file allowlist. PROJECT_SPEC.md, source
-build directories, signing scripts, private keys and robot captures are not
-included. PROJECT_SPEC.md is ignored by Git and must never be force-added.
-All work is local; do not push to a remote without the owner's instruction.
-
-## Sources and provenance
-
-Research was performed through the Jibo MCP archive:
-
-- [Original flash-dfu.sh](https://pvindex.org/gitea/PlatformTeam/buildroot.jibo/src/branch/master/board/nvidia/avionic/flash-dfu.sh): explicit support for pre-signed RCM messages, USB port selection, and RCM/DFU IDs.
-- [Fused vs. Un-fused robots](https://pvindex.org/confluence/display/ENG/Fused+vs.+Un-fused+robots): development and production signing populations.
-- [Single-step flash system](https://pvindex.org/confluence/display/ENG/Building+a+single+step+flash+system+for+Jibo): EVT versus DVT2 configuration.
-- [Partition and filesystem scheme](https://pvindex.org/confluence/display/ENG/Embedded+Platform+Partition+and+File+System+Scheme): GPT and dfu_alt_info relationship.
-- [Jibo U-Boot source](https://pvindex.org/gitea/PlatformTeam/uboot.jibo): recovery base.
-
-This source project was created independently of Jibo AutoMod. Firmware changes
-target GPL-licensed U-Boot. The local package is an engineering candidate;
-before public binary distribution, provide corresponding source and notices
-for U-Boot and the bundled host components. No redistribution of a private
-signing key is required.
+The local bundle contains signed artifacts for one candidate profile and is ignored by Git. `PROJECT_SPEC.md` is a local planning document and must remain uncommitted. Never add real robot captures, backups, Wi-Fi configuration, identity data, private keys, or generated build files to source control. Do not push this repository to a remote without the owner's explicit instruction.

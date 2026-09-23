@@ -27,7 +27,8 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     args = parser.parse_args()
     load_bundle(args.bundle)
-    selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "README.md": ROOT / "README.md",
+    selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "jibo_images.py": ROOT / "jibo_images.py",
+                "README.md": ROOT / "README.md",
                 "tools/tegrarcm": args.tegrarcm, "tools/dfu-util": args.dfu_util,
                 "lib/libcryptopp.so": args.libcryptopp}
     selected.update({"bundles/default/" + name: args.bundle / name for name in (*FILES, "manifest.json")})
