@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import shutil
@@ -81,8 +82,11 @@ class UpdatePackageTests(unittest.TestCase):
             def transfer(argv, timeout, label):
                 transfers.append(argv)
 
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"]
+            alt_output = '\n'.join('Found DFU: alt={}, name="{}"'.format(index, name)
+                                   for index, name in enumerate(names))
             with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
-                    patch.object(toolkit, "_dfu_context", return_value=("1-1", ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"], "device")), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", names, "device", alt_output)), \
                     patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
                     patch.object(toolkit, "_new_operation_dir", return_value=operation), \
                     patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
@@ -99,6 +103,123 @@ class UpdatePackageTests(unittest.TestCase):
             self.assertEqual(backup.call_count, 4)
             self.assertEqual(upload.call_count, 4)
             self.assertEqual(result["status"], "verified; reset requested")
+
+    def test_chunked_skills_update_validates_and_transfers_exact_gpt_slices(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (images_dir / filename).write_bytes(b"package placeholder")
+            rootfs = root / "rootfs.prepared"
+            services = root / "services.prepared"
+            skills = root / "skills.prepared"
+            rootfs.write_bytes(b"root")
+            services.write_bytes(b"serv")
+            skills_payload = bytes(range(256)) * 10
+            skills.write_bytes(skills_payload)
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = {"rootfsA": 4, "rootfsB": 4, "services": 4,
+                          "var": toolkit.EXPECTED_VAR_SIZE, "skills": len(skills_payload)}
+            chunk_names = ("skills-000", "skills-001", "skills-002")
+            names = ["rootfsA", "rootfsB", "services", "var", "emmc-000", *chunk_names]
+            # Standard dfu-util -l output identifies alternatives but has no
+            # size field; chunk coverage is derived from the live GPT table.
+            alt_output = '\n'.join(
+                'Found DFU: alt={}, name="{}"'.format(index, name)
+                for index, name in enumerate(names))
+            prepared = {"rootfsA": rootfs, "rootfsB": rootfs,
+                        "services": services, "skills": skills}
+            written = {}
+
+            def transfer(argv, timeout, label):
+                if "-D" in argv:
+                    alternative = argv[argv.index("-a") + 1]
+                    written[alternative] = Path(argv[argv.index("-D") + 1]).read_bytes()
+
+            def upload(_dfu_util, _port, alternative, size, destination):
+                payload = written[alternative]
+                if len(payload) != size:
+                    raise AssertionError("{} transferred {} bytes; expected {}".format(
+                        alternative, len(payload), size))
+                Path(destination).write_bytes(payload)
+                return hashlib.sha256(payload).hexdigest()
+
+            with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024), \
+                    patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context",
+                                 return_value=("1-1", names, "device", alt_output)), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
+                    patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
+                    patch.object(toolkit, "_backup_skills_partition_once",
+                                 return_value={"image": "saved-skills.img"}) as skills_backup, \
+                    patch.object(toolkit.updates, "prepare_images", return_value=prepared), \
+                    patch.object(toolkit, "_upload_partition", side_effect=upload), \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", return_value=""):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = toolkit.flash_update(root / "release", True, port="1-1",
+                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE")
+
+            self.assertEqual(skills_backup.call_count, 1)
+            self.assertEqual(backup.call_count, 3)
+            self.assertEqual([written[name] for name in chunk_names],
+                             [skills_payload[:1024], skills_payload[1024:2048], skills_payload[2048:]])
+            self.assertEqual(result["status"], "verified; reset requested")
+            manifest = json.loads((operation / "update-manifest.json").read_text())
+            skills_write = next(item for item in manifest["writes"] if item["partition"] == "skills")
+            self.assertEqual([item["alternative"] for item in skills_write["chunks"]], list(chunk_names))
+            self.assertTrue(all(item["status"] == "verified" for item in skills_write["chunks"]))
+
+    def test_skills_chunk_map_must_match_gpt_capacity_and_reported_sizes(self):
+        with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024):
+            chunks = toolkit._validate_skills_chunk_alternatives(
+                2560, ["skills-000", "skills-001", "skills-002"],
+                'Found DFU: name="skills-000"\n'
+                'Found DFU: name="skills-001"\n'
+                'Found DFU: name="skills-002"')
+            self.assertEqual([item["size_bytes"] for item in chunks], [1024, 1024, 512])
+            with self.assertRaisesRegex(toolkit.DfuError, "missing skills-001"):
+                toolkit._validate_skills_chunk_alternatives(
+                    2560, ["skills-000", "skills-002"],
+                    'Found DFU: name="skills-000", size=1024\n'
+                    'Found DFU: name="skills-002", size=512')
+            with self.assertRaisesRegex(toolkit.DfuError, "GPT requires 1024 bytes"):
+                toolkit._validate_skills_chunk_alternatives(
+                    2560, ["skills-000", "skills-001", "skills-002"],
+                    'Found DFU: name="skills-000", size=1024\n'
+                    'Found DFU: name="skills-001", size=512\n'
+                    'Found DFU: name="skills-002", size=512')
+
+    def test_skills_backup_assembles_exact_original_partition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = bytes(range(256)) * 10
+            pieces = {"skills-000": payload[:1024],
+                      "skills-001": payload[1024:2048],
+                      "skills-002": payload[2048:]}
+            with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024):
+                chunks = toolkit._expected_skills_chunks(len(payload))
+
+            def upload(_tool, _port, alternative, size, destination):
+                data = pieces[alternative]
+                self.assertEqual(len(data), size)
+                Path(destination).write_bytes(data)
+                return hashlib.sha256(data).hexdigest()
+
+            destination = root / "original-skills.img"
+            with patch.object(toolkit, "_upload_partition", side_effect=upload) as transfer:
+                with redirect_stdout(io.StringIO()):
+                    result = toolkit._upload_skills_partition(
+                        "dfu-util", "1-1", len(payload), chunks,
+                        destination=destination, workdir=root)
+            self.assertEqual(transfer.call_count, 3)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(result["sha256"], hashlib.sha256(payload).hexdigest())
+            self.assertEqual([entry["alternative"] for entry in result["chunks"]], list(pieces))
 
     def test_parse_dfu_capacities_only_accepts_explicit_byte_sizes(self):
         output = ('Found DFU: alt=1, name="rootfsA", size=1048576000\n'

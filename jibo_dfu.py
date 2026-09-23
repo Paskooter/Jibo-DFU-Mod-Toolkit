@@ -29,6 +29,9 @@ EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
 UPDATE_CONFIRMATION = "FLASH UPDATE"
 UPDATE_ORDER = ("rootfsA", "rootfsB", "services", "skills", "var")
+SKILLS_SECTOR_SIZE = 512
+SKILLS_CHUNK_SECTORS = 0x200000
+SKILLS_CHUNK_BYTES = SKILLS_SECTOR_SIZE * SKILLS_CHUNK_SECTORS
 
 
 def _invoking_user():
@@ -313,7 +316,7 @@ def _sha256_file(path):
     return images.sha256_file(path)
 
 
-def _dfu_context(port, dfu_util):
+def _dfu_context(port, dfu_util, include_output=False):
     selected = select_device(devices(), port)
     if selected is None:
         raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
@@ -339,7 +342,8 @@ def _dfu_context(port, dfu_util):
         device_tag = "serial-sha256:" + hashlib.sha256(serial.group(1).strip().encode("utf-8")).hexdigest()
     else:
         device_tag = "usb-port:" + selected["port"]
-    return selected["port"], names, device_tag
+    context = (selected["port"], names, device_tag)
+    return context + (output,) if include_output else context
 
 
 def _upload_var(dfu_util, port, destination):
@@ -445,6 +449,239 @@ def _read_gpt_capacities(dfu_util, port, names):
             return updates.parse_gpt_prefix(prefix.read_bytes())
         except (OSError, updates.UpdateError) as exc:
             raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
+
+
+def _expected_skills_chunks(capacity):
+    """Return the exact byte ranges for the loader's GPT-bounded skills alternatives."""
+    try:
+        capacity = int(capacity)
+    except (TypeError, ValueError) as exc:
+        raise DfuError("The GPT skills capacity is invalid.") from exc
+    if capacity <= 0 or capacity % SKILLS_SECTOR_SIZE:
+        raise DfuError("The GPT skills capacity is not a positive whole number of sectors.")
+    count = (capacity + SKILLS_CHUNK_BYTES - 1) // SKILLS_CHUNK_BYTES
+    chunks = []
+    for index in range(count):
+        offset = index * SKILLS_CHUNK_BYTES
+        chunks.append({"name": "skills-{:03d}".format(index),
+                       "offset_bytes": offset,
+                       "size_bytes": min(SKILLS_CHUNK_BYTES, capacity - offset)})
+    return chunks
+
+
+def _dfu_alt_sizes(output):
+    sizes = {}
+    for line in output.splitlines():
+        name = re.search(r'\bname\s*=\s*"([^"]+)"', line)
+        size = re.search(r"\bsize\s*=\s*(\d+)", line)
+        if name and size:
+            sizes[name.group(1)] = int(size.group(1))
+    return sizes
+
+
+def _validate_skills_chunk_alternatives(capacity, names, output):
+    """Require a complete, GPT-sized skills chunk map before an update can start."""
+    found = [name for name in names if name.startswith("skills-")]
+    if not found:
+        return None
+    if "skills" in names:
+        raise DfuError("The DFU loader lists both a full skills alternative and skills chunks.")
+    expected = _expected_skills_chunks(capacity)
+    expected_names = [chunk["name"] for chunk in expected]
+    if len(found) != len(set(found)) or set(found) != set(expected_names):
+        missing = sorted(set(expected_names) - set(found))
+        unexpected = sorted(set(found) - set(expected_names))
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        raise DfuError("The skills chunk alternatives do not match the GPT skills capacity: " +
+                       "; ".join(details) + ".")
+    # dfu-util's standard -l output does not report raw-alternative capacities.
+    # The loader binds each writable alias to an exact GPT slice; when a build
+    # does report sizes, use them as an additional consistency check.
+    sizes = _dfu_alt_sizes(output)
+    for chunk in expected:
+        reported = sizes.get(chunk["name"])
+        if reported is not None and reported != chunk["size_bytes"]:
+            raise DfuError("The DFU loader reports {} bytes for {}; GPT requires {} bytes.".format(
+                reported, chunk["name"], chunk["size_bytes"]))
+    return expected
+
+
+def _copy_exact(source, destination, size, digest=None):
+    """Copy exactly size bytes from source to a binary destination and update digest."""
+    remaining = size
+    while remaining:
+        block = source.read(min(1024 * 1024, remaining))
+        if not block:
+            raise DfuError("A partition image ended before its expected byte range.")
+        destination.write(block)
+        if digest is not None:
+            digest.update(block)
+        remaining -= len(block)
+
+
+def _copy_file_slice(source_path, offset, size, destination_path):
+    source_path = Path(source_path)
+    destination_path = Path(destination_path)
+    if source_path.is_symlink() or not source_path.is_file():
+        raise DfuError("Prepared skills image is missing or is a symbolic link.")
+    if offset < 0 or size <= 0 or offset + size > source_path.stat().st_size:
+        raise DfuError("A skills chunk range falls outside the prepared image.")
+    digest = hashlib.sha256()
+    try:
+        with source_path.open("rb") as source, destination_path.open("wb") as destination:
+            source.seek(offset)
+            _copy_exact(source, destination, size, digest)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if destination_path.stat().st_size != size:
+            raise DfuError("A prepared skills chunk has an unexpected byte length.")
+    except (DfuError, OSError):
+        destination_path.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest()
+
+
+def _upload_skills_partition(dfu_util, port, capacity, chunks, destination=None,
+                             workdir=None):
+    """Read bounded skills alternatives and optionally assemble one partition image."""
+    destination = Path(destination) if destination is not None else None
+    if destination is not None:
+        destination.unlink(missing_ok=True)
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    workdir = Path(workdir or (destination.parent if destination else tempfile.gettempdir()))
+    workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    whole_hash = hashlib.sha256()
+    chunk_records = []
+    try:
+        output_stream = destination.open("w+b") if destination is not None else None
+        try:
+            if output_stream is not None:
+                output_stream.truncate(capacity)
+            with tempfile.TemporaryDirectory(prefix="skills-chunk-", dir=workdir) as temporary:
+                chunk_path = Path(temporary) / "partition.img"
+                for index, chunk in enumerate(chunks, 1):
+                    chunk_hash = _upload_partition(dfu_util, port, chunk["name"],
+                                                   chunk["size_bytes"], chunk_path)
+                    with chunk_path.open("rb") as source:
+                        if output_stream is not None:
+                            output_stream.seek(chunk["offset_bytes"])
+                            _copy_exact(source, output_stream, chunk["size_bytes"], whole_hash)
+                        else:
+                            _copy_exact(source, _NullWriter(), chunk["size_bytes"], whole_hash)
+                    chunk_records.append({"alternative": chunk["name"],
+                                          "offset_bytes": chunk["offset_bytes"],
+                                          "size_bytes": chunk["size_bytes"],
+                                          "sha256": chunk_hash,
+                                          "status": "read"})
+                    print("Read skills chunk {}/{} ({}).".format(index, len(chunks), chunk["name"]))
+            if output_stream is not None:
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+        finally:
+            if output_stream is not None:
+                output_stream.close()
+        if destination is not None:
+            if destination.stat().st_size != capacity:
+                raise DfuError("The assembled skills backup has an unexpected byte length.")
+            destination.chmod(0o600)
+            _chown_to_invoking_user(destination)
+        return {"sha256": whole_hash.hexdigest(), "chunks": chunk_records}
+    except (DfuError, OSError):
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+class _NullWriter:
+    def write(self, data):
+        return len(data)
+
+
+def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks):
+    existing = _find_partition_backup(device_tag, "skills", capacity)
+    if existing:
+        return existing
+    if shutil.disk_usage(BACKUP_ROOT.parent).free < capacity + SKILLS_CHUNK_BYTES:
+        raise DfuError("Not enough free space to save the original skills partition.")
+    directory = _new_operation_dir(prefix="partition-backup")
+    image = directory / "partition.img"
+    try:
+        uploaded = _upload_skills_partition(dfu_util, port, capacity, chunks,
+                                            destination=image, workdir=directory)
+        manifest = directory / "backup-manifest.json"
+        _private_write(manifest, {"schema": 1, "kind": "jibo-partition-backup",
+                                  "created_utc": _utc_now(), "device_tag": device_tag,
+                                  "usb_port": port, "partition": "skills",
+                                  "size_bytes": capacity, "sha256": uploaded["sha256"],
+                                  "image": image.name, "chunks": uploaded["chunks"]})
+        return {"image": str(image), "sha256": uploaded["sha256"],
+                "manifest": str(manifest), "status": "backup complete"}
+    except (DfuError, OSError):
+        image.unlink(missing_ok=True)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
+                         operation_directory, record_path, record, write_entry):
+    candidate = Path(candidate)
+    if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size != capacity:
+        raise DfuError("The prepared skills image does not match the GPT partition size.")
+    candidate_hash = _sha256_file(candidate)
+    readback_hash = hashlib.sha256()
+    write_entry["chunks"] = []
+    write_entry["status"] = "writing bounded skills chunks"
+    _private_write(record_path, record)
+    try:
+        with tempfile.TemporaryDirectory(prefix="skills-write-", dir=operation_directory) as temporary:
+            temporary = Path(temporary)
+            for index, chunk in enumerate(chunks, 1):
+                candidate_piece = temporary / "candidate.img"
+                expected_hash = _copy_file_slice(candidate, chunk["offset_bytes"],
+                                                 chunk["size_bytes"], candidate_piece)
+                chunk_record = {"alternative": chunk["name"],
+                                "offset_bytes": chunk["offset_bytes"],
+                                "size_bytes": chunk["size_bytes"],
+                                "candidate_sha256": expected_hash,
+                                "status": "write started"}
+                write_entry["chunks"].append(chunk_record)
+                _private_write(record_path, record)
+                run_with_progress(
+                    [dfu_util, "-d", "0955:701a", "--path", port,
+                     "-a", chunk["name"], "-D", str(candidate_piece)],
+                    timeout=14400,
+                    label="Writing skills chunk {}/{} ({})".format(
+                        index, len(chunks), chunk["name"]))
+                readback = temporary / "readback.img"
+                actual_hash = _upload_partition(dfu_util, port, chunk["name"],
+                                                chunk["size_bytes"], readback)
+                chunk_record["readback_sha256"] = actual_hash
+                if actual_hash != expected_hash:
+                    chunk_record["status"] = "readback mismatch"
+                    _private_write(record_path, record)
+                    raise DfuError("{} did not match its readback. DFU was left active; use the saved backups.".format(
+                        chunk["name"]))
+                with readback.open("rb") as stream:
+                    _copy_exact(stream, _NullWriter(), chunk["size_bytes"], readback_hash)
+                chunk_record["status"] = "verified"
+                _private_write(record_path, record)
+        if readback_hash.hexdigest() != candidate_hash:
+            raise DfuError("The assembled skills readback did not match the prepared image.")
+        write_entry["readback_sha256"] = readback_hash.hexdigest()
+        write_entry["status"] = "verified"
+        _private_write(record_path, record)
+        return candidate_hash
+    except (DfuError, OSError):
+        write_entry["status"] = "failed"
+        _private_write(record_path, record)
+        raise
 
 
 def _update_candidates(folder):
@@ -601,7 +838,12 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
             "operation_directory": str(directory), "profile": record["profile"]}
 
 
-def _confirm_write(supplied=None):
+def _confirm_write(supplied=None, plan=None):
+    if callable(supplied):
+        try:
+            return bool(supplied(plan))
+        except Exception as exc:
+            raise DfuError("The write confirmation screen could not be completed: " + str(exc)) from exc
     if supplied is not None:
         if supplied != WRITE_CONFIRMATION:
             raise DfuError("For a write, --confirm must be exactly 'WRITE VAR'.")
@@ -657,7 +899,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     print("Edited image SHA-256: " + candidate_hash)
     print("A successful write will be read back and compared. The robot will not be reset.")
     try:
-        confirmed = _confirm_write(confirmation)
+        confirmed = _confirm_write(confirmation, record)
     except DfuError:
         record["status"] = "confirmation rejected"
         _private_write(record_path, record)
@@ -742,16 +984,24 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 "Load the matching recovery bundle into RAM before examining the flash plan?", "ENTER RCM"):
             return {"status": "cancelled", "message": "Recovery was not loaded; no update was attempted."}
         enter(recovery_bundle, selected["port"], tegrarcm or tool("tegrarcm"), dfu_util)
-    port, names, device_tag = _dfu_context(selected["port"], dfu_util)
+    port, names, device_tag, alt_output = _dfu_context(
+        selected["port"], dfu_util, include_output=True)
     partitions = [name for name in UPDATE_ORDER if name != "var" or not preserve_var]
-    missing = [name for name in partitions if name not in names]
+    skills_aliases = [name for name in names if name.startswith("skills-")]
+    if "skills" not in names and not skills_aliases:
+        raise DfuError("This DFU loader does not expose the skills partition or its bounded skills-### alternatives.")
+    missing = [name for name in partitions if name != "skills" and name not in names]
     if missing:
         raise DfuError("This DFU profile does not expose the required partitions: " + ", ".join(missing))
     capacities = _read_gpt_capacities(dfu_util, port, names)
+    skills_chunks = _validate_skills_chunk_alternatives(
+        capacities["skills"], names, alt_output)
     plan = {"package": str(package.source), "version": package.version,
             "usb_port": port, "var_policy": "preserve current configuration" if preserve_var else
             "replace with package var image (fresh setup and lost local settings)",
             "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
+            "skills_transfer": ("{} GPT-bounded DFU chunks".format(len(skills_chunks))
+                                if skills_chunks else "single named DFU alternative"),
             "status": "plan only" if dry_run else "awaiting confirmation"}
     if dry_run:
         return plan
@@ -760,7 +1010,10 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     print("This writes the listed partitions, verifies each by a full USB readback, then requests a reset.")
     print("A preserved var keeps its current mode, identity, network settings, and first-boot resize marker.")
     print("A fresh var replaces those settings with the package image; a rollback backup is saved first.")
-    if confirmation is None:
+    if callable(confirmation):
+        if not confirmation(plan):
+            return {**plan, "status": "cancelled"}
+    elif confirmation is None:
         if not _ask_confirmation("Flash this package?", UPDATE_CONFIRMATION):
             return {**plan, "status": "cancelled"}
     elif confirmation != UPDATE_CONFIRMATION:
@@ -785,8 +1038,12 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             for name in partitions:
                 if name == "var":
                     continue
-                record["backups"][name] = _backup_partition_once(
-                    dfu_util, port, device_tag, name, capacities[name])
+                if name == "skills" and skills_chunks:
+                    record["backups"][name] = _backup_skills_partition_once(
+                        dfu_util, port, device_tag, capacities[name], skills_chunks)
+                else:
+                    record["backups"][name] = _backup_partition_once(
+                        dfu_util, port, device_tag, name, capacities[name])
                 _private_write(record_path, record)
             for name in partitions:
                 candidate = prepared[name]
@@ -796,13 +1053,18 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 record["writes"].append(entry)
                 record["status"] = "writing"
                 _private_write(record_path, record)
-                run_with_progress(
-                    [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
-                     "-D", str(candidate)], timeout=14400,
-                    label="Writing {} ({} bytes)".format(name, capacities[name]))
-                with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
-                    readback = Path(readback_dir) / "partition.img"
-                    actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
+                if name == "skills" and skills_chunks:
+                    actual = _write_skills_chunks(
+                        dfu_util, port, candidate, capacities[name], skills_chunks,
+                        directory, record_path, record, entry)
+                else:
+                    run_with_progress(
+                        [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
+                         "-D", str(candidate)], timeout=14400,
+                        label="Writing {} ({} bytes)".format(name, capacities[name]))
+                    with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
+                        readback = Path(readback_dir) / "partition.img"
+                        actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
                 entry["readback_sha256"] = actual
                 if actual != digest:
                     entry["status"] = "verification failed"
@@ -895,12 +1157,6 @@ def _default_edit_path(image):
     return image.with_name(image.stem + "-edited" + (image.suffix or ".img"))
 
 
-def _read_password_interactively(open_network=False):
-    if open_network:
-        return None
-    return getpass.getpass("Wi-Fi password (hidden): ")
-
-
 def _display_devices():
     found = devices()
     if not found:
@@ -919,169 +1175,6 @@ def _display_devices():
 def _ask_confirmation(prompt, phrase=WRITE_CONFIRMATION):
     print(prompt)
     return input("Type " + phrase + " to continue: ").strip() == phrase
-
-
-def _interactive_inspect():
-    path = input("Path to var backup image: ").strip()
-    result = images.inspect_var(path)
-    print("Mode: " + result["mode"])
-    if result["wifi_configured"]:
-        print("Wi-Fi config: present (" + str(result["wifi_network_count"]) + " saved network(s); details hidden)")
-    else:
-        print("Wi-Fi config: not present")
-
-
-def _interactive_edit_mode():
-    source = input("Path to var backup image: ").strip()
-    print("normal: standard use; developer: selected development services;")
-    print("int-developer: broader internal development mode; oobe: setup/onboarding.")
-    print("Mode options: 1 normal, 2 developer, 3 int-developer, 4 oobe")
-    choice = input("Choose a mode: ").strip()
-    modes = {"1": "normal", "2": "developer", "3": "int-developer", "4": "oobe"}
-    if choice not in modes:
-        print("Cancelled.")
-        return
-    mode = modes[choice]
-    result = images.edit_mode(source, _default_edit_path(source), mode)
-    print("Created " + result["image"])
-    print("Mode: " + result["previous_mode"] + " → " + mode)
-    print("This only edits a local image. Use Write an edited var image to transfer it.")
-
-
-def _interactive_edit_wifi():
-    source = input("Path to var backup image: ").strip()
-    ssid = input("Wi-Fi network name (SSID): ")
-    kind = input("Network type: [1] protected WPA/WPA2  [2] open: ").strip()
-    if kind not in ("1", "2"):
-        print("Cancelled.")
-        return
-    open_network = kind == "2"
-    password = _read_password_interactively(open_network)
-    result = images.edit_wifi(source, _default_edit_path(source), ssid, password, open_network)
-    print("Created " + result["image"])
-    print("Added one Wi-Fi network. Password and network details were not displayed.")
-    print("Existing saved networks were preserved.")
-    password = None
-
-
-def interactive():
-    print("Jibo DFU Mod Toolkit")
-    print("Backups and image edits stay on this computer. One rollback backup is reused for each robot; temporary dumps are cleaned up.")
-    while True:
-        print("\nCurrent USB state:")
-        _display_devices()
-        print("\n  1  Back up var (read only; reuses a saved backup when available)")
-        print("  2  Inspect a var backup")
-        print("  3  Set mode on a connected robot (review, confirm, verify)")
-        print("  4  Configure Wi-Fi on a connected robot (review, confirm, verify)")
-        print("  5  Edit a backup image offline")
-        print("  6  Write an edited var image (backup, write, readback)")
-        print("  7  Confirm DFU or enter recovery")
-        print("  8  Install an official full-flash update package")
-        print("  9  About this toolkit")
-        print("  q  Quit")
-        choice = input("Choose an option: ").strip().lower()
-        try:
-            if choice == "1":
-                print(json.dumps(backup_var(), indent=2))
-            elif choice == "2":
-                _interactive_inspect()
-            elif choice == "3":
-                print("Reads the current 500 MiB var image first; transfer progress is shown.")
-                print("The robot is written only after you review the plan and type WRITE VAR.")
-                print("Developer modes expose more system access. Choose int-developer only if you need its broader behavior.")
-                print("normal = standard use; developer = selected services; int-developer = broader internal mode; oobe = setup.")
-                print("  1 normal  2 developer  3 int-developer  4 oobe")
-                modes = {"1": "normal", "2": "developer", "3": "int-developer", "4": "oobe"}
-                selected = input("Choose a mode: ").strip()
-                if selected in modes:
-                    result = set_mode_live(modes[selected], confirmation=None)
-                    print(json.dumps(result, indent=2))
-                else:
-                    print("Cancelled.")
-            elif choice == "4":
-                ssid = input("Wi-Fi network name (SSID): ")
-                kind = input("Network type: [1] protected WPA/WPA2  [2] open: ").strip()
-                if kind not in ("1", "2"):
-                    print("Cancelled.")
-                    continue
-                is_open = kind == "2"
-                password = _read_password_interactively(is_open)
-                result = configure_wifi_live(ssid, password, is_open)
-                password = None
-                print(json.dumps(result, indent=2))
-            elif choice == "5":
-                print("  1 change mode  2 add Wi-Fi network  3 inspect image")
-                subchoice = input("Choose an offline edit: ").strip()
-                if subchoice == "1":
-                    _interactive_edit_mode()
-                elif subchoice == "2":
-                    _interactive_edit_wifi()
-                elif subchoice == "3":
-                    _interactive_inspect()
-                else:
-                    print("Cancelled.")
-            elif choice == "6":
-                path = input("Path to edited 500 MiB var image: ").strip()
-                print("An existing rollback backup is reused, or one is created if needed. Temporary images are removed after a verified write.")
-                print(json.dumps(write_var(path), indent=2))
-            elif choice == "7":
-                device = select_device(devices())
-                if device is None:
-                    raise DfuError("No Jibo RCM/DFU device detected.")
-                dfu_util = tool("dfu-util")
-                bundle = ROOT / "bundles" / "default"
-                if device["state"] == "dfu":
-                    result = enter(bundle, device["port"], "tegrarcm", dfu_util)
-                else:
-                    if not (bundle / "manifest.json").is_file():
-                        raise DfuError("This GitHub source checkout does not include the signed recovery bundle "
-                                       "or tegrarcm tool needed to enter DFU from RCM. Obtain the matching "
-                                       "owner-provided files and place the bundle in bundles/default/. "
-                                       "If the robot is already in DFU, use options 1–6.")
-                    manifest = load_bundle(bundle)
-                    profile = manifest.get("profile", "unknown profile")
-                    print("Recovery profile: " + profile + ".")
-                    print("Confirm that this profile matches the connected robot.")
-                    if not _ask_confirmation("Load recovery into RAM and wait for DFU?", "ENTER RCM"):
-                        print("Cancelled.")
-                        continue
-                    tegrarcm = tool("tegrarcm")
-                    result = enter(bundle, device["port"], tegrarcm, dfu_util,
-                                   allow_unverified_profile=True)
-                print(json.dumps(result, indent=2))
-            elif choice == "8":
-                folder = Path.cwd() / "updates"
-                packages = _update_candidates(folder)
-                if not packages:
-                    print("No full-flash packages found in " + str(folder))
-                    print("Place a jibo-pvt-flash-build*.tar.bz2 archive or its extracted folder there.")
-                    continue
-                print("\nOfficial full-flash packages in " + str(folder) + ":")
-                for index, package in enumerate(packages, 1):
-                    print("  {}  {}".format(index, package.name))
-                selection = input("Choose a package number (or Enter to cancel): ").strip()
-                if not selection.isdigit() or not 1 <= int(selection) <= len(packages):
-                    print("Cancelled.")
-                    continue
-                print("  1  Preserve current var: keep identity, mode, Wi-Fi, and user configuration")
-                print("  2  Fresh var: replace it with the package image for out-of-box setup")
-                policy = input("Choose var handling: ").strip()
-                if policy not in ("1", "2"):
-                    print("Cancelled.")
-                    continue
-                print(json.dumps(flash_update(packages[int(selection) - 1],
-                                              preserve_var=policy == "1"), indent=2))
-            elif choice == "9":
-                print("Connect a Jibo in RCM, enter DFU, then back up or edit var and install full-flash packages.")
-                print("Offline image inspection and editing work without a connected robot.")
-            elif choice in ("q", "quit", "exit"):
-                return 0
-            else:
-                print("Choose one of the listed numbers, or q to quit.")
-        except (DfuError, images.ImageError, updates.UpdateError, OSError, ValueError) as exc:
-            print("\n" + str(exc), file=sys.stderr)
-    return 0
 
 
 def _add_device_arguments(parser):
@@ -1103,7 +1196,11 @@ def _add_confirmation_argument(parser):
 def _launch_menu():
     import jibo_tui
     result = jibo_tui.run(sys.modules[__name__])
-    return interactive() if result is None else result
+    if result is None:
+        print("The guided menu needs an interactive terminal. Use a CLI subcommand when running without one.",
+              file=sys.stderr)
+        return 2
+    return result
 
 
 def main(argv=None):
