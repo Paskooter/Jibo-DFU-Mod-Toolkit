@@ -1,6 +1,6 @@
 # Jibo DFU Mod Toolkit
 
-This is a Linux tool for Jibo owners. Its normal interface is a guided numbered menu in the terminal. You do **not** need to build or use a `.pyz` package: run the Python file directly.
+This is a Linux tool for Jibo owners. Its normal interface is a guided terminal screen. You do **not** need to build or use a `.pyz` package: run the Python file directly.
 
 ## Start from GitHub
 
@@ -26,32 +26,30 @@ Start the guided menu:
 python3 jibo_dfu.py
 ```
 
-This opens the menu in the terminal; it is not a separate desktop window. Try it before connecting a robot to see the options. If Linux later reports a USB permission error, run `sudo python3 jibo_dfu.py`. Backups still go to the home directory of the user who launched it.
+This opens the terminal interface; it is not a separate desktop window. Use **↑/↓** to choose an action, **Enter** to open it, **r** to refresh USB status, and **q** to quit. Actions that need DFU appear dimmed until the robot is ready; selecting one shows why it is unavailable. If Linux reports a USB permission error, run `sudo python3 jibo_dfu.py`. Backups still go to the home directory of the user who launched it.
 
 ## Get the robot ready
 
-The menu shows whether USB sees the robot in `RCM/APX` or `DFU` mode.
+The screen leads through **connect → RCM/APX → DFU → choose an action**. RCM/APX is the robot's USB recovery entry state. The toolkit loads the matching recovery program into RAM to make DFU available; only DFU exposes the partition actions.
 
 - In **DFU**, with this project's recovery loader showing its Jibo marker, the menu can read or edit `var` and install supported full-flash packages. `dfu-util` is required.
-- In **RCM/APX**, the robot has no partition access yet. Option 7 can load the RAM-only recovery program, but a source clone does not include the signed recovery bundle or the `tegrarcm` host tool. The owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile. If the robot is already in DFU, the missing bundle is not needed for the partition workflows.
+- In **RCM/APX**, the robot has no partition access yet. Choose **Enter DFU from RCM/APX**, the first action. A source clone does not include the signed recovery bundle or the `tegrarcm` host tool. The owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile. If the robot is already in DFU, the missing bundle is not needed for the partition workflows.
 
 The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
 
-## Use the menu
+## Use the terminal interface
 
-Choose a number at `Choose an option:`. The menu refreshes the USB state each time it returns to the main screen.
+The screen refreshes USB state each time it returns from an action. The first action is available only in RCM/APX. Live partition actions become available when the Jibo DFU loader is detected. Local image actions remain available without a robot. If the program is run without an interactive terminal, it falls back to numbered prompts.
 
-| Option | What it does |
+| Action | What it does |
 | --- | --- |
-| **1 — Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
-| **2 — Inspect a var backup** | Shows the saved mode and whether Wi-Fi is configured; it hides network details. |
-| **3 — Set mode** | Prepares a mode change, displays the write plan, waits for `WRITE VAR`, then reads the partition back to verify it. |
-| **4 — Configure Wi-Fi** | Adds a network while preserving saved networks, waits for `WRITE VAR`, and verifies by reading back. Password entry is hidden. |
-| **5 — Edit a backup offline** | Makes a new local image for a mode or Wi-Fi change. The robot is not written to. |
-| **6 — Write an edited var image** | Shows the write plan, waits for `WRITE VAR`, and verifies the partition readback. |
-| **7 — Confirm DFU or enter recovery** | Confirms an already-running DFU loader, or enters DFU from RCM if the matching local recovery files are available. |
-| **8 — Install a full-flash update** | Lists packages in `updates/`, asks whether to preserve or replace `var`, saves one original backup per written partition, prepares exact-size images, writes and reads back each partition, then requests a reset. |
-| **9 — About this toolkit** | Explains the RCM-to-DFU workflow and available actions. |
+| **Enter DFU from RCM/APX** | Loads the matching recovery program into RAM; available only while the robot is in RCM/APX. |
+| **Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
+| **Set robot mode** | Prepares a mode change, displays the write plan, waits for `WRITE VAR`, then reads the partition back to verify it. |
+| **Configure Wi-Fi** | Adds a network while preserving saved networks, waits for `WRITE VAR`, and verifies by reading back. Password entry is hidden. |
+| **Install an official update package** | Lists packages in `updates/`, asks whether to preserve or replace `var`, saves one original backup per written partition, prepares exact-size images, writes and reads back each partition, then requests a reset. |
+| **Write an edited var image** | Shows the write plan, waits for `WRITE VAR`, and verifies the partition readback. |
+| **Inspect or edit a local backup** | Works offline. Inspection hides network details; editing creates a separate image. |
 
 The read and write operations show a spinner and elapsed time. A successful mode or Wi-Fi write leaves the robot in DFU; a successful full-flash update requests a reset after verifying every partition.
 
@@ -65,7 +63,7 @@ cp /path/to/jibo-pvt-flash-build-5.4.2-production.tar.bz2 updates/
 sudo python3 jibo_dfu.py
 ```
 
-Choose **8**, select the package number, and choose how to handle `var`. **Preserve var** keeps the robot's identity, current mode, Wi-Fi, and user configuration; if it currently says `oobe`, preserving it also keeps that setting. **Fresh var** writes the package's `var.ext4`, discarding those local settings and returning to the package's initial setup state. The tool saves a rollback copy of the original `var` before either kind of update. It saves one original backup for each other partition it writes and reuses a verified backup on later updates, so it does not create another full backup every time. Backups stay under `~/Jibo-Backups/`; large temporary prepared images and readbacks are removed after the operation. Allow ample free disk space and time for the multi-gigabyte transfers.
+Choose **Install an official update package**, select the package number, and choose how to handle `var`. **Preserve var** keeps the robot's identity, current mode, Wi-Fi, and user configuration; if it currently says `oobe`, preserving it also keeps that setting. **Fresh var** writes the package's `var.ext4`, discarding those local settings and returning to the package's initial setup state. The tool saves a rollback copy of the original `var` before either kind of update. It saves one original backup for each other partition it writes and reuses a verified backup on later updates, so it does not create another full backup every time. Backups stay under `~/Jibo-Backups/`; large temporary prepared images and readbacks are removed after the operation. Allow ample free disk space and time for the multi-gigabyte transfers.
 
 The tool reads the robot's GPT table over DFU and checks the exact partition sizes before preparing images. It expands the ext4 filesystems **on this computer** to those sizes, including the `skills` size reported by that robot. This avoids the manual post-flash resize required by older preserve-var scripts: Jibo's one-time resize marker is stored in `var`, so a preserved `var` may skip that first-boot resize. [Official GPT layout](https://pvindex.org/gitea/PlatformTeam/buildroot.jibo/src/branch/master/board/nvidia/avionic/gpt-table), [first-boot resize script](https://pvindex.org/gitea/PlatformTeam/buildroot.jibo/src/branch/master/board/nvidia/avionic/rootfs_overlay/var/etc/first_boot_resize).
 
@@ -93,4 +91,4 @@ Available now: USB detection, recovery-bundle integrity checks, DFU entry for th
 
 Still being built: SSH/firewall changes, full user-area eMMC backup, ShofEL transport, automatic board-profile selection, and support for additional Jibo hardware populations. Update flashing is not yet hardware-tested, and SSH is not enabled by this tool.
 
-For the guided workflow, use `python3 jibo_dfu.py` and follow the numbered prompts. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.
+For the guided workflow, use `python3 jibo_dfu.py` and follow the terminal screen. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.

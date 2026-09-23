@@ -1,5 +1,6 @@
 import hashlib
 import io
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import shutil
 import struct
@@ -90,8 +91,9 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
                     patch.object(toolkit, "run_with_progress", side_effect=transfer), \
                     patch.object(toolkit, "run", return_value=""):
-                result = toolkit.flash_update(root / "release", True, port="1-1", dfu_util="dfu-util",
-                                              confirmation="FLASH UPDATE")
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = toolkit.flash_update(root / "release", True, port="1-1", dfu_util="dfu-util",
+                                                  confirmation="FLASH UPDATE")
             written = [argv[argv.index("-a") + 1] for argv in transfers if "-D" in argv]
             self.assertEqual(written, ["rootfsA", "rootfsB", "services", "skills"])
             self.assertEqual(backup.call_count, 4)
@@ -187,6 +189,17 @@ class UpdatePackageTests(unittest.TestCase):
                 result = subprocess.run(["e2fsck", "-f", "-n", str(image)],
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            archive_path = root / "jibo-pvt-flash-build-test.tar.bz2"
+            with tarfile.open(archive_path, "w:bz2") as archive:
+                for filename in updates.IMAGE_NAMES:
+                    archive.add(images_dir / filename,
+                                arcname="release/flash_jibo/output/images/" + filename)
+            archived_package = updates.validate_package(archive_path)
+            with patch.dict(updates.KNOWN_CAPACITIES, small_known, clear=True):
+                prepared_archive = updates.prepare_images(archived_package, True, capacities,
+                                                          root / "from-archive")
+            self.assertEqual(prepared_archive["skills"].stat().st_size, capacities["skills"])
+            self.assertNotIn("var", prepared_archive)
 
 
 if __name__ == "__main__":

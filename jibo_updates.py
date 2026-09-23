@@ -417,12 +417,16 @@ def _copy_sparse(source: Path, destination: Path) -> None:
 def _extract_archive_images(package: UpdatePackage, destination: Path) -> dict[str, Path]:
     extracted: dict[str, Path] = {}
     try:
-        with tarfile.open(package.source, mode="r:*") as archive:
-            members_by_name = {member.name: member for member in archive.getmembers()}
-            for filename, member_name in package.archive_members.items():
-                member = members_by_name.get(member_name)
-                if member is None or not member.isfile():
-                    raise UpdateError("Archive image changed since validation: " + member_name)
+        # Stream through compressed tar once. Random extraction from a .bz2
+        # tar repeatedly decompresses earlier members and can take minutes.
+        requested = {member_name: filename for filename, member_name in package.archive_members.items()}
+        with tarfile.open(package.source, mode="r|*") as archive:
+            for member in archive:
+                filename = requested.get(member.name)
+                if filename is None:
+                    continue
+                if filename in extracted or not member.isfile() or member.size <= 0:
+                    raise UpdateError("Archive image changed since validation: " + member.name)
                 # Write to fixed basenames in our own temporary folder. No path
                 # from the archive is used as a destination path.
                 target = destination / filename
@@ -434,6 +438,10 @@ def _extract_archive_images(package: UpdatePackage, destination: Path) -> dict[s
                 if target.stat().st_size != member.size:
                     raise UpdateError("Extracted update image size changed: " + filename)
                 extracted[filename] = target
+                if len(extracted) == len(requested):
+                    break
+        if len(extracted) != len(requested):
+            raise UpdateError("Archive images changed since validation; select the package again.")
     except UpdateError:
         raise
     except (OSError, tarfile.TarError) as exc:

@@ -67,6 +67,22 @@ class SafeWorkflowTests(unittest.TestCase):
                 images._check_ext4("not-opened-by-the-mock.img")
         self.assertIn("Free blocks count wrong", str(caught.exception))
 
+    def test_pending_journal_is_replayed_only_on_working_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "original.img"
+            edited = Path(temp) / "working.img"
+            source.write_bytes(b"original capture")
+            repaired = SimpleNamespace(returncode=1, stdout="journal replayed", stderr="")
+            with patch.object(images.shutil, "which", return_value="/sbin/e2fsck"), \
+                    patch.object(images.subprocess, "run", return_value=repaired) as fsck, \
+                    patch.object(images, "_check_ext4"):
+                _, copied, journal_replayed = images._copy_for_edit(source, edited)
+            self.assertTrue(journal_replayed)
+            self.assertEqual(copied.read_bytes(), b"original capture")
+            self.assertEqual(source.read_bytes(), b"original capture")
+            self.assertEqual(fsck.call_args.args[0][-1], str(edited))
+            self.assertIn("-p", fsck.call_args.args[0])
+
     def test_ext4_mode_restoration_keeps_regular_file_type_bits(self):
         stat = "Inode: 21 Type: regular Mode: 0600 Flags: 0x0\nUser: 0 Group: 0\n"
         with patch.object(images, "_run_debugfs", return_value=stat):

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guided terminal menu for Jibo recovery, var backups, and safe image edits."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import getpass
 import hashlib
@@ -189,6 +190,35 @@ def run_with_progress(argv, timeout, label):
     if result_code:
         raise DfuError("Command failed: {}\n{}".format(argv[0], _transfer_error_detail(output)))
     return output
+
+
+def _call_with_progress(callback, label):
+    """Show elapsed time while a local package check or image prep runs."""
+    started = time.monotonic()
+    terminal = sys.stderr
+    interactive = terminal.isatty()
+    if not interactive:
+        print(label + "...", file=terminal, flush=True)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(callback)
+        frames = 0
+        spinner = "|/-\\"
+        last_length = 0
+        while not future.done():
+            if interactive:
+                status = "{} {} {:0.0f}s".format(label, spinner[frames % 4], time.monotonic() - started)
+                terminal.write("\r" + status)
+                terminal.flush()
+                last_length = len(status)
+                frames += 1
+            time.sleep(0.15)
+        if interactive:
+            terminal.write("\r" + " " * last_length + "\r")
+            terminal.flush()
+        result = future.result()
+    print("{} completed in {:.1f}s.".format(label, time.monotonic() - started),
+          file=terminal, flush=True)
+    return result
 
 
 def _transfer_error_detail(output):
@@ -695,8 +725,8 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, bundle=None, tegrarcm=None):
     """Install an official full-flash package using named DFU alternatives."""
-    print("Checking the selected full-flash package...", flush=True)
-    package = updates.validate_package(package_path)
+    package = _call_with_progress(lambda: updates.validate_package(package_path),
+                                  "Checking the selected update package")
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
@@ -743,7 +773,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     _private_write(record_path, record)
     try:
         with tempfile.TemporaryDirectory(prefix="prepared-", dir=directory) as prepared_dir:
-            prepared = updates.prepare_images(package, preserve_var, capacities, prepared_dir)
+            prepared = _call_with_progress(
+                lambda: updates.prepare_images(package, preserve_var, capacities, prepared_dir),
+                "Preparing partition images on this computer")
             record["status"] = "backing up original partitions"
             _private_write(record_path, record)
             # Even a preserve-var update gets one reusable rollback image of var.
@@ -1068,10 +1100,16 @@ def _add_confirmation_argument(parser):
     parser.add_argument("--confirm", help="Type WRITE VAR to authorize a partition write")
 
 
+def _launch_menu():
+    import jibo_tui
+    result = jibo_tui.run(sys.modules[__name__])
+    return interactive() if result is None else result
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        return interactive()
+        return _launch_menu()
     parser = argparse.ArgumentParser(description=__doc__ + " Run without arguments to open the menu.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("interactive", help="Open the guided text menu")
@@ -1141,7 +1179,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "interactive":
-            return interactive()
+            return _launch_menu()
         if args.command == "detect":
             result = devices()
         elif args.command == "list":

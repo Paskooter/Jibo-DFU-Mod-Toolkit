@@ -200,7 +200,7 @@ def edit_mode(source, destination, mode):
             data["mode"] = mode
             replacement = (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
             _replace_file(destination, VAR_MODE_PATH, replacement, temp)
-            _check_ext4(destination)
+            _replay_journal_on_copy(destination)
             final = _json_mode(_extract(destination, VAR_MODE_PATH, Path(temp) / "final.json"))
             if final["mode"] != mode:
                 raise ImageError("The edited mode did not survive image readback.")
@@ -370,7 +370,7 @@ def edit_wifi(source, destination, ssid, password=None, open_network=False):
                 _run_debugfs(destination, "set_inode_field " + VAR_WIFI_PATH + " gid 0", writable=True)
             else:
                 _replace_file(destination, VAR_WIFI_PATH, replacement, temp)
-            _check_ext4(destination)
+            _replay_journal_on_copy(destination)
             verified = _extract(destination, VAR_WIFI_PATH, Path(temp) / "verified")
             if verified != replacement:
                 raise ImageError("The edited Wi-Fi file did not survive image readback.")
