@@ -14,13 +14,13 @@ import jibo_images as images
 
 
 class SafeWorkflowTests(unittest.TestCase):
-    def test_guided_menu_reflects_tested_dfu_entry(self):
+    def test_guided_menu_uses_operational_language(self):
         display = io.StringIO()
         with patch.object(j, "devices", return_value=[]), \
                 patch("builtins.input", return_value="q"), redirect_stdout(display):
             j.interactive()
-        self.assertIn("RCM entry verified on one Jibo", display.getvalue())
-        self.assertNotIn("untested", display.getvalue().lower())
+        self.assertIn("Confirm DFU or enter recovery", display.getvalue())
+        self.assertNotIn("tested", display.getvalue().lower())
 
     def test_partition_read_shows_progress_and_completion(self):
         progress = io.StringIO()

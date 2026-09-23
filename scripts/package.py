@@ -28,6 +28,7 @@ def main():
     args = parser.parse_args()
     load_bundle(args.bundle)
     selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "jibo_images.py": ROOT / "jibo_images.py",
+                "jibo_updates.py": ROOT / "jibo_updates.py",
                 "README.md": ROOT / "README.md",
                 "tools/tegrarcm": args.tegrarcm, "tools/dfu-util": args.dfu_util,
                 "lib/libcryptopp.so": args.libcryptopp}

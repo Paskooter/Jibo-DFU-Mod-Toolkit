@@ -16,6 +16,7 @@ import tempfile
 import time
 
 import jibo_images as images
+import jibo_updates as updates
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,6 +26,8 @@ MARKER = "jibo-dfu-v1"
 FILES = ("loader.bin", "rcm.bct", "rcm.qry", "rcm.ml", "rcm.bl")
 EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
+UPDATE_CONFIRMATION = "FLASH UPDATE"
+UPDATE_ORDER = ("rootfsA", "rootfsB", "services", "skills", "var")
 
 
 def _invoking_user():
@@ -329,6 +332,101 @@ def _upload_var(dfu_util, port, destination):
         raise
 
 
+def _upload_partition(dfu_util, port, partition, size, destination):
+    """Read exactly one named DFU partition into a private local file."""
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    try:
+        run_with_progress(
+            [dfu_util, "-d", "0955:701a", "--path", port, "-a", partition,
+             "-U", str(destination), "-Z", str(size)],
+            timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size))
+        if destination.stat().st_size != size:
+            raise DfuError("Uploaded {} has {} bytes; expected {}.".format(
+                partition, destination.stat().st_size, size))
+        destination.chmod(0o600)
+        _chown_to_invoking_user(destination)
+        return _sha256_file(destination)
+    except (DfuError, OSError):
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _find_partition_backup(device_tag, partition, size):
+    if not BACKUP_ROOT.is_dir():
+        return None
+    for path in sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json")):
+        try:
+            if path.is_symlink():
+                continue
+            record = json.loads(path.read_text())
+            if (record.get("kind") != "jibo-partition-backup" or
+                    record.get("device_tag") != device_tag or
+                    record.get("partition") != partition or record.get("size_bytes") != size):
+                continue
+            image = path.parent / "partition.img"
+            if image.is_symlink() or not image.is_file() or image.stat().st_size != size:
+                continue
+            digest = _sha256_file(image)
+            if digest == record.get("sha256"):
+                return {"image": str(image), "sha256": digest, "manifest": str(path),
+                        "status": "existing verified backup reused"}
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+def _backup_partition_once(dfu_util, port, device_tag, partition, size):
+    existing = _find_partition_backup(device_tag, partition, size)
+    if existing:
+        return existing
+    if shutil.disk_usage(BACKUP_ROOT.parent).free < size + 1024 ** 3:
+        raise DfuError("Not enough free space to save the original {} partition.".format(partition))
+    directory = _new_operation_dir(prefix="partition-backup")
+    image = directory / "partition.img"
+    try:
+        digest = _upload_partition(dfu_util, port, partition, size, image)
+        manifest = directory / "backup-manifest.json"
+        _private_write(manifest, {"schema": 1, "kind": "jibo-partition-backup",
+                                  "created_utc": _utc_now(), "device_tag": device_tag,
+                                  "usb_port": port, "partition": partition,
+                                  "size_bytes": size, "sha256": digest, "image": image.name})
+        return {"image": str(image), "sha256": digest, "manifest": str(manifest),
+                "status": "backup complete"}
+    except (DfuError, OSError):
+        image.unlink(missing_ok=True)
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def _read_gpt_capacities(dfu_util, port, names):
+    if "emmc-000" not in names:
+        raise DfuError("This DFU loader does not expose emmc-000; the toolkit cannot verify the live GPT layout.")
+    with tempfile.TemporaryDirectory(prefix="jibo-gpt-") as directory:
+        prefix = Path(directory) / "gpt-prefix.bin"
+        run_with_progress(
+            [dfu_util, "-d", "0955:701a", "--path", port, "-a", "emmc-000",
+             "-U", str(prefix), "-Z", "32768"],
+            timeout=120, label="Reading the 32 KiB eMMC partition table")
+        try:
+            return updates.parse_gpt_prefix(prefix.read_bytes())
+        except (OSError, updates.UpdateError) as exc:
+            raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
+
+
+def _update_candidates(folder):
+    """List local choices quickly; full archive validation follows selection."""
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        return []
+    return [path for path in sorted(folder.iterdir(), key=lambda item: item.name.casefold())
+            if not path.is_symlink() and
+            (path.is_dir() or (path.is_file() and path.name.lower().endswith(updates.ARCHIVE_SUFFIXES)))]
+
+
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None):
     record = {"schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
               "partition": "var", "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
@@ -527,7 +625,6 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     print("Current var SHA-256: " + before_hash)
     print("Edited image: " + str(candidate))
     print("Edited image SHA-256: " + candidate_hash)
-    print("Var writing and immediate DFU readback were tested on one Jibo. Mode persistence after reboot is still under investigation.")
     print("A successful write will be read back and compared. The robot will not be reset.")
     try:
         confirmed = _confirm_write(confirmation)
@@ -595,6 +692,111 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
                             baseline_hash=state["baseline_sha256"])
 
 
+def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
+                 confirmation=None, dry_run=False, bundle=None, tegrarcm=None):
+    """Install an official full-flash package using named DFU alternatives."""
+    print("Checking the selected full-flash package...", flush=True)
+    package = updates.validate_package(package_path)
+    dfu_util = dfu_util or tool("dfu-util")
+    selected = select_device(devices(), port)
+    if selected is None:
+        raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
+    if selected["state"] == "rcm":
+        if dry_run:
+            raise DfuError("A dry run does not load recovery from RCM. Enter DFU first, then retry.")
+        recovery_bundle = Path(bundle or ROOT / "bundles" / "default")
+        if not (recovery_bundle / "manifest.json").is_file():
+            raise DfuError("The robot is in RCM, but the matching signed recovery bundle is not available. "
+                           "Place it in bundles/default or use --bundle.")
+        if confirmation is None and not _ask_confirmation(
+                "Load the matching recovery bundle into RAM before examining the flash plan?", "ENTER RCM"):
+            return {"status": "cancelled", "message": "Recovery was not loaded; no update was attempted."}
+        enter(recovery_bundle, selected["port"], tegrarcm or tool("tegrarcm"), dfu_util)
+    port, names, device_tag = _dfu_context(selected["port"], dfu_util)
+    partitions = [name for name in UPDATE_ORDER if name != "var" or not preserve_var]
+    missing = [name for name in partitions if name not in names]
+    if missing:
+        raise DfuError("This DFU profile does not expose the required partitions: " + ", ".join(missing))
+    capacities = _read_gpt_capacities(dfu_util, port, names)
+    plan = {"package": str(package.source), "version": package.version,
+            "usb_port": port, "var_policy": "preserve current configuration" if preserve_var else
+            "replace with package var image (fresh setup and lost local settings)",
+            "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
+            "status": "plan only" if dry_run else "awaiting confirmation"}
+    if dry_run:
+        return plan
+    print("\nOfficial full-flash update plan:")
+    print(json.dumps(plan, indent=2))
+    print("This writes the listed partitions, verifies each by a full USB readback, then requests a reset.")
+    print("A preserved var keeps its current mode, identity, network settings, and first-boot resize marker.")
+    print("A fresh var replaces those settings with the package image; a rollback backup is saved first.")
+    if confirmation is None:
+        if not _ask_confirmation("Flash this package?", UPDATE_CONFIRMATION):
+            return {**plan, "status": "cancelled"}
+    elif confirmation != UPDATE_CONFIRMATION:
+        raise DfuError("For an update write, --confirm must be exactly 'FLASH UPDATE'.")
+
+    directory = _new_operation_dir(out, "flash-update")
+    record_path = directory / "update-manifest.json"
+    record = {"schema": 1, "kind": "jibo-full-flash-update", "created_utc": _utc_now(),
+              **plan, "status": "preparing", "backups": {}, "writes": []}
+    _private_write(record_path, record)
+    try:
+        with tempfile.TemporaryDirectory(prefix="prepared-", dir=directory) as prepared_dir:
+            prepared = updates.prepare_images(package, preserve_var, capacities, prepared_dir)
+            record["status"] = "backing up original partitions"
+            _private_write(record_path, record)
+            # Even a preserve-var update gets one reusable rollback image of var.
+            var_backup = backup_var(port, dfu_util)
+            record["backups"]["var"] = var_backup
+            _private_write(record_path, record)
+            for name in partitions:
+                if name == "var":
+                    continue
+                record["backups"][name] = _backup_partition_once(
+                    dfu_util, port, device_tag, name, capacities[name])
+                _private_write(record_path, record)
+            for name in partitions:
+                candidate = prepared[name]
+                digest = _sha256_file(candidate)
+                entry = {"partition": name, "candidate_sha256": digest,
+                         "size_bytes": capacities[name], "status": "write started"}
+                record["writes"].append(entry)
+                record["status"] = "writing"
+                _private_write(record_path, record)
+                run_with_progress(
+                    [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
+                     "-D", str(candidate)], timeout=14400,
+                    label="Writing {} ({} bytes)".format(name, capacities[name]))
+                with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
+                    readback = Path(readback_dir) / "partition.img"
+                    actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
+                entry["readback_sha256"] = actual
+                if actual != digest:
+                    entry["status"] = "verification failed"
+                    _private_write(record_path, record)
+                    raise DfuError("{} did not match its readback. DFU was left active; use the saved backups.".format(name))
+                entry["status"] = "verified"
+                _private_write(record_path, record)
+        record["status"] = "verified; reset pending"
+        _private_write(record_path, record)
+        try:
+            run([dfu_util, "-d", "0955:701a", "--path", port, "-e", "-R"], timeout=60)
+            record["status"] = "verified; reset requested"
+        except DfuError as exc:
+            record["status"] = "verified; reset not confirmed"
+            record["reset_error"] = str(exc)
+        _private_write(record_path, record)
+        return {"status": record["status"], "package": str(package.source),
+                "var_policy": plan["var_policy"], "verified_partitions": partitions,
+                "manifest": str(record_path), "backups": record["backups"]}
+    except (DfuError, updates.UpdateError, OSError) as exc:
+        record["status"] = "failed"
+        record["error"] = str(exc)
+        _private_write(record_path, record)
+        raise DfuError(str(exc) + "\nUpdate record: " + str(record_path)) from exc
+
+
 def set_mode_live(mode, port=None, dfu_util=None, out=None, confirmation=None):
     if mode not in images.MODE_VALUES:
         raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
@@ -607,11 +809,14 @@ def set_mode_live(mode, port=None, dfu_util=None, out=None, confirmation=None):
         state = _prepare_current_and_baseline(dfu_util, port, device_tag, directory)
         before = state["before"]
         edit = images.edit_mode(before, candidate, mode)
+        if edit.get("journal_replayed_on_temporary_copy"):
+            print("Replayed the ext4 journal on the temporary working image before editing. The saved backup was not changed.")
         print("Mode change: " + edit["previous_mode"] + " → " + mode)
         result = _write_candidate(candidate, before, directory, port, dfu_util,
                                   confirmation, "set mode to " + mode,
                                   state["baseline"], state["before_sha256"], state["baseline_sha256"])
-        result.update(current_mode=edit["previous_mode"], new_mode=mode)
+        result.update(current_mode=edit["previous_mode"], new_mode=mode,
+                      journal_replayed_on_temporary_copy=edit.get("journal_replayed_on_temporary_copy", False))
         return result
     except (DfuError, images.ImageError) as exc:
         _raise_live_operation_error(directory, "set mode to " + mode, state, exc)
@@ -739,8 +944,9 @@ def interactive():
         print("  4  Configure Wi-Fi on a connected robot (review, confirm, verify)")
         print("  5  Edit a backup image offline")
         print("  6  Write an edited var image (backup, write, readback)")
-        print("  7  Confirm DFU or enter recovery (RCM entry verified on one Jibo)")
-        print("  8  What is supported / still being built")
+        print("  7  Confirm DFU or enter recovery")
+        print("  8  Install an official full-flash update package")
+        print("  9  About this toolkit")
         print("  q  Quit")
         choice = input("Choose an option: ").strip().lower()
         try:
@@ -803,12 +1009,8 @@ def interactive():
                                        "If the robot is already in DFU, use options 1–6.")
                     manifest = load_bundle(bundle)
                     profile = manifest.get("profile", "unknown profile")
-                    if manifest.get("hardware_verified", False):
-                        print("RCM-to-DFU entry was verified on one Jibo for profile " + profile + ".")
-                        print("A var write and immediate readback were verified on one Jibo; persistence after reboot remains unverified.")
-                    else:
-                        print("This bundle is not marked as verified for profile " + profile + ".")
-                        print("Confirm that it matches this robot before continuing.")
+                    print("Recovery profile: " + profile + ".")
+                    print("Confirm that this profile matches the connected robot.")
                     if not _ask_confirmation("Load recovery into RAM and wait for DFU?", "ENTER RCM"):
                         print("Cancelled.")
                         continue
@@ -817,17 +1019,35 @@ def interactive():
                                    allow_unverified_profile=True)
                 print(json.dumps(result, indent=2))
             elif choice == "8":
-                print("Available now: detect RCM/DFU, check the local bundle, enter RAM recovery,")
-                print("back up var, inspect mode/Wi-Fi state, edit mode/Wi-Fi offline, and write var with readback.")
-                print("Still being built: version-gated SSH/firewall changes, full user-area eMMC backup,")
-                print("ShofEL transport, automatic hardware profile selection, and support for more board populations.")
-                print("RCM-to-DFU entry, var reading, and a var write/readback were tested on one Jibo.")
-                print("The mode change did not survive a later boot; the cause is under investigation.")
+                folder = Path.cwd() / "updates"
+                packages = _update_candidates(folder)
+                if not packages:
+                    print("No full-flash packages found in " + str(folder))
+                    print("Place a jibo-pvt-flash-build*.tar.bz2 archive or its extracted folder there.")
+                    continue
+                print("\nOfficial full-flash packages in " + str(folder) + ":")
+                for index, package in enumerate(packages, 1):
+                    print("  {}  {}".format(index, package.name))
+                selection = input("Choose a package number (or Enter to cancel): ").strip()
+                if not selection.isdigit() or not 1 <= int(selection) <= len(packages):
+                    print("Cancelled.")
+                    continue
+                print("  1  Preserve current var: keep identity, mode, Wi-Fi, and user configuration")
+                print("  2  Fresh var: replace it with the package image for out-of-box setup")
+                policy = input("Choose var handling: ").strip()
+                if policy not in ("1", "2"):
+                    print("Cancelled.")
+                    continue
+                print(json.dumps(flash_update(packages[int(selection) - 1],
+                                              preserve_var=policy == "1"), indent=2))
+            elif choice == "9":
+                print("Connect a Jibo in RCM, enter DFU, then back up or edit var and install full-flash packages.")
+                print("Offline image inspection and editing work without a connected robot.")
             elif choice in ("q", "quit", "exit"):
                 return 0
             else:
                 print("Choose one of the listed numbers, or q to quit.")
-        except (DfuError, images.ImageError, OSError, ValueError) as exc:
+        except (DfuError, images.ImageError, updates.UpdateError, OSError, ValueError) as exc:
             print("\n" + str(exc), file=sys.stderr)
     return 0
 
@@ -904,6 +1124,20 @@ def main(argv=None):
     _add_dfu_argument(write)
     _add_operation_argument(write)
     _add_confirmation_argument(write)
+    list_updates = sub.add_parser("list-updates", help="List official full-flash packages in an updates folder")
+    list_updates.add_argument("--directory", type=Path, default=Path.cwd() / "updates")
+    flash = sub.add_parser("flash-update", help="Back up, install, and verify an official full-flash package")
+    flash.add_argument("package", type=Path, help="Extracted package directory or official .tar.bz2 archive")
+    policy = flash.add_mutually_exclusive_group(required=True)
+    policy.add_argument("--preserve-var", action="store_true", help="Keep current identity, mode, Wi-Fi, and user settings")
+    policy.add_argument("--fresh-var", action="store_true", help="Replace var with the package image for fresh setup")
+    _add_device_arguments(flash)
+    _add_dfu_argument(flash)
+    _add_operation_argument(flash)
+    flash.add_argument("--bundle", type=Path, help="Matching signed RCM bundle if the robot is not already in DFU")
+    flash.add_argument("--tegrarcm", help="Path to tegrarcm for RCM entry")
+    flash.add_argument("--dry-run", action="store_true", help="Verify package and live partition sizes without writing")
+    flash.add_argument("--confirm", help="Exactly FLASH UPDATE, for scripted writes")
     args = parser.parse_args(argv)
     try:
         if args.command == "interactive":
@@ -942,12 +1176,19 @@ def main(argv=None):
             result = configure_wifi_live(args.ssid, password, args.open_network, args.port,
                                          tool("dfu-util", args.dfu_util), args.operation_dir, args.confirm)
             password = None
+        elif args.command == "list-updates":
+            result = [{"path": str(path), "name": path.name}
+                      for path in _update_candidates(args.directory)]
+        elif args.command == "flash-update":
+            result = flash_update(args.package, args.preserve_var, args.port,
+                                  tool("dfu-util", args.dfu_util), args.operation_dir,
+                                  args.confirm, args.dry_run, args.bundle, args.tegrarcm)
         else:
             result = write_var(args.image, args.port, tool("dfu-util", args.dfu_util),
                                args.operation_dir, args.confirm)
         print(json.dumps(result, indent=2, default=str))
         return 0
-    except (DfuError, images.ImageError, OSError) as exc:
+    except (DfuError, images.ImageError, updates.UpdateError, OSError) as exc:
         print("Error: " + str(exc), file=sys.stderr)
         return 1
 

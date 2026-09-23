@@ -72,6 +72,24 @@ def _check_ext4(image):
         raise ImageError(message)
 
 
+def _replay_journal_on_copy(image):
+    """Let e2fsck perform only its automatic fixes on a disposable image."""
+    executable = shutil.which("e2fsck")
+    if not executable:
+        raise ImageError("e2fsck is required to prepare ext4 images (install e2fsprogs).")
+    try:
+        result = subprocess.run([executable, "-f", "-p", str(image)], capture_output=True,
+                                text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ImageError("Could not check the working ext4 copy: " + str(exc)) from exc
+    if result.returncode not in (0, 1):
+        detail = (result.stdout + result.stderr).strip()[-1600:]
+        raise ImageError("The working ext4 copy needs repairs beyond automatic journal replay. "
+                         "The original image was not changed.\n" + detail)
+    _check_ext4(image)
+    return result.returncode == 1
+
+
 def _extract(image, image_path, destination, optional=False):
     destination = Path(destination)
     if destination.exists():
@@ -131,7 +149,6 @@ def _copy_for_edit(source, destination):
     destination = Path(destination).expanduser().resolve()
     if not source.is_file():
         raise ImageError("Var image does not exist: " + str(source))
-    _check_ext4(source)
     if source == destination:
         raise ImageError("Choose a new output path; the source backup is kept unchanged.")
     if destination.exists():
@@ -144,33 +161,40 @@ def _copy_for_edit(source, destination):
         raise ImageError("Could not create a working copy of the var image: " + str(exc)) from exc
     destination.chmod(0o600)
     _chown_to_invoking_user(destination)
-    return source, destination
+    try:
+        repaired = _replay_journal_on_copy(destination)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return source, destination, repaired
 
 
 def inspect_var(image):
     image = Path(image).expanduser().resolve()
     if not image.is_file():
         raise ImageError("Var image does not exist: " + str(image))
-    _check_ext4(image)
     with tempfile.TemporaryDirectory(prefix="jibo-inspect-", dir="/tmp") as temp:
-        mode_raw = _extract(image, VAR_MODE_PATH, Path(temp) / "mode.json")
+        working = Path(temp) / "var.img"
+        shutil.copyfile(image, working)
+        repaired = _replay_journal_on_copy(working)
+        mode_raw = _extract(working, VAR_MODE_PATH, Path(temp) / "mode.json")
         mode = _json_mode(mode_raw)["mode"]
-        wifi_raw = _extract(image, VAR_WIFI_PATH, Path(temp) / "wifi.conf", optional=True)
+        wifi_raw = _extract(working, VAR_WIFI_PATH, Path(temp) / "wifi.conf", optional=True)
     try:
         networks = _network_blocks(wifi_raw.decode("utf-8")) if wifi_raw is not None else []
     except UnicodeDecodeError as exc:
         raise ImageError("The Wi-Fi config is not valid UTF-8; no content was displayed.") from exc
     return {"mode": mode, "wifi_configured": wifi_raw is not None,
-            "wifi_network_count": len(networks)}
+            "wifi_network_count": len(networks), "journal_replayed_on_temporary_copy": repaired}
 
 
 def edit_mode(source, destination, mode):
     if mode not in MODE_VALUES:
         raise ImageError("Mode must be one of: " + ", ".join(MODE_VALUES))
-    source, destination = _copy_for_edit(source, destination)
+    source, destination, repaired = _copy_for_edit(source, destination)
     try:
         with tempfile.TemporaryDirectory(prefix="jibo-mode-", dir="/tmp") as temp:
-            current_raw = _extract(source, VAR_MODE_PATH, Path(temp) / "mode.json")
+            current_raw = _extract(destination, VAR_MODE_PATH, Path(temp) / "mode.json")
             data = _json_mode(current_raw)
             previous = data["mode"]
             data["mode"] = mode
@@ -181,7 +205,8 @@ def edit_mode(source, destination, mode):
             if final["mode"] != mode:
                 raise ImageError("The edited mode did not survive image readback.")
         return {"image": str(destination), "previous_mode": previous,
-                "mode": mode, "sha256": sha256_file(destination)}
+                "mode": mode, "sha256": sha256_file(destination),
+                "journal_replayed_on_temporary_copy": repaired}
     except Exception:
         destination.unlink(missing_ok=True)
         raise
@@ -330,10 +355,10 @@ def build_wifi_config(existing, ssid, password=None, open_network=False):
 
 
 def edit_wifi(source, destination, ssid, password=None, open_network=False):
-    source, destination = _copy_for_edit(source, destination)
+    source, destination, repaired = _copy_for_edit(source, destination)
     try:
         with tempfile.TemporaryDirectory(prefix="jibo-wifi-", dir="/tmp") as temp:
-            existing = _extract(source, VAR_WIFI_PATH, Path(temp) / "wifi.conf", optional=True)
+            existing = _extract(destination, VAR_WIFI_PATH, Path(temp) / "wifi.conf", optional=True)
             replacement, count = build_wifi_config(existing, ssid, password, open_network)
             if existing is None:
                 local = Path(temp) / "replacement"
@@ -350,7 +375,8 @@ def edit_wifi(source, destination, ssid, password=None, open_network=False):
             if verified != replacement:
                 raise ImageError("The edited Wi-Fi file did not survive image readback.")
         return {"image": str(destination), "network_count": count,
-                "sha256": sha256_file(destination)}
+                "sha256": sha256_file(destination),
+                "journal_replayed_on_temporary_copy": repaired}
     except Exception:
         destination.unlink(missing_ok=True)
         raise

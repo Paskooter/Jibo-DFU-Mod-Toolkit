@@ -1,0 +1,193 @@
+import hashlib
+import io
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import tarfile
+import tempfile
+import unittest
+import zlib
+from unittest.mock import patch
+
+import jibo_updates as updates
+import jibo_dfu as toolkit
+
+
+def make_gpt_prefix(skills_size=10_991_139_328):
+    sector = 512
+    names_and_sizes = (
+        ("rootfsA", 1_048_576_000),
+        ("rootfsB", 1_048_576_000),
+        ("recovery", 52_428_800),
+        ("services", 2_097_152_000),
+        ("var", 524_288_000),
+        ("skills", skills_size),
+    )
+    entries = bytearray(128 * 128)
+    first_lba = 34
+    for index, (name, size) in enumerate(names_and_sizes):
+        count = size // sector
+        entry = memoryview(entries)[index * 128:(index + 1) * 128]
+        entry[:16] = bytes([index + 1]) * 16
+        entry[16:32] = bytes([index + 20]) * 16
+        struct.pack_into("<QQQ", entry, 32, first_lba, first_lba + count - 1, 0)
+        entry[56:128] = name.encode("utf-16le").ljust(72, b"\x00")
+        first_lba += count
+
+    last_usable = first_lba - 1
+    data = bytearray(32 * 1024)
+    header = memoryview(data)[sector:2 * sector]
+    header[:8] = b"EFI PART"
+    struct.pack_into("<I", header, 8, 0x00010000)
+    struct.pack_into("<I", header, 12, 92)
+    struct.pack_into("<I", header, 16, 0)
+    struct.pack_into("<I", header, 20, 0)
+    struct.pack_into("<QQQQ", header, 24, 1, last_usable + 1, 34, last_usable)
+    header[56:72] = b"D" * 16
+    struct.pack_into("<QIII", header, 72, 2, 128, 128, zlib.crc32(entries) & 0xFFFFFFFF)
+    struct.pack_into("<I", header, 16, zlib.crc32(header[:92]) & 0xFFFFFFFF)
+    data[2 * sector:2 * sector + len(entries)] = entries
+    return bytes(data)
+
+
+def add_image_files(archive, prefix="release/flash_jibo/output/images", skip=()):
+    for name in updates.IMAGE_NAMES:
+        if name in skip:
+            continue
+        payload = (name + " placeholder").encode("ascii")
+        info = tarfile.TarInfo(prefix + "/" + name)
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+
+class UpdatePackageTests(unittest.TestCase):
+    def test_preserve_var_flash_never_writes_var_and_verifies_each_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (images_dir / filename).write_bytes(b"package placeholder")
+            candidate = root / "prepared.img"
+            candidate.write_bytes(b"prepared")
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = {name: size for name, size in updates.KNOWN_CAPACITIES.items()}
+            capacities["skills"] = 10_991_139_328
+            transfers = []
+
+            def transfer(argv, timeout, label):
+                transfers.append(argv)
+
+            with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"], "device")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
+                    patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
+                    patch.object(toolkit.updates, "prepare_images", return_value={name: candidate for name in ("rootfsA", "rootfsB", "services", "skills")}), \
+                    patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", return_value=""):
+                result = toolkit.flash_update(root / "release", True, port="1-1", dfu_util="dfu-util",
+                                              confirmation="FLASH UPDATE")
+            written = [argv[argv.index("-a") + 1] for argv in transfers if "-D" in argv]
+            self.assertEqual(written, ["rootfsA", "rootfsB", "services", "skills"])
+            self.assertEqual(backup.call_count, 4)
+            self.assertEqual(upload.call_count, 4)
+            self.assertEqual(result["status"], "verified; reset requested")
+
+    def test_parse_dfu_capacities_only_accepts_explicit_byte_sizes(self):
+        output = ('Found DFU: alt=1, name="rootfsA", size=1048576000\n'
+                  'Found DFU: alt=2, name="skills"\n')
+        self.assertEqual(updates.parse_alt_capacities(output), {"rootfsA": 1048576000})
+
+    def test_parse_complete_gpt_prefix_derives_variable_skills_capacity(self):
+        capacities = updates.parse_gpt_prefix(make_gpt_prefix())
+        self.assertEqual(capacities["rootfsA"], 1_048_576_000)
+        self.assertEqual(capacities["services"], 2_097_152_000)
+        self.assertEqual(capacities["skills"], 10_991_139_328)
+
+    def test_gpt_rejects_partial_entry_table_and_bad_crc(self):
+        prefix = make_gpt_prefix()
+        with self.assertRaisesRegex(updates.UpdateError, "complete partition-entry table"):
+            updates.parse_gpt_prefix(prefix[:4096])
+        damaged = bytearray(prefix)
+        damaged[1024 + 56] ^= 1
+        with self.assertRaisesRegex(updates.UpdateError, "partition-entry array CRC"):
+            updates.parse_gpt_prefix(bytes(damaged))
+
+    def test_archive_discovery_only_accepts_full_flash_layout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            archive_path = folder / "jibo-pvt-flash-build-5.4.2.tar.bz2"
+            with tarfile.open(archive_path, "w:bz2") as archive:
+                add_image_files(archive)
+            found = updates.discover_packages(folder)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0].version, "5.4.2")
+            self.assertTrue(found[0].is_archive)
+            self.assertIn("rootfs.ext4", found[0].archive_members)
+
+    def test_archive_rejects_path_traversal_and_image_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive_path = Path(temp) / "bad.tar.bz2"
+            with tarfile.open(archive_path, "w:bz2") as archive:
+                add_image_files(archive)
+                traversal = tarfile.TarInfo("../../outside")
+                traversal.size = 1
+                archive.addfile(traversal, io.BytesIO(b"x"))
+            with self.assertRaisesRegex(updates.UpdateError, "unsafe path"):
+                updates.validate_package(archive_path)
+
+        with tempfile.TemporaryDirectory() as temp:
+            archive_path = Path(temp) / "bad-link.tar.bz2"
+            with tarfile.open(archive_path, "w:bz2") as archive:
+                add_image_files(archive, skip=("rootfs.ext4",))
+                link = tarfile.TarInfo("release/flash_jibo/output/images/rootfs.ext4")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside"
+                archive.addfile(link)
+            with self.assertRaisesRegex(updates.UpdateError, "not a regular file"):
+                updates.validate_package(archive_path)
+
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "e2fsck", "dumpe2fs", "resize2fs")),
+                         "e2fsprogs is required for the offline resize check")
+    def test_prepare_expands_ext4_offline_and_omits_var_when_preserving(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            source_hashes = {}
+            for filename in updates.IMAGE_NAMES:
+                image = images_dir / filename
+                with image.open("wb") as stream:
+                    stream.truncate(4 * 1024 * 1024)
+                subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", "-b", "1024", str(image)],
+                               check=True, capture_output=True)
+                source_hashes[filename] = hashlib.sha256(image.read_bytes()).hexdigest()
+            package = updates.validate_package(root)
+            capacities = {name: 8 * 1024 * 1024 for name in
+                          ("rootfsA", "rootfsB", "services", "var", "skills")}
+            capacities["skills"] += 512  # GPT sector that cannot hold a whole ext4 block.
+            small_known = {name: capacities[name] for name in
+                           ("rootfsA", "rootfsB", "services", "var")}
+            with patch.dict(updates.KNOWN_CAPACITIES, small_known, clear=True):
+                prepared_fresh = updates.prepare_images(package, False, capacities, root / "fresh")
+                for name in ("rootfsA", "rootfsB", "services", "skills", "var"):
+                    self.assertEqual(prepared_fresh[name].stat().st_size, capacities[name])
+                self.assertEqual(prepared_fresh["rootfsA"], prepared_fresh["rootfsB"])
+                prepared_preserved = updates.prepare_images(package, True, capacities, root / "preserve")
+            self.assertNotIn("var", prepared_preserved)
+            self.assertFalse((root / "preserve" / "var.ext4").exists())
+            for filename, original_hash in source_hashes.items():
+                self.assertEqual(hashlib.sha256((images_dir / filename).read_bytes()).hexdigest(), original_hash)
+            for image in set(prepared_fresh.values()):
+                result = subprocess.run(["e2fsck", "-f", "-n", str(image)],
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

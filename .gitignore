@@ -17,6 +17,9 @@ var-backup-*/
 set-mode-*/
 configure-wifi-*/
 write-var-*/
+flash-update-*/
+updates/*
+!updates/.gitkeep
 .build/
 dist/
 __pycache__/
