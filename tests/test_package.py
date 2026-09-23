@@ -37,8 +37,10 @@ class PackageTests(unittest.TestCase):
         self.shofel_dir.mkdir()
         self.shofel = self.shofel_dir / "shofel2_t124"
         self.payload = self.shofel_dir / "emmc_server.bin"
+        self.intermezzo = self.shofel_dir / "intermezzo.bin"
         self.shofel.write_bytes(b"ShofEL executable")
         self.payload.write_bytes(b"eMMC read payload")
+        self.intermezzo.write_bytes(b"RCM intermezzo")
         self.output = self.root / "jibo-tool.pyz"
 
     def argv(self, *extra):
@@ -47,12 +49,14 @@ class PackageTests(unittest.TestCase):
                 "--libcryptopp", str(self.crypto), "--out", str(self.output), *extra]
 
     def test_optional_shofel_pair_is_bundled_at_tool_discovery_paths(self):
-        args = self.argv("--shofel2", str(self.shofel), "--emmc-server", str(self.payload))
+        args = self.argv("--shofel2", str(self.shofel), "--emmc-server", str(self.payload),
+                         "--intermezzo", str(self.intermezzo))
         with patch("sys.argv", args):
             package.main()
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(archive.read("tools/shofel2_t124"), b"ShofEL executable")
             self.assertEqual(archive.read("tools/emmc_server.bin"), b"eMMC read payload")
+            self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")
             with tempfile.TemporaryDirectory() as extracted:
                 archive.extractall(extracted)
                 for executable in (Path(extracted) / "tools").iterdir():

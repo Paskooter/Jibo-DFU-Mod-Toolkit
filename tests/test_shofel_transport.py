@@ -182,10 +182,16 @@ class ShofelTransportTests(unittest.TestCase):
         executable.chmod(0o755)
         payload = folder / "emmc_server.bin"
         payload.write_bytes(b"fake payload")
+        intermezzo = folder / "intermezzo.bin"
+        intermezzo.write_bytes(b"fake intermezzo")
         self.assertEqual(toolkit._shofel_tool(str(executable)), str(executable.resolve()))
 
         payload.unlink()
         with self.assertRaisesRegex(toolkit.DfuError, "emmc_server.bin"):
+            toolkit._shofel_tool(str(executable))
+        payload.write_bytes(b"fake payload")
+        intermezzo.unlink()
+        with self.assertRaisesRegex(toolkit.DfuError, "intermezzo.bin"):
             toolkit._shofel_tool(str(executable))
 
     def test_shofel_errors_redact_the_raw_chip_id(self):

@@ -260,9 +260,10 @@ def _shofel_tool(override=None):
     executable = Path(candidate).resolve()
     if not os.access(str(executable), os.X_OK):
         raise DfuError("ShofEL host tool is not executable: " + str(executable))
-    payload = executable.parent / "emmc_server.bin"
-    if not payload.is_file() or payload.stat().st_size == 0:
-        raise DfuError("Missing non-empty emmc_server.bin next to " + str(executable))
+    for payload_name in ("emmc_server.bin", "intermezzo.bin"):
+        payload = executable.parent / payload_name
+        if not payload.is_file() or payload.stat().st_size == 0:
+            raise DfuError("Missing non-empty " + payload_name + " next to " + str(executable))
     return str(executable)
 
 
@@ -1407,7 +1408,7 @@ def main(argv=None):
     _add_dfu_argument(backup)
     backup.add_argument("--transport", choices=("dfu", "shofel"), default="dfu",
                         help="Read var through the default signed DFU loader or ShofEL in RCM/APX")
-    backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin must be beside it")
+    backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin and intermezzo.bin must be beside it")
     backup.add_argument("--out", type=Path, help="New output directory; otherwise ~/Jibo-Backups")
     backup.add_argument("--refresh", action="store_true", help="Capture the current var state instead of reusing the saved baseline")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")

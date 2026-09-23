@@ -34,7 +34,7 @@ The screen leads through **connect → RCM/APX → DFU → choose an action**. R
 
 - In **DFU**, with this project's recovery loader showing its Jibo marker, the menu can read or edit `var` and install supported full-flash packages. `dfu-util` is required.
 - In **RCM/APX**, DFU-based partition and update actions need recovery loaded first. Choose **Enter DFU from RCM/APX** to load it into RAM. A source clone does not include the signed recovery bundle or the `tegrarcm` host tool; the owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile.
-- Alternatively, an explicit ShofEL `var` backup can read the live GPT and `var` sectors directly over USB while the robot remains in RCM/APX. It needs the ShofEL host and `emmc_server.bin` payload, but no signed recovery bundle or production key. The operation only invokes `EMMC_READ`; it does not write or erase eMMC.
+- Alternatively, an explicit ShofEL `var` backup can read the live GPT and `var` sectors directly over USB while the robot remains in RCM/APX. It needs the ShofEL host, `intermezzo.bin`, and `emmc_server.bin`, but no signed recovery bundle or production key. The operation only invokes `EMMC_READ`; it does not write or erase eMMC.
 
 The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
 
@@ -57,13 +57,13 @@ The screen refreshes USB state each time it returns from an action. The first ac
 
 The read and write operations show a spinner and elapsed time. A successful mode or Wi-Fi write leaves the robot in DFU; a successful full-flash update requests a reset after verifying every partition.
 
-For the ShofEL transport, place the built `shofel2_t124` and its `emmc_server.bin` payload together in `tools/` or on `PATH`, or pass the host path explicitly. The host needs the USB-port and read-framing changes in [this patch](patches/shofel2-rcm-backup.patch), based on the upstream `improvements/IncreasedUSBReadWriteSpeed` branch. Build it from source with GCC, Make, and the `arm-none-eabi` toolchain:
+For the ShofEL transport, place the built `shofel2_t124`, `intermezzo.bin`, and `emmc_server.bin` together in `tools/` or on `PATH`, or pass the host path explicitly. The host needs the USB-port and read-framing changes in [this patch](patches/shofel2-rcm-backup.patch), based on the upstream `improvements/IncreasedUSBReadWriteSpeed` branch. Build it from source with GCC, Make, and the `arm-none-eabi` toolchain:
 
 ```sh
 git clone --branch improvements/IncreasedUSBReadWriteSpeed https://github.com/devsparx/ShofEL2-for-T124.git ../ShofEL2-for-T124
 cd ../ShofEL2-for-T124
 git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-rcm-backup.patch
-make shofel2_t124 emmc_server.bin
+make shofel2_t124 intermezzo.bin emmc_server.bin
 cd ../Jibo-DFU-Mod-Toolkit
 ```
 
@@ -73,9 +73,9 @@ Then run the backup with the exact USB port shown by `python3 jibo_dfu.py detect
 sudo python3 jibo_dfu.py backup-var --transport shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 ```
 
-The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so the adjacent payload resolves correctly. To bundle ShofEL for the `.pyz` menu, pass both `--shofel2 /path/to/shofel2_t124` and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; the pair is stored under `tools/` and the menu discovers it there.
+The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so both adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; all three files are stored under `tools/` and the menu discovers them there.
 
-The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The host and payload need to be built with exact USB-port selection and 8-sector read framing. Generated `.pyz` packages include ShofEL only when both optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
+The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The host and payloads need to be built with exact USB-port selection and 8-sector read framing. Generated `.pyz` packages include ShofEL only when all three optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
 
 ## Install an official full-flash update
 
