@@ -37,6 +37,8 @@ The screen leads through **connect → RCM/APX → DFU → choose an action**. R
 
 The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
 
+If **Enter DFU** stops at `read RCM query version: USB transfer failure`, the robot is still in RCM/APX: the loader has not started, and no partition action occurred. Reset the robot into RCM/APX, reconnect its USB cable or WSL2 USB passthrough, and retry. Check that the device appears as NVIDIA APX (`0955:7740`) before entering DFU; successful entry changes it to `0955:701a`. If the connection is reliable but only one robot fails at this step, check whether it requires a different signed recovery profile. Jibo's archived [fuse guide](https://pvindex.org/confluence/display/ENG/Fused+vs.+Un-fused+robots) documents different signing profiles for fused robots.
+
 ## Use the terminal interface
 
 The screen refreshes USB state each time it returns from an action. The first action is available only in RCM/APX. Live partition actions become available when the Jibo DFU loader is detected. Local image actions remain available without a robot. Every choice, path entry, hidden password, result, and write confirmation uses the same terminal screen. Use **Esc** to cancel a step; confirmation starts on **Cancel**, so select **Confirm** explicitly to write. A terminal is required for the guided interface; scripts can use the command-line subcommands.

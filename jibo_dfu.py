@@ -269,7 +269,16 @@ def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_unverified_profile
             "--signed-msgs-file=" + str(root / "rcm"), "--bct=" + str(root / "rcm.bct"),
             "--bootloader=" + str(root / "loader.bin"), "--loadaddr=0x80108000",
             "--usb-timeout=5000"]
-    run(argv, timeout=max(timeout, 30))
+    try:
+        run(argv, timeout=max(timeout, 30))
+    except DfuError as exc:
+        if "read RCM query version: USB transfer failure" in str(exc):
+            raise DfuError(
+                "The RCM handshake stopped before the recovery loader was sent. "
+                "The robot is still in RCM/APX; DFU has not started. "
+                "Reset into RCM/APX, reconnect the USB connection or passthrough, and retry."
+            ) from exc
+        raise
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = select_device(devices(), port)

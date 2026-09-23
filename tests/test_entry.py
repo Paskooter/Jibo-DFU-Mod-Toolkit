@@ -91,6 +91,17 @@ class EntryTests(unittest.TestCase):
             self.assertFalse(any("--pkc" in arg for arg in argv))
             self.assertIn("--usb-port-path=1-2", argv)
 
+    def test_rcm_query_usb_failure_is_not_reported_as_dfu_failure(self):
+        failure = j.DfuError("Command failed: tegrarcm\n"
+                             "read RCM query version: USB transfer failure\n"
+                             "Resource temporarily unavailable")
+        with patch.object(j, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(j, "run", side_effect=failure) as run:
+            with self.assertRaisesRegex(j.DfuError, "before the recovery loader was sent") as caught:
+                j.enter(self.root, None, "tegrarcm", "dfu-util", allow_unverified_profile=True)
+        self.assertIn("still in RCM/APX", str(caught.exception))
+        self.assertEqual(run.call_count, 1)
+
     def test_wrong_loader_marker(self):
         states = [[{"port": "1-2", "state": "rcm"}], [{"port": "1-2", "state": "dfu"}]]
         with patch.object(j, "devices", side_effect=states), patch.object(j, "run", side_effect=["OK", 'name="var"']):
