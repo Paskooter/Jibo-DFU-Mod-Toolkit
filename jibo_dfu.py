@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jibo recovery, backup, and var editing utility."""
+"""Guided terminal menu for Jibo recovery, var backups, and safe image edits."""
 import argparse
 from datetime import datetime, timezone
 import getpass
@@ -213,7 +213,7 @@ def dfu_alternatives(executable, port):
     return names, output
 
 
-def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_untested=False):
+def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_unverified_profile=False):
     selected = select_device(devices(), port)
     if selected is None:
         raise DfuError("No Jibo RCM/DFU device detected. Connect USB and hold recovery while resetting the robot.")
@@ -225,8 +225,9 @@ def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_untested=False):
         return {"port": port, "state": "dfu", "already_running": True,
                 "loader_verified": MARKER in names, "alternatives": names}
     manifest = load_bundle(bundle)
-    if not manifest.get("hardware_verified", False) and not allow_untested:
-        raise DfuError("This bundle is an untested hardware candidate. Use --allow-untested for its first hardware test.")
+    if not manifest.get("hardware_verified", False) and not allow_unverified_profile:
+        raise DfuError("This recovery bundle is not verified for its declared hardware profile. "
+                       "Use --allow-unverified-profile only after confirming it matches the robot.")
     root = Path(bundle).resolve()
     argv = [tegrarcm, "--usb-port-path=" + port, "--download-signed-msgs",
             "--signed-msgs-file=" + str(root / "rcm"), "--bct=" + str(root / "rcm.bct"),
@@ -526,6 +527,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     print("Current var SHA-256: " + before_hash)
     print("Edited image: " + str(candidate))
     print("Edited image SHA-256: " + candidate_hash)
+    print("DFU entry and partition reading have been tested; partition writing and readback have not.")
     print("A successful write will be read back and compared. The robot will not be reset.")
     try:
         confirmed = _confirm_write(confirmation)
@@ -733,11 +735,11 @@ def interactive():
         _display_devices()
         print("\n  1  Back up var (read only; reuses a saved backup when available)")
         print("  2  Inspect a var backup")
-        print("  3  Set mode on a connected robot (backup, write, readback)")
-        print("  4  Configure Wi-Fi on a connected robot (backup, write, readback)")
+        print("  3  Set mode on a connected robot (review, confirm, verify)")
+        print("  4  Configure Wi-Fi on a connected robot (review, confirm, verify)")
         print("  5  Edit a backup image offline")
         print("  6  Write an edited var image (backup, write, readback)")
-        print("  7  Enter DFU recovery (untested hardware candidate)")
+        print("  7  Confirm DFU or enter recovery (RCM entry verified on one Jibo)")
         print("  8  What is supported / still being built")
         print("  q  Quit")
         choice = input("Choose an option: ").strip().lower()
@@ -747,6 +749,8 @@ def interactive():
             elif choice == "2":
                 _interactive_inspect()
             elif choice == "3":
+                print("Reads the current 500 MiB var image first; transfer progress is shown.")
+                print("The robot is written only after you review the plan and type WRITE VAR.")
                 print("Developer modes expose more system access. Choose int-developer only if you need its broader behavior.")
                 print("normal = standard use; developer = selected services; int-developer = broader internal mode; oobe = setup.")
                 print("  1 normal  2 developer  3 int-developer  4 oobe")
@@ -784,24 +788,40 @@ def interactive():
                 print("An existing rollback backup is reused, or one is created if needed. Temporary images are removed after a verified write.")
                 print(json.dumps(write_var(path), indent=2))
             elif choice == "7":
-                print("The current recovery bundle has not been tested on a real robot. RCM entry is also profile specific.")
-                if not _ask_confirmation("Load this candidate into RAM and wait for DFU re-enumeration?", "ENTER RCM"):
-                    print("Cancelled.")
-                    continue
                 device = select_device(devices())
                 if device is None:
                     raise DfuError("No Jibo RCM/DFU device detected.")
                 dfu_util = tool("dfu-util")
-                tegrarcm = tool("tegrarcm") if device["state"] == "rcm" else "tegrarcm"
-                result = enter(ROOT / "bundles" / "default", device["port"], tegrarcm,
-                               dfu_util, allow_untested=True)
+                bundle = ROOT / "bundles" / "default"
+                if device["state"] == "dfu":
+                    result = enter(bundle, device["port"], "tegrarcm", dfu_util)
+                else:
+                    if not (bundle / "manifest.json").is_file():
+                        raise DfuError("This GitHub source checkout does not include the signed recovery bundle "
+                                       "or tegrarcm tool needed to enter DFU from RCM. Obtain the matching "
+                                       "owner-provided files and place the bundle in bundles/default/. "
+                                       "If the robot is already in DFU, use options 1–6.")
+                    manifest = load_bundle(bundle)
+                    profile = manifest.get("profile", "unknown profile")
+                    if manifest.get("hardware_verified", False):
+                        print("RCM-to-DFU entry was verified on one Jibo for profile " + profile + ".")
+                        print("Partition writing has not been verified on hardware.")
+                    else:
+                        print("This bundle is not marked as verified for profile " + profile + ".")
+                        print("Confirm that it matches this robot before continuing.")
+                    if not _ask_confirmation("Load recovery into RAM and wait for DFU?", "ENTER RCM"):
+                        print("Cancelled.")
+                        continue
+                    tegrarcm = tool("tegrarcm")
+                    result = enter(bundle, device["port"], tegrarcm, dfu_util,
+                                   allow_unverified_profile=True)
                 print(json.dumps(result, indent=2))
             elif choice == "8":
-                print("Available now: detect RCM/DFU, validate the local bundle, enter the RAM DFU candidate,")
+                print("Available now: detect RCM/DFU, check the local bundle, enter RAM recovery,")
                 print("back up var, inspect mode/Wi-Fi state, edit mode/Wi-Fi offline, and write var with readback.")
                 print("Still being built: version-gated SSH/firewall changes, full user-area eMMC backup,")
                 print("ShofEL transport, automatic hardware profile selection, and support for more board populations.")
-                print("This candidate has not been validated on a physical robot.")
+                print("RCM-to-DFU entry and a var read were tested on one Jibo; partition writing still needs testing.")
             elif choice in ("q", "quit", "exit"):
                 return 0
             else:
@@ -831,7 +851,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         return interactive()
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__ + " Run without arguments to open the menu.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("interactive", help="Open the guided text menu")
     sub.add_parser("detect", help="Show matching USB devices as JSON")
@@ -844,7 +864,8 @@ def main(argv=None):
     entry.add_argument("--tegrarcm")
     _add_dfu_argument(entry)
     entry.add_argument("--timeout", type=float, default=30)
-    entry.add_argument("--allow-untested", action="store_true")
+    entry.add_argument("--allow-unverified-profile", action="store_true",
+                       help="Override the hardware-profile check after confirming the bundle matches the robot")
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
     _add_device_arguments(backup)
     _add_dfu_argument(backup)
@@ -899,7 +920,7 @@ def main(argv=None):
             device = select_device(devices(), args.port)
             rcm = tool("tegrarcm", args.tegrarcm) if device and device["state"] == "rcm" else "tegrarcm"
             result = enter(args.bundle, args.port, rcm, tool("dfu-util", args.dfu_util),
-                           args.timeout, args.allow_untested)
+                           args.timeout, args.allow_unverified_profile)
         elif args.command == "backup-var":
             result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
         elif args.command == "inspect-var":

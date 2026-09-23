@@ -1,97 +1,71 @@
 # Jibo DFU Mod Toolkit
 
-This toolkit helps an owner inspect and back up a Jibo's `var` partition, prepare a small set of changes, and write a changed `var` image back through USB DFU. It is still an engineering candidate. In the owner's current hardware session, RCM-to-DFU entry and a `var` read completed, but the mode change stopped at the read-only filesystem check before any partition write. Partition writes and readback are not yet hardware validated. The recovery bundle remains an untested candidate for the profile recorded in its manifest.
+This is a Linux tool for Jibo owners. Its normal interface is a guided numbered menu in the terminal. You do **not** need to build or use a `.pyz` package: run the Python file directly.
 
-## Start here
+## Start from GitHub
 
-On Linux, connect the robot by USB. If you have the packaged app, run the guided menu:
-
-```sh
-python3 dist/jibo-dfu-linux-x86_64.pyz
-```
-
-The menu explains the current USB state and walks through backup, inspection, mode changes, Wi-Fi setup, and verified write-back. A spinner and elapsed time appear while the 500 MiB partition is read or written. From a source checkout, use `python3 jibo_dfu.py` or `python3 jibo_dfu.py interactive`. If Linux reports USB permission errors, rerun with `sudo`; when launched through `sudo`, backup files are still stored in the invoking user's home directory and remain owned by that user.
-
-The simplest safe first operation is a backup. The robot must already be running this project's recovery loader in DFU mode:
+Clone the repository and enter its directory:
 
 ```sh
-python3 jibo_dfu.py list
-python3 jibo_dfu.py backup-var
+git clone https://github.com/Paskooter/Jibo-DFU-Mod-Toolkit.git
+cd Jibo-DFU-Mod-Toolkit
 ```
 
-The first backup is placed in a private directory under `~/Jibo-Backups/` and includes the raw 500 MiB image and a SHA-256 manifest. Repeating `backup-var` reuses the verified backup for that same robot instead of creating another copy. Use `python3 jibo_dfu.py backup-var --refresh` when you intentionally want to capture the robot's current state again. Backups are keyed to a hash of the USB serial when available, and otherwise to the USB port path. Treat the image as private: it can contain robot identity, network, key, and calibration data. The tool does not upload it anywhere.
-
-## What it can do today
-
-- Detect Jibo RCM/APX and DFU USB states, and identify the recovery loader marker.
-- Check the local recovery bundle's hashes.
-- Load the current RAM-only DFU candidate from RCM, with an explicit untested-hardware flag.
-- Back up the 500 MiB `var` partition from the marked recovery loader.
-- Inspect the saved mode and whether Wi-Fi is configured, without printing saved network details.
-- Make an offline copy of a var image with an allowlisted mode change or an added Wi-Fi network.
-- Back up, write, and read back a changed var image, requiring a typed `WRITE VAR` confirmation and leaving the robot in DFU afterward.
-
-The offline editor needs `debugfs` and `e2fsck` from the Linux `e2fsprogs` package. It checks the filesystem, leaves the source image intact, and writes a new copy. If the check fails, the report includes the `e2fsck` exit status and diagnostic output; live mode and Wi-Fi operations also record that no partition write was attempted. Wi-Fi setup adds a network while preserving other saved networks, refuses an SSID that is already present, and never displays or records the password. Protected networks use a derived WPA key in the image; open networks require an explicit choice.
-
-## Common commands
-
-Inspect a backup and prepare a local edit:
+The tool runs with Python 3.8 or newer. On Debian or Ubuntu, install Git, Python, and the host tools:
 
 ```sh
-python3 jibo_dfu.py inspect-var ~/Jibo-Backups/var-backup-*/var.img
-python3 jibo_dfu.py edit-mode ~/Jibo-Backups/var-backup-123/var.img --mode developer
-python3 jibo_dfu.py edit-wifi ~/Jibo-Backups/var-backup-123/var.img --ssid 'My Wi-Fi'
+sudo apt update
+sudo apt install git python3 dfu-util e2fsprogs
 ```
 
-`edit-mode` and `edit-wifi` create a sibling `*-edited.img` file. The Wi-Fi command asks for its password using a hidden prompt. For an open network, add `--open-network`.
+`e2fsprogs` supplies `debugfs` and `e2fsck`, used when inspecting or editing a backup.
 
-To perform a live change, use the matching command after the robot is in marked DFU mode:
+Start the guided menu:
 
 ```sh
-python3 jibo_dfu.py set-mode --mode developer
-python3 jibo_dfu.py configure-wifi --ssid 'My Wi-Fi'
+python3 jibo_dfu.py
 ```
 
-The Wi-Fi password is requested without echo. Each live command reads the current var image into temporary work space, prepares one edited image, shows the write plan and image hash, then asks you to type `WRITE VAR`. The first live write preparation creates one rollback backup if none exists for that robot. Later writes reuse that baseline instead of saving another persistent 500 MiB copy. Each operation still reads the current image temporarily so it can account for changes since the backup; that temporary dump is removed after a verified success, cancellation, or failure before writing. A failure after a write starts keeps its work files for recovery. You can pass `--confirm 'WRITE VAR'` for scripted use. A write is accepted only for the expected 500 MiB image and the project's recovery marker. After writing, the toolkit uploads var again and checks its SHA-256 against the edited image. It does not reset the robot automatically.
+This opens the menu in the terminal; it is not a separate desktop window. Try it before connecting a robot to see the options. If Linux later reports a USB permission error, run `sudo python3 jibo_dfu.py`. Backups still go to the home directory of the user who launched it.
 
-To write an image prepared earlier, use:
+## Get the robot ready
 
-```sh
-python3 jibo_dfu.py write-var /path/to/var-edited.img
-```
+The menu shows whether USB sees the robot in `RCM/APX` or `DFU` mode.
 
-This also reuses the saved rollback backup, creating one only if needed. Successful operation directories keep a small manifest and remove the temporary full-size images; transfer or readback failures preserve the work files for recovery.
+- In **DFU**, with this project's recovery loader showing its Jibo marker, options 1–6 can read or edit the `var` partition. `dfu-util` is required.
+- In **RCM/APX**, the robot has no partition access yet. Option 7 can load the RAM-only recovery program, but a source clone does not include the signed recovery bundle or the `tegrarcm` host tool. The owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile. If the robot is already in DFU, the missing bundle is not needed for options 1–6.
 
-## Entering recovery
+The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
 
-The tool cannot turn on a disconnected or powered-off robot. Use the robot's recovery/reset controls to make it appear as RCM/APX, then run:
+## Use the menu
 
-```sh
-python3 jibo_dfu.py enter --allow-untested
-```
+Choose a number at `Choose an option:`. The menu refreshes the USB state each time it returns to the main screen.
 
-`--allow-untested` is required because this recovery candidate has not been tried on real hardware. The loader is designed to run from RAM and avoid persistent writes on entry, but that design claim still needs independent hardware validation before anyone should rely on it. If multiple robots are connected, select one with `--port`, for example `--port 1-2`.
+| Option | What it does |
+| --- | --- |
+| **1 — Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
+| **2 — Inspect a var backup** | Shows the saved mode and whether Wi-Fi is configured; it hides network details. |
+| **3 — Set mode** | Prepares a mode change, displays the write plan, waits for `WRITE VAR`, then reads the partition back to verify it. |
+| **4 — Configure Wi-Fi** | Adds a network while preserving saved networks, waits for `WRITE VAR`, and verifies by reading back. Password entry is hidden. |
+| **5 — Edit a backup offline** | Makes a new local image for a mode or Wi-Fi change. The robot is not written to. |
+| **6 — Write an edited var image** | Shows the write plan, waits for `WRITE VAR`, and verifies the partition readback. |
+| **7 — Confirm DFU or enter recovery** | Confirms an already-running DFU loader, or enters DFU from RCM if the matching local recovery files are available. |
+| **8 — Support status** | Explains what is available and what is still being built. |
 
-For source use, the host needs Python 3.8+, `tegrarcm`, `dfu-util`, and (for image editing) `debugfs` and `e2fsck` from `e2fsprogs`. The single-file Linux x86_64 package under `dist/` bundles the Python application, host tools, and current local recovery bundle. It still needs compatible system libraries for libusb, libudev, Crypto++, libstdc++, and glibc.
+The read and write operations show a spinner and elapsed time while transferring 500 MiB. A successful write leaves the robot in DFU; the tool does not reset it automatically.
 
-## What is still unfinished
+## Backups and safety
 
-- Real-robot testing of RCM entry, var upload, data preservation, write, and readback.
-- Verified bundles for additional Jibo signing populations and board revisions.
-- Version-profiled SSH/firewall changes for both root filesystem slots.
-- Full filesystem backup and the optional ShofEL raw eMMC backup path.
-- Restore/recovery procedures and a clean public release with source and license notices for bundled components.
+The first live write preparation saves one rollback image of `var` under `~/Jibo-Backups/`. Later operations reuse that verified baseline instead of making another persistent 500 MiB copy. Each operation temporarily reads the current partition so it can account for changes since the baseline; temporary images are removed after success, cancellation, or a failure before writing. Files from a failure after a write starts are kept for recovery. An explicit refresh is the only normal way to request another baseline.
 
-There is no SSH/firewall patch command or full eMMC dump command yet. The toolkit will not guess at firewall rules or label a set of named filesystem partitions as a complete device backup.
+The backup may contain robot identity, Wi-Fi, keys, and calibration data. Keep it private; the toolkit does not upload it. Inspection avoids printing saved network details, and Wi-Fi passwords are not displayed or written to operation logs.
 
-## Package and development
+RCM-to-DFU entry and a `var` read were tested on one Jibo. Mode editing has been tested offline against a saved image. **Writing a partition and verifying the robot's readback have not yet been tested on hardware.** The menu requires a typed `WRITE VAR` before a partition write.
 
-The package builder uses an explicit allowlist and refuses bundled private-key material. Bundle signing is a separate offline developer operation; end users do not need or receive the signing key.
+## What is available and what is not
 
-```sh
-python3 scripts/package.py --bundle bundles/default \
-  --tegrarcm /path/to/tegrarcm --dfu-util /path/to/dfu-util \
-  --libcryptopp /path/to/libcryptopp.so --out dist/jibo-dfu-linux-x86_64.pyz
-```
+Available now: USB detection, recovery-bundle integrity checks, DFU entry for the tested profile, `var` backup and inspection, offline mode/Wi-Fi editing, and guarded `var` write/readback workflows.
 
-The local bundle contains signed artifacts for one candidate profile and is ignored by Git. `PROJECT_SPEC.md` is a local planning document and must remain uncommitted. Never add real robot captures, backups, Wi-Fi configuration, identity data, private keys, or generated build files to source control. Do not push this repository to a remote without the owner's explicit instruction.
+Still being built: SSH/firewall changes, full user-area eMMC backup, ShofEL transport, automatic board-profile selection, and support for additional Jibo hardware populations. The current tool writes only the `var` partition; it does not change other partitions or enable SSH.
+
+For the guided workflow, use `python3 jibo_dfu.py` and follow the numbered prompts. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.

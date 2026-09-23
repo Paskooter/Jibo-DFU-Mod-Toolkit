@@ -76,15 +76,15 @@ class EntryTests(unittest.TestCase):
 
     @patch.object(j, "devices", return_value=[{"port": "1-2", "state": "rcm"}])
     @patch.object(j, "run")
-    def test_candidate_requires_hardware_test_flag(self, run, devices):
-        with self.assertRaisesRegex(j.DfuError, "untested"):
+    def test_bundle_requires_hardware_profile_verification(self, run, devices):
+        with self.assertRaisesRegex(j.DfuError, "not verified for its declared hardware profile"):
             j.enter(self.root, None, "tegrarcm", "dfu-util")
         run.assert_not_called()
 
     def test_rcm_to_dfu(self):
         states = [[{"port": "1-2", "state": "rcm"}], [{"port": "1-2", "state": "dfu"}]]
         with patch.object(j, "devices", side_effect=states), patch.object(j, "run", side_effect=["OK", 'name="jibo-dfu-v1" name="var"']) as run:
-            result = j.enter(self.root, None, "tegrarcm", "dfu-util", allow_untested=True)
+            result = j.enter(self.root, None, "tegrarcm", "dfu-util", allow_unverified_profile=True)
             self.assertTrue(result["loader_verified"])
             argv = run.call_args_list[0].args[0]
             self.assertIn("--download-signed-msgs", argv)
@@ -95,7 +95,7 @@ class EntryTests(unittest.TestCase):
         states = [[{"port": "1-2", "state": "rcm"}], [{"port": "1-2", "state": "dfu"}]]
         with patch.object(j, "devices", side_effect=states), patch.object(j, "run", side_effect=["OK", 'name="var"']):
             with self.assertRaisesRegex(j.DfuError, "marker"):
-                j.enter(self.root, None, "tegrarcm", "dfu-util", allow_untested=True)
+                j.enter(self.root, None, "tegrarcm", "dfu-util", allow_unverified_profile=True)
 
     @patch.object(j, "devices", return_value=[])
     @patch.object(j, "run")
