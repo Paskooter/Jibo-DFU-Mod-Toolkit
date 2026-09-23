@@ -527,7 +527,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     print("Current var SHA-256: " + before_hash)
     print("Edited image: " + str(candidate))
     print("Edited image SHA-256: " + candidate_hash)
-    print("DFU entry and partition reading have been tested; partition writing and readback have not.")
+    print("Var writing and immediate DFU readback were tested on one Jibo. Mode persistence after reboot is still under investigation.")
     print("A successful write will be read back and compared. The robot will not be reset.")
     try:
         confirmed = _confirm_write(confirmation)
@@ -805,7 +805,7 @@ def interactive():
                     profile = manifest.get("profile", "unknown profile")
                     if manifest.get("hardware_verified", False):
                         print("RCM-to-DFU entry was verified on one Jibo for profile " + profile + ".")
-                        print("Partition writing has not been verified on hardware.")
+                        print("A var write and immediate readback were verified on one Jibo; persistence after reboot remains unverified.")
                     else:
                         print("This bundle is not marked as verified for profile " + profile + ".")
                         print("Confirm that it matches this robot before continuing.")
@@ -821,7 +821,8 @@ def interactive():
                 print("back up var, inspect mode/Wi-Fi state, edit mode/Wi-Fi offline, and write var with readback.")
                 print("Still being built: version-gated SSH/firewall changes, full user-area eMMC backup,")
                 print("ShofEL transport, automatic hardware profile selection, and support for more board populations.")
-                print("RCM-to-DFU entry and a var read were tested on one Jibo; partition writing still needs testing.")
+                print("RCM-to-DFU entry, var reading, and a var write/readback were tested on one Jibo.")
+                print("The mode change did not survive a later boot; the cause is under investigation.")
             elif choice in ("q", "quit", "exit"):
                 return 0
             else:

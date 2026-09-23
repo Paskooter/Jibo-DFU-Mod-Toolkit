@@ -60,7 +60,7 @@ The first live write preparation saves one rollback image of `var` under `~/Jibo
 
 The backup may contain robot identity, Wi-Fi, keys, and calibration data. Keep it private; the toolkit does not upload it. Inspection avoids printing saved network details, and Wi-Fi passwords are not displayed or written to operation logs.
 
-RCM-to-DFU entry and a `var` read were tested on one Jibo. Mode editing has been tested offline against a saved image. **Writing a partition and verifying the robot's readback have not yet been tested on hardware.** The menu requires a typed `WRITE VAR` before a partition write.
+RCM-to-DFU entry, a `var` read, and one `var` write with immediate DFU readback were tested on one Jibo. The edited mode was visible in the immediate readback, but a later dump after boot showed `oobe` again. The cause is still under investigation; do not assume a verified DFU readback means a mode change will persist through boot. The menu requires a typed `WRITE VAR` before a partition write.
 
 ## What is available and what is not
 
