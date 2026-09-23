@@ -32,6 +32,9 @@ UPDATE_ORDER = ("rootfsA", "rootfsB", "services", "skills", "var")
 SKILLS_SECTOR_SIZE = 512
 SKILLS_CHUNK_SECTORS = 0x200000
 SKILLS_CHUNK_BYTES = SKILLS_SECTOR_SIZE * SKILLS_CHUNK_SECTORS
+EMMC_SECTOR_SIZE = 512
+SHOFEL_GPT_SECTORS = 64
+SHOFEL_READ_FRAME_BYTES = 8 * EMMC_SECTOR_SIZE
 
 
 def _invoking_user():
@@ -125,7 +128,7 @@ def _runtime_env():
     return env
 
 
-def run_with_progress(argv, timeout, label):
+def run_with_progress(argv, timeout, label, cwd=None):
     """Run a quiet transfer with a terminal spinner and retain output for errors."""
     started = time.monotonic()
     terminal = sys.stderr
@@ -136,7 +139,7 @@ def run_with_progress(argv, timeout, label):
     try:
         with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as log:
             process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
-                                       text=True, env=_runtime_env())
+                                       text=True, env=_runtime_env(), cwd=cwd)
             timed_out = False
             spinner = "|/-\\"
             frames = 0
@@ -226,6 +229,8 @@ def _call_with_progress(callback, label):
 
 def _transfer_error_detail(output):
     detail = re.sub(r'(serial=")[^"]*(")', r"\1[redacted]\2", output).strip()
+    detail = re.sub(r'(Chip ID:\s*)[^\r\n]*',
+                    r"\1[redacted]", detail, flags=re.IGNORECASE)
     if len(detail) > 2000:
         detail = "…\n" + detail[-2000:]
     return detail
@@ -241,6 +246,33 @@ def tool(name, override=None):
     if not located:
         raise DfuError("Missing " + name + "; install it or provide --" + name + ".")
     return located
+
+
+def _shofel_tool(override=None):
+    """Resolve ShofEL and its adjacent eMMC payload without running it."""
+    candidate = override or str(ROOT / "tools" / "shofel2_t124")
+    if not Path(candidate).is_file():
+        if override:
+            raise DfuError("ShofEL host tool does not exist: " + str(override))
+        candidate = shutil.which("shofel2_t124")
+    if not candidate:
+        raise DfuError("Missing shofel2_t124; install it or provide --shofel.")
+    executable = Path(candidate).resolve()
+    if not os.access(str(executable), os.X_OK):
+        raise DfuError("ShofEL host tool is not executable: " + str(executable))
+    payload = executable.parent / "emmc_server.bin"
+    if not payload.is_file() or payload.stat().st_size == 0:
+        raise DfuError("Missing non-empty emmc_server.bin next to " + str(executable))
+    return str(executable)
+
+
+def shofel_available():
+    """Return whether the default ShofEL host and payload are installed."""
+    try:
+        _shofel_tool()
+        return True
+    except (DfuError, OSError):
+        return False
 
 
 def dfu_alternatives(executable, port):
@@ -703,11 +735,12 @@ def _update_candidates(folder):
             (path.is_dir() or (path.is_file() and path.name.lower().endswith(updates.ARCHIVE_SUFFIXES)))]
 
 
-def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None):
+def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
+                     transport="USB DFU upload", usb_state="DFU (0955:701a)",
+                     profile="Jibo RAM DFU candidate; firmware revision unknown"):
     record = {"schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
               "partition": "var", "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
-              "profile": "Jibo RAM DFU candidate; firmware revision unknown",
-              "transport": "USB DFU upload", "usb_state": "DFU (0955:701a)",
+              "profile": profile, "transport": transport, "usb_state": usb_state,
               "usb_port": port, "device_tag": device_tag or "usb-port:" + port,
               "image": Path(image_path).name,
               "operations": operations or ["read var partition"]}
@@ -844,6 +877,144 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
                     "created_utc": existing["created_utc"]}
     return {"status": "backup complete", "image": str(image_path), "size_bytes": EXPECTED_VAR_SIZE,
             "sha256": digest, "manifest": str(directory / "backup-manifest.json"),
+            "operation_directory": str(directory), "profile": record["profile"]}
+
+
+def _parse_shofel_chip_id(output):
+    match = re.search(r"Chip ID:\s*((?:0x[0-9a-fA-F]{2}\s*){16})", output,
+                      flags=re.IGNORECASE)
+    if not match:
+        raise DfuError("ShofEL did not report a valid T124 chip ID; no backup was saved.")
+    return bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", match.group(1)))
+
+
+def _reject_shofel_read_errors(path, start_sector):
+    """Reject the payload's fixed 4 KiB marker frame for failed eMMC reads."""
+    marker_tail = bytes.fromhex("addeadde") * ((SHOFEL_READ_FRAME_BYTES - 4) // 4)
+    with Path(path).open("rb") as stream:
+        frame_index = 0
+        while True:
+            frame = stream.read(SHOFEL_READ_FRAME_BYTES)
+            if not frame:
+                return
+            if len(frame) != SHOFEL_READ_FRAME_BYTES:
+                raise DfuError("ShofEL returned an incomplete eMMC read frame.")
+            first_word = int.from_bytes(frame[:4], "little")
+            if first_word & 0xFFFF0000 == 0xDEAD0000 and frame[4:] == marker_tail:
+                sector = start_sector + frame_index * (SHOFEL_READ_FRAME_BYTES // EMMC_SECTOR_SIZE)
+                code = first_word & 0xFFFF
+                raise DfuError("ShofEL reported an eMMC read error at sector {} (code 0x{:04x}).".format(
+                    sector, code))
+            frame_index += 1
+
+
+def _read_shofel_range(executable, port, start_sector, sector_count, destination,
+                       timeout, label):
+    """Read an exact sector range using only ShofEL's EMMC_READ command."""
+    try:
+        start_sector = int(start_sector)
+        sector_count = int(sector_count)
+    except (TypeError, ValueError) as exc:
+        raise DfuError("Invalid ShofEL sector range.") from exc
+    if (start_sector < 0 or sector_count <= 0 or start_sector > 0xFFFFFFFF or
+            sector_count > 0xFFFFFFFF or start_sector + sector_count > 0x100000000):
+        raise DfuError("ShofEL sector range is outside the supported T124 address range.")
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    argv = [executable, "--usb-port-path", port, "EMMC_READ",
+            "0x{:x}".format(start_sector), "0x{:x}".format(sector_count), str(destination)]
+    try:
+        output = run_with_progress(argv, timeout=timeout, label=label,
+                                   cwd=str(Path(executable).parent))
+        expected = sector_count * EMMC_SECTOR_SIZE
+        if not destination.is_file() or destination.stat().st_size != expected:
+            actual = destination.stat().st_size if destination.is_file() else 0
+            raise DfuError("ShofEL returned {} bytes; expected {}.".format(actual, expected))
+        _reject_shofel_read_errors(destination, start_sector)
+        destination.chmod(0o600)
+        _chown_to_invoking_user(destination)
+        return _parse_shofel_chip_id(output)
+    except (DfuError, OSError):
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _read_shofel_gpt(executable, port):
+    with tempfile.TemporaryDirectory(prefix="jibo-shofel-gpt-") as directory:
+        prefix = Path(directory) / "gpt-prefix.bin"
+        chip_id = _read_shofel_range(
+            executable, port, 0, SHOFEL_GPT_SECTORS, prefix, 120,
+            "Reading the 32 KiB eMMC GPT with ShofEL")
+        try:
+            layout = updates.parse_gpt_layout_prefix(prefix.read_bytes())
+        except (OSError, updates.UpdateError) as exc:
+            raise DfuError("Could not validate the robot's GPT layout: " + str(exc)) from exc
+    required = {"rootfsA", "rootfsB", "services", "var", "skills"}
+    missing = sorted(required - set(layout))
+    if missing:
+        raise DfuError("GPT is missing Jibo partition names: " + ", ".join(missing) + ".")
+    var = layout["var"]
+    if var["size_bytes"] != EXPECTED_VAR_SIZE:
+        raise DfuError("GPT reports {} bytes for var; this profile expects {}. No partition read was attempted.".format(
+            var["size_bytes"], EXPECTED_VAR_SIZE))
+    for name, expected in updates.KNOWN_CAPACITIES.items():
+        if layout[name]["size_bytes"] != expected:
+            raise DfuError("GPT reports {} bytes for {}; this profile expects {}. No partition read was attempted.".format(
+                layout[name]["size_bytes"], name, expected))
+    return layout, chip_id
+
+
+def backup_var_shofel(port=None, shofel=None, out=None, refresh=False):
+    """Save a private var baseline through read-only ShofEL eMMC reads."""
+    executable = _shofel_tool(shofel)
+    selected = select_device(devices(), port)
+    if selected is None:
+        raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
+    if selected["state"] != "rcm":
+        raise DfuError("ShofEL var backup requires the robot to be in RCM/APX; no partition read was attempted.")
+    port = selected["port"]
+    layout, chip_id = _read_shofel_gpt(executable, port)
+    device_tag = "tegra-chip-id-sha256:" + hashlib.sha256(chip_id).hexdigest()
+    existing = _find_verified_backup(device_tag) if out is None else None
+    if existing and not refresh:
+        return {"status": "existing verified backup reused", "image": str(existing["image"]),
+                "sha256": existing["sha256"], "manifest": str(existing["manifest"]),
+                "created_utc": existing["created_utc"],
+                "message": "Use --refresh to capture the currently connected var state."}
+
+    directory = _new_operation_dir(out, "var-backup")
+    image_path = directory / "var.img"
+    var = layout["var"]
+    sector_count = var["last_lba"] - var["first_lba"] + 1
+    try:
+        capture_chip_id = _read_shofel_range(
+            executable, port, var["first_lba"], sector_count, image_path, 3600,
+            "Reading the 500 MiB var partition with ShofEL")
+        if capture_chip_id != chip_id:
+            raise DfuError("The RCM/APX device changed between GPT and var reads; the partial backup was discarded.")
+        digest = _sha256_file(image_path)
+        record = _backup_manifest(
+            directory, port, image_path, digest, device_tag=device_tag,
+            transport="ShofEL2 EMMC_READ (read-only)", usb_state="RCM/APX (0955:7740)",
+            profile="Jibo T124 raw eMMC GPT profile; firmware revision unknown")
+    except (DfuError, OSError) as exc:
+        image_path.unlink(missing_ok=True)
+        _private_write(directory / "backup-manifest.json", {
+            "schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
+            "partition": "var", "status": "failed", "usb_state": "RCM/APX (0955:7740)",
+            "transport": "ShofEL2 EMMC_READ (read-only)", "usb_port": port,
+            "error": str(exc), "operation_directory": str(directory)})
+        raise
+    if out is None and existing and existing["sha256"] == digest:
+        image_path.unlink(missing_ok=True)
+        (directory / "backup-manifest.json").unlink(missing_ok=True)
+        directory.rmdir()
+        return {"status": "existing verified backup reused", "image": str(existing["image"]),
+                "sha256": digest, "manifest": str(existing["manifest"]),
+                "created_utc": existing["created_utc"]}
+    return {"status": "backup complete", "image": str(image_path),
+            "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
+            "manifest": str(directory / "backup-manifest.json"),
             "operation_directory": str(directory), "profile": record["profile"]}
 
 
@@ -1234,6 +1405,9 @@ def main(argv=None):
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
     _add_device_arguments(backup)
     _add_dfu_argument(backup)
+    backup.add_argument("--transport", choices=("dfu", "shofel"), default="dfu",
+                        help="Read var through the default signed DFU loader or ShofEL in RCM/APX")
+    backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin must be beside it")
     backup.add_argument("--out", type=Path, help="New output directory; otherwise ~/Jibo-Backups")
     backup.add_argument("--refresh", action="store_true", help="Capture the current var state instead of reusing the saved baseline")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
@@ -1301,7 +1475,12 @@ def main(argv=None):
             result = enter(args.bundle, args.port, rcm, tool("dfu-util", args.dfu_util),
                            args.timeout, args.allow_unverified_profile)
         elif args.command == "backup-var":
-            result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
+            if args.transport == "shofel":
+                result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh)
+            else:
+                if args.shofel:
+                    raise DfuError("Use --shofel only with --transport shofel.")
+                result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":

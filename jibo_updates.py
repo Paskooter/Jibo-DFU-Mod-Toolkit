@@ -243,12 +243,13 @@ def parse_alt_capacities(dfu_list_output: str) -> dict[str, int]:
     return capacities
 
 
-def parse_gpt_prefix(data: bytes, sector_size: int = 512) -> dict[str, int]:
-    """Parse Jibo partition byte capacities from a primary-GPT prefix.
+def parse_gpt_layout_prefix(data: bytes, sector_size: int = 512) -> dict[str, dict[str, int]]:
+    """Parse partition extents from a structurally valid primary-GPT prefix.
 
     The GPT header is at LBA 1 and the 128-byte partition entries start at LBA
     2. A full 32KiB prefix covers the observed 128-entry table. Both the header
-    CRC and complete partition-entry array CRC are required.
+    CRC and complete partition-entry array CRC are required. The result maps
+    each partition name to its first/last LBA and byte capacity.
     """
 
     if sector_size < 512 or len(data) < sector_size + 92:
@@ -281,7 +282,7 @@ def parse_gpt_prefix(data: bytes, sector_size: int = 512) -> dict[str, int]:
     if (zlib.crc32(table_bytes) & 0xFFFFFFFF) != entries_crc:
         raise UpdateError("The GPT partition-entry array CRC is invalid.")
 
-    capacities: dict[str, int] = {}
+    layout: dict[str, dict[str, int]] = {}
     extents: list[tuple[int, int, str]] = []
     for index in range(available_entries):
         offset = table_offset + index * entry_size
@@ -299,16 +300,28 @@ def parse_gpt_prefix(data: bytes, sector_size: int = 512) -> dict[str, int]:
             raise UpdateError("GPT entry " + str(index + 1) + " has an invalid partition name.") from exc
         if not name:
             raise UpdateError("GPT entry " + str(index + 1) + " has no partition name.")
-        if name in capacities:
+        if name in layout:
             raise UpdateError("GPT contains duplicate partition name " + name + ".")
         capacity = (last_lba - first_lba + 1) * sector_size
-        capacities[name] = capacity
+        layout[name] = {"first_lba": first_lba, "last_lba": last_lba,
+                        "size_bytes": capacity}
         extents.append((first_lba, last_lba, name))
     extents.sort()
     for before, after in zip(extents, extents[1:]):
         if after[0] <= before[1]:
             raise UpdateError("GPT partition extents overlap: " + before[2] + " and " + after[2] + ".")
 
+    return layout
+
+
+def parse_gpt_prefix(data: bytes, sector_size: int = 512) -> dict[str, int]:
+    """Parse and profile-check Jibo partition byte capacities.
+
+    Update callers use this stricter wrapper so a structurally valid but
+    unexpected GPT cannot be used to size an update image.
+    """
+    layout = parse_gpt_layout_prefix(data, sector_size)
+    capacities = {name: partition["size_bytes"] for name, partition in layout.items()}
     required = {"rootfsA", "rootfsB", "services", "var", "skills"}
     missing = sorted(required - set(capacities))
     if missing:

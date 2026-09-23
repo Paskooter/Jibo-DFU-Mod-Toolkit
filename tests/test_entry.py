@@ -1,5 +1,7 @@
 import hashlib
+import io
 import json
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
@@ -115,6 +117,21 @@ class EntryTests(unittest.TestCase):
         with self.assertRaisesRegex(j.DfuError, "No Jibo"):
             j.enter(self.root, None, "tegrarcm", "dfu-util")
         run.assert_not_called()
+
+    def test_backup_var_cli_selects_shofel_transport_explicitly(self):
+        result = {"status": "backup complete", "transport": "ShofEL2"}
+        with patch.object(j, "backup_var_shofel", return_value=result) as backup, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(j.main(["backup-var", "--transport", "shofel", "--port", "1-2",
+                                     "--shofel", "/opt/shofel/shofel2_t124"]), 0)
+        backup.assert_called_once_with("1-2", "/opt/shofel/shofel2_t124", None, False)
+
+    def test_shofel_path_cannot_be_supplied_for_dfu_transport(self):
+        errors = io.StringIO()
+        with patch.object(j, "backup_var") as backup, redirect_stderr(errors):
+            self.assertEqual(j.main(["backup-var", "--shofel", "/opt/shofel/shofel2_t124"]), 1)
+        backup.assert_not_called()
+        self.assertIn("Use --shofel only with --transport shofel", errors.getvalue())
 
 
 if __name__ == "__main__":

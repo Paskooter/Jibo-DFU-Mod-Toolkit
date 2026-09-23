@@ -25,13 +25,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("bundle", "tegrarcm", "dfu-util", "libcryptopp", "out"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--shofel2", type=Path,
+                        help="Optional shofel2_t124 executable for read-only RCM backups")
+    parser.add_argument("--emmc-server", type=Path,
+                        help="Optional ShofEL emmc_server.bin payload; must accompany --shofel2")
     args = parser.parse_args()
+    if bool(args.shofel2) != bool(args.emmc_server):
+        parser.error("--shofel2 and --emmc-server must be supplied together")
     load_bundle(args.bundle)
     selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "jibo_images.py": ROOT / "jibo_images.py",
                 "jibo_updates.py": ROOT / "jibo_updates.py", "jibo_tui.py": ROOT / "jibo_tui.py",
                 "README.md": ROOT / "README.md",
                 "tools/tegrarcm": args.tegrarcm, "tools/dfu-util": args.dfu_util,
                 "lib/libcryptopp.so": args.libcryptopp}
+    if args.shofel2:
+        selected["tools/shofel2_t124"] = args.shofel2
+        selected["tools/emmc_server.bin"] = args.emmc_server
     selected.update({"bundles/default/" + name: args.bundle / name for name in (*FILES, "manifest.json")})
     data = {name: path.read_bytes() for name, path in selected.items()}
     for name, content in data.items():

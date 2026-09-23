@@ -21,6 +21,7 @@ class Readiness:
     marker_present: bool = False
     alt_names: tuple = ()
     detail: str = ""
+    shofel_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,12 @@ def inspect_readiness(api):
     device = found[0]
     port = device.get("port", "")
     if device.get("state") == "rcm":
-        return Readiness("rcm", found, port=port)
+        available = False
+        try:
+            available = bool(api.shofel_available())
+        except Exception:
+            pass
+        return Readiness("rcm", found, port=port, shofel_available=available)
     try:
         executable = api.tool("dfu-util")
         names, output = api.dfu_alternatives(executable, port)
@@ -123,6 +129,14 @@ def build_menu_items(readiness, update_packages=()):
     else:
         enter_reason = "Connect the robot and enter RCM/APX first."
 
+    if readiness.state == "rcm":
+        shofel_reason = ("" if readiness.shofel_available else
+                          "Install shofel2_t124 and its adjacent emmc_server.bin, or use the CLI --shofel option.")
+    elif readiness.state == "multiple":
+        shofel_reason = "Connect one robot at a time."
+    else:
+        shofel_reason = "ShofEL backup requires the robot to be in RCM/APX."
+
     packages = tuple(update_packages)
     update_required = ("rootfsA", "rootfsB", "services", "emmc-000")
     missing_update = [name for name in update_required if name not in readiness.alt_names]
@@ -147,6 +161,8 @@ def build_menu_items(readiness, update_packages=()):
         update_reason = ""
     items = [
         MenuItem("enter-dfu", "Enter DFU from RCM/APX", is_rcm, enter_reason),
+        MenuItem("backup-var-shofel", "Back up var with ShofEL (read-only)",
+                 is_rcm and readiness.shofel_available, shofel_reason),
         MenuItem("backup-var", "Back up var", is_dfu, connection_reason),
         MenuItem("set-mode", "Set robot mode", is_dfu, connection_reason),
         MenuItem("configure-wifi", "Configure Wi-Fi", is_dfu, connection_reason),
@@ -563,6 +579,7 @@ class TerminalMenu:
 def _action_hint(key):
     hints = {
         "enter-dfu": "Loads the recovery program into RAM while the robot is in RCM/APX.",
+        "backup-var-shofel": "Reads the GPT and var partition over ShofEL USB. This action does not write eMMC.",
         "backup-var": "Read the robot's var partition and save one reusable local rollback image.",
         "set-mode": "Choose a mode; review the proposed change and confirm before writing.",
         "configure-wifi": "Enter a network; review the proposed change and confirm before writing.",
@@ -679,6 +696,8 @@ def execute_action(api, key, readiness):
         return _run_enter(api, readiness)
     if key == "backup-var":
         return api.backup_var()
+    if key == "backup-var-shofel":
+        return api.backup_var_shofel(port=readiness.port)
     if key == "set-mode":
         mode = _select_mode()
         if mode is None:

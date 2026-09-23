@@ -64,6 +64,19 @@ def add_image_files(archive, prefix="release/flash_jibo/output/images", skip=())
 
 
 class UpdatePackageTests(unittest.TestCase):
+    def test_gpt_layout_parser_returns_exact_partition_extents(self):
+        layout = updates.parse_gpt_layout_prefix(make_gpt_prefix())
+        self.assertEqual(layout["rootfsA"]["first_lba"], 34)
+        self.assertEqual(layout["rootfsA"]["size_bytes"], updates.KNOWN_CAPACITIES["rootfsA"])
+        self.assertEqual(layout["var"]["last_lba"] - layout["var"]["first_lba"] + 1,
+                         updates.KNOWN_CAPACITIES["var"] // 512)
+
+    def test_gpt_layout_parser_rejects_corrupt_partition_table_crc(self):
+        prefix = bytearray(make_gpt_prefix())
+        prefix[1024 + 56] ^= 1
+        with self.assertRaisesRegex(updates.UpdateError, "partition-entry array CRC"):
+            updates.parse_gpt_layout_prefix(bytes(prefix))
+
     def test_preserve_var_flash_never_writes_var_and_verifies_each_target(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

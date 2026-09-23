@@ -33,7 +33,8 @@ This opens the terminal interface; it is not a separate desktop window. Use **�
 The screen leads through **connect → RCM/APX → DFU → choose an action**. RCM/APX is the robot's USB recovery entry state. The toolkit loads the matching recovery program into RAM to make DFU available; only DFU exposes the partition actions.
 
 - In **DFU**, with this project's recovery loader showing its Jibo marker, the menu can read or edit `var` and install supported full-flash packages. `dfu-util` is required.
-- In **RCM/APX**, the robot has no partition access yet. Choose **Enter DFU from RCM/APX**, the first action. A source clone does not include the signed recovery bundle or the `tegrarcm` host tool. The owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile. If the robot is already in DFU, the missing bundle is not needed for the partition workflows.
+- In **RCM/APX**, DFU-based partition and update actions need recovery loaded first. Choose **Enter DFU from RCM/APX** to load it into RAM. A source clone does not include the signed recovery bundle or the `tegrarcm` host tool; the owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile.
+- Alternatively, an explicit ShofEL `var` backup can read the live GPT and `var` sectors directly over USB while the robot remains in RCM/APX. It needs the ShofEL host and `emmc_server.bin` payload, but no signed recovery bundle or production key. The operation only invokes `EMMC_READ`; it does not write or erase eMMC.
 
 The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
 
@@ -47,6 +48,7 @@ The screen refreshes USB state each time it returns from an action. The first ac
 | --- | --- |
 | **Enter DFU from RCM/APX** | Loads the matching recovery program into RAM; available only while the robot is in RCM/APX. |
 | **Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
+| **Back up var with ShofEL (read-only)** | Available in RCM/APX when ShofEL is installed; validates the GPT and reads the exact `var` extent over USB without writing eMMC. |
 | **Set robot mode** | Prepares a mode change, displays the write plan, asks for confirmation on the terminal screen, then reads the partition back to verify it. |
 | **Configure Wi-Fi** | Adds a network while preserving saved networks, asks for confirmation on the terminal screen, and verifies by reading back. Password entry is hidden. |
 | **Install an official update package** | Lists packages in `updates/`, asks whether to preserve or replace `var`, saves one original backup per written partition, prepares exact-size images, writes and reads back each partition, then requests a reset. |
@@ -54,6 +56,16 @@ The screen refreshes USB state each time it returns from an action. The first ac
 | **Inspect or edit a local backup** | Works offline. Inspection hides network details; editing creates a separate image. |
 
 The read and write operations show a spinner and elapsed time. A successful mode or Wi-Fi write leaves the robot in DFU; a successful full-flash update requests a reset after verifying every partition.
+
+For the ShofEL transport, place the built `shofel2_t124` and its `emmc_server.bin` payload together in `tools/` or on `PATH`, or pass the host path explicitly:
+
+```sh
+sudo python3 jibo_dfu.py backup-var --transport shofel --shofel /path/to/shofel2_t124 --port 1-2
+```
+
+The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so the adjacent payload resolves correctly. To bundle ShofEL for the `.pyz` menu, pass both `--shofel2 /path/to/shofel2_t124` and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; the pair is stored under `tools/` and the menu discovers it there.
+
+The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The host and payload need to be built with exact USB-port selection and 8-sector read framing. Generated `.pyz` packages include ShofEL only when both optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
 
 ## Install an official full-flash update
 
@@ -91,8 +103,8 @@ RCM-to-DFU entry, a `var` read, and a mode change to `int-developer` were tested
 
 ## What is available and what is not
 
-Available now: USB detection, recovery-bundle integrity checks, DFU entry for the tested profile, `var` backup and inspection, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
+Available now: USB detection, recovery-bundle integrity checks, DFU entry for the tested profile, `var` backup and inspection over DFU or read-only ShofEL, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
 
-Still being built: SSH/firewall changes, full user-area eMMC backup, ShofEL transport, automatic board-profile selection, and support for additional Jibo hardware populations. Update flashing is not yet hardware-tested, and SSH is not enabled by this tool.
+Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. The ShofEL backup path and the update workflow still need hardware validation; SSH is not enabled by this tool.
 
 For the guided workflow, use `python3 jibo_dfu.py` and follow the terminal screen. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.
