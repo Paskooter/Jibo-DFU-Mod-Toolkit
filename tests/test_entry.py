@@ -100,6 +100,7 @@ class EntryTests(unittest.TestCase):
             with self.assertRaisesRegex(j.DfuError, "before the recovery loader was sent") as caught:
                 j.enter(self.root, None, "tegrarcm", "dfu-util", allow_unverified_profile=True)
         self.assertIn("still in RCM/APX", str(caught.exception))
+        self.assertIn("signing profile", str(caught.exception))
         self.assertEqual(run.call_count, 1)
 
     def test_wrong_loader_marker(self):

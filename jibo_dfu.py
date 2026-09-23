@@ -276,7 +276,7 @@ def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_unverified_profile
             raise DfuError(
                 "The RCM handshake stopped before the recovery loader was sent. "
                 "The robot is still in RCM/APX; DFU has not started. "
-                "Reset into RCM/APX, reconnect the USB connection or passthrough, and retry."
+                "Reset into RCM/APX, then check the USB connection and this robot's signing profile."
             ) from exc
         raise
     deadline = time.monotonic() + timeout
