@@ -38,17 +38,78 @@
  #endif /* __CONFIG_H */
 --- a/drivers/dfu/dfu_mmc.c
 +++ b/drivers/dfu/dfu_mmc.c
-@@ -26,6 +26,13 @@
- 	struct mmc *mmc;
- 	u32 blk_start, blk_count, n = 0;
- 	int ret, part_num_bkp = 0;
-+
+@@ -20,6 +20,57 @@
+ static long dfu_file_buf_len;
+ static long dfu_file_buf_filled;
+ 
 +#ifdef CONFIG_JIBO_DFU_ENTRY
-+	/* Whole user area and GPT marker are for backups/identification only. */
++/* Keep raw DFU lengths below the signed 32-bit limit in this U-Boot. */
++#define JIBO_DFU_MAX_CHUNK_BLOCKS 0x200000U
++
++static int jibo_dfu_skills_write_ok(struct dfu_entity *dfu, struct mmc *mmc)
++{
++	disk_partition_t info;
++	lbaint_t offset, remaining, expected_start, expected_size;
++	unsigned int chunk;
++	int i, found = 0;
++
++	/* Names are deliberately fixed-width so malformed aliases fail closed. */
++	if (strncmp(dfu->name, "skills-", 7) ||
++	    dfu->name[7] < '0' || dfu->name[7] > '9' ||
++	    dfu->name[8] < '0' || dfu->name[8] > '9' ||
++	    dfu->name[9] < '0' || dfu->name[9] > '9' ||
++	    dfu->name[10] != '\0')
++		return 0;
++	chunk = (dfu->name[7] - '0') * 100 +
++		(dfu->name[8] - '0') * 10 + (dfu->name[9] - '0');
++
++	if (dfu->data.mmc.dev_num != 0 || dfu->layout != DFU_RAW_ADDR ||
++	    dfu->data.mmc.hw_partition >= 0 ||
++	    dfu->data.mmc.lba_blk_size != 512 || mmc->block_dev.blksz != 512)
++		return 0;
++
++	/* Re-read GPT and bind each writable alt to one exact skills slice. */
++	for (i = 1; i <= 128; ++i) {
++		if (part_get_info(&mmc->block_dev, i, &info))
++			continue;
++		if (!strcmp(info.name, "skills")) {
++			found = 1;
++			break;
++		}
++	}
++	if (!found || info.blksz != 512 || !info.size ||
++	    info.start >= mmc->block_dev.lba ||
++	    info.size > mmc->block_dev.lba - info.start ||
++	    chunk > (info.size - 1) / JIBO_DFU_MAX_CHUNK_BLOCKS)
++		return 0;
++
++	offset = (lbaint_t)chunk * JIBO_DFU_MAX_CHUNK_BLOCKS;
++	expected_start = info.start + offset;
++	remaining = info.size - offset;
++	expected_size = remaining > JIBO_DFU_MAX_CHUNK_BLOCKS ?
++		JIBO_DFU_MAX_CHUNK_BLOCKS : remaining;
++	return dfu->data.mmc.lba_start == expected_start &&
++		dfu->data.mmc.lba_size == expected_size;
++}
++#endif
++
+ static int mmc_block_op(enum dfu_op op, struct dfu_entity *dfu,
+ 			u64 offset, void *buf, long *len)
+ {
+@@ -33,6 +84,16 @@
+ 		error("Device MMC %d - not found!", dfu->data.mmc.dev_num);
+ 		return -ENODEV;
+ 	}
++#ifdef CONFIG_JIBO_DFU_ENTRY
++	/* Whole-disk backup alts and the marker are always read-only. */
 +	if (op == DFU_OP_WRITE &&
 +	    (!strncmp(dfu->name, "emmc-", 5) || !strcmp(dfu->name, "jibo-dfu-v1")))
 +		return -EPERM;
++	/* skills-* writes are allowed only for generated, exact GPT slices. */
++	if (op == DFU_OP_WRITE && !strncmp(dfu->name, "skills-", 7) &&
++	    !jibo_dfu_skills_write_ok(dfu, mmc))
++		return -EPERM;
 +#endif
  
- 	mmc = find_mmc_device(dfu->data.mmc.dev_num);
- 	if (!mmc) {
+ 	/*
+ 	 * We must ensure that we work in lba_blk_size chunks, so ALIGN
