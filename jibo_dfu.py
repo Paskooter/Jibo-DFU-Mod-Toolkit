@@ -333,6 +333,27 @@ def probe_rcm_dram(port=None, shofel=None):
             "details": lines}
 
 
+def trace_rcm_dram(port=None, shofel=None):
+    """Trace one T124 memory-register read at a time without eMMC access."""
+    executable = _shofel_tool(shofel)
+    trace = Path(executable).parent / "dram_trace.bin"
+    if not trace.is_file() or not trace.stat().st_size:
+        raise DfuError("Missing dram_trace.bin next to " + executable)
+    selected = select_device(devices(), port)
+    if selected is None or selected["state"] != "rcm":
+        raise DfuError("Connect the robot in RCM/APX before tracing DRAM.")
+    output = run_with_progress([executable, "--usb-port-path", selected["port"],
+                                "DRAM_TRACE"], timeout=60,
+                               label="Tracing T124 memory setup",
+                               cwd=str(Path(executable).parent))
+    phases = [line.strip() for line in output.splitlines()
+              if line.startswith("DRAM_TRACE phase ")]
+    if not phases or not any("(complete)" in line for line in phases):
+        raise DfuError("ShofEL returned an incomplete DRAM trace.")
+    return {"status": "trace complete", "port": selected["port"],
+            "phases": phases}
+
+
 def dfu_alternatives(executable, port):
     output = run([executable, "-d", "0955:701a", "--path", port, "-l"])
     names = re.findall(r'name="([^"]+)"', output)
@@ -1522,6 +1543,9 @@ def main(argv=None):
     dram_probe = sub.add_parser("probe-rcm-dram", help="Check T124 DRAM readiness through ShofEL without reading eMMC")
     _add_device_arguments(dram_probe)
     dram_probe.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
+    dram_trace = sub.add_parser("trace-rcm-dram", help="Trace T124 memory setup one read at a time without eMMC access")
+    _add_device_arguments(dram_trace)
+    dram_trace.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1599,6 +1623,8 @@ def main(argv=None):
             result = benchmark_rcm_read(args.port, args.shofel, args.bus_width)
         elif args.command == "probe-rcm-dram":
             result = probe_rcm_dram(args.port, args.shofel)
+        elif args.command == "trace-rcm-dram":
+            result = trace_rcm_dram(args.port, args.shofel)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":

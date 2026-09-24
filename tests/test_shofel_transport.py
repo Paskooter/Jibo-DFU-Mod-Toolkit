@@ -78,6 +78,24 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertNotIn("Chip ID", str(result))
         self.assertIn("Register preflight: not ready", result["details"])
 
+    def test_dram_trace_uses_exact_port_and_only_returns_phases(self):
+        directory = self.root / "shofel-trace"
+        directory.mkdir()
+        (directory / "dram_trace.bin").write_bytes(b"trace")
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        output = ("Chip ID: 0x01 0x02\n"
+                  "DRAM_TRACE phase 0 (payload entry): 0x00000000\n"
+                  "DRAM_TRACE phase 15 (complete): 0x00000000\n")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", return_value=output) as run:
+            result = toolkit.trace_rcm_dram(port="1-2")
+        self.assertEqual(run.call_args.args[0],
+                         [str(executable), "--usb-port-path", "1-2", "DRAM_TRACE"])
+        self.assertNotIn("Chip ID", str(result))
+        self.assertEqual(len(result["phases"]), 2)
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

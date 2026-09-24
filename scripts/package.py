@@ -33,12 +33,16 @@ def main():
                         help="Optional ShofEL intermezzo.bin RCM payload")
     parser.add_argument("--dram-probe", type=Path,
                         help="Optional ShofEL dram_probe.bin diagnostic payload")
+    parser.add_argument("--dram-trace", type=Path,
+                        help="Optional ShofEL dram_trace.bin phased diagnostic payload")
     args = parser.parse_args()
     if any((args.shofel2, args.emmc_server, args.intermezzo)) and not all(
             (args.shofel2, args.emmc_server, args.intermezzo)):
         parser.error("--shofel2, --emmc-server, and --intermezzo must be supplied together")
     if args.dram_probe and not args.shofel2:
         parser.error("--dram-probe requires the ShofEL host and payloads")
+    if args.dram_trace and not args.shofel2:
+        parser.error("--dram-trace requires the ShofEL host and payloads")
     load_bundle(args.bundle)
     selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "jibo_images.py": ROOT / "jibo_images.py",
                 "jibo_updates.py": ROOT / "jibo_updates.py", "jibo_tui.py": ROOT / "jibo_tui.py",
@@ -51,6 +55,8 @@ def main():
         selected["tools/intermezzo.bin"] = args.intermezzo
         if args.dram_probe:
             selected["tools/dram_probe.bin"] = args.dram_probe
+        if args.dram_trace:
+            selected["tools/dram_trace.bin"] = args.dram_trace
     selected.update({"bundles/default/" + name: args.bundle / name for name in (*FILES, "manifest.json")})
     data = {name: path.read_bytes() for name, path in selected.items()}
     for name, content in data.items():
