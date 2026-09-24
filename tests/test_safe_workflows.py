@@ -37,6 +37,15 @@ class SafeWorkflowTests(unittest.TestCase):
         self.assertIn("Reading sample partition...", progress.getvalue())
         self.assertIn("Read sample partition in", progress.getvalue())
 
+    def test_progress_tracks_private_temporary_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "var.img"
+            temporary = Path(directory) / "var.img.tmp.ABC123"
+            temporary.write_bytes(b"partial")
+            self.assertEqual(j._transfer_output_size(target), 7)
+            target.write_bytes(b"complete")
+            self.assertEqual(j._transfer_output_size(target), 8)
+
     def test_failed_partition_read_removes_partial_dump(self):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "current-var.img"

@@ -128,6 +128,21 @@ def _runtime_env():
     return env
 
 
+def _transfer_output_size(path):
+    """Track a completed output or its private, in-progress temporary sibling."""
+    path = Path(path)
+    try:
+        return path.stat().st_size
+    except OSError:
+        pass
+    try:
+        return max((candidate.stat().st_size for candidate in
+                    path.parent.glob(path.name + ".tmp.*") if candidate.is_file()),
+                   default=0)
+    except OSError:
+        return 0
+
+
 def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None):
     """Run a quiet transfer with a terminal spinner and retain output for errors."""
     started = time.monotonic()
@@ -156,10 +171,7 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                         timed_out = True
                         break
                     if progress_path is not None and progress_size:
-                        try:
-                            transferred = min(Path(progress_path).stat().st_size, progress_size)
-                        except OSError:
-                            transferred = 0
+                        transferred = min(_transfer_output_size(progress_path), progress_size)
                         mib = 1024 * 1024
                         filled = int(20 * transferred / progress_size)
                         status = "[{}{}] {:5.1f}% | {:.1f}/{:.1f} MiB | {:.2f} MiB/s | {:0.0f}s".format(
