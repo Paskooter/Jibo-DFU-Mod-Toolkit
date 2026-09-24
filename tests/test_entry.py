@@ -124,7 +124,14 @@ class EntryTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(j.main(["backup-var", "--transport", "shofel", "--port", "1-2",
                                      "--shofel", "/opt/shofel/shofel2_t124"]), 0)
-        backup.assert_called_once_with("1-2", "/opt/shofel/shofel2_t124", None, False)
+        backup.assert_called_once_with("1-2", "/opt/shofel/shofel2_t124", None, False, 1)
+
+    def test_backup_var_cli_can_select_eight_bit_shofel_read(self):
+        with patch.object(j, "backup_var_shofel", return_value={"status": "backup complete"}) as backup, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(j.main(["backup-var", "--transport", "shofel", "--port", "1-2",
+                                     "--bus-width", "8"]), 0)
+        backup.assert_called_once_with("1-2", None, None, False, 8)
 
     def test_shofel_path_cannot_be_supplied_for_dfu_transport(self):
         errors = io.StringIO()

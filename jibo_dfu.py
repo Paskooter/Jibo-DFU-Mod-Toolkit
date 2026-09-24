@@ -1016,7 +1016,7 @@ def _read_shofel_gpt(executable, port):
     return layout, chip_id
 
 
-def backup_var_shofel(port=None, shofel=None, out=None, refresh=False):
+def backup_var_shofel(port=None, shofel=None, out=None, refresh=False, bus_width=1):
     """Save a private var baseline through read-only ShofEL eMMC reads."""
     executable = _shofel_tool(shofel)
     selected = select_device(devices(), port)
@@ -1041,7 +1041,7 @@ def backup_var_shofel(port=None, shofel=None, out=None, refresh=False):
     try:
         capture_chip_id = _read_shofel_range(
             executable, port, var["first_lba"], sector_count, image_path, 3600,
-            "Reading the 500 MiB var partition with ShofEL")
+            "Reading the 500 MiB var partition with ShofEL", bus_width=bus_width)
         if capture_chip_id != chip_id:
             raise DfuError("The RCM/APX device changed between GPT and var reads; the partial backup was discarded.")
         digest = _sha256_file(image_path)
@@ -1484,6 +1484,8 @@ def main(argv=None):
     backup.add_argument("--transport", choices=("dfu", "shofel"), default="dfu",
                         help="Read var through the default signed DFU loader or ShofEL in RCM/APX")
     backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin and intermezzo.bin must be beside it")
+    backup.add_argument("--bus-width", type=int, choices=(1, 8), default=1,
+                        help="eMMC data bus width for ShofEL reads (default: 1)")
     backup.add_argument("--out", type=Path, help="New output directory; otherwise ~/Jibo-Backups")
     backup.add_argument("--refresh", action="store_true", help="Capture the current var state instead of reusing the saved baseline")
     benchmark = sub.add_parser("benchmark-rcm", help="Time an 8 MiB read-only ShofEL sample and discard it")
@@ -1557,10 +1559,12 @@ def main(argv=None):
                            args.timeout, args.allow_unverified_profile)
         elif args.command == "backup-var":
             if args.transport == "shofel":
-                result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh)
+                result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh, args.bus_width)
             else:
                 if args.shofel:
                     raise DfuError("Use --shofel only with --transport shofel.")
+                if args.bus_width != 1:
+                    raise DfuError("Use --bus-width 8 only with --transport shofel.")
                 result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
         elif args.command == "benchmark-rcm":
             result = benchmark_rcm_read(args.port, args.shofel, args.bus_width)
