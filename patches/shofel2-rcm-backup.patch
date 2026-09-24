@@ -1,5 +1,5 @@
 diff --git a/exploit/mini_libusb.c b/exploit/mini_libusb.c
-index 5343eaa..c93f826 100644
+index 5343eaa..6525642 100644
 --- a/exploit/mini_libusb.c
 +++ b/exploit/mini_libusb.c
 @@ -41,7 +41,11 @@ exit:
@@ -44,8 +44,93 @@ index 5343eaa..c93f826 100644
          usleep( 500 );
      } while ( wait && ( ret < 0 ) );
      DEBUG_MSG( "USB Path: %s\n", path );
+@@ -164,10 +175,83 @@ int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data ) {
+     bulk_txn.timeout = USB_BULK_TIMEOUT;
+     bulk_txn.data = data;
+ 
+-    if ( ioctl( usb, USBDEVFS_BULK, &bulk_txn ) == len )
++    int transferred = ioctl( usb, USBDEVFS_BULK, &bulk_txn );
++    if ( transferred == (int)len )
+         return 0;
+ 
++    if ( transferred < 0 ) {
++        int transfer_errno = errno;
++        fprintf( stderr, "USB bulk endpoint 0x%02x failed after requesting %u bytes: %s\n",
++                 ep, len, strerror( transfer_errno ) );
++    } else {
++        fprintf( stderr, "USB bulk endpoint 0x%02x short transfer: received %d of %u bytes\n",
++                 ep, transferred, len );
++    }
++
+     return -1;
+ 
+ }
+ 
++/* Some USBFS implementations complete a bulk-IN ioctl at each short packet
++ * boundary. Accumulate positive chunks so a caller can safely collect a
++ * stream composed of consecutive BootROM EP1_IN writes. */
++int usb_receive_bulk_accumulate( int usb, uint32_t ep, uint32_t len, void *data ) {
++
++    uint32_t received = 0;
++    uint32_t calls = 0;
++    uint32_t zero_length_completions = 0;
++    static int reported_short_chunk = 0;
++
++    while ( received < len ) {
++        struct usbdevfs_bulktransfer bulk_txn;
++        uint32_t requested = len - received;
++        memset( &bulk_txn, 0, sizeof ( bulk_txn ) );
++        bulk_txn.ep = ep;
++        bulk_txn.len = (int)requested;
++        bulk_txn.timeout = USB_BULK_TIMEOUT;
++        bulk_txn.data = (unsigned char *)data + received;
++
++        int transferred = ioctl( usb, USBDEVFS_BULK, &bulk_txn );
++        calls++;
++        if ( transferred < 0 ) {
++            int transfer_errno = errno;
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x failed after receiving %u of %u bytes: %s\n",
++                     ep, received, len, strerror( transfer_errno ) );
++            return -1;
++        }
++        if ((uint32_t)transferred > requested) {
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x returned invalid length %d for a %u-byte request\n",
++                     ep, transferred, requested );
++            return -1;
++        }
++        if ( transferred == 0 ) {
++            zero_length_completions++;
++            if ( zero_length_completions > 3 ) {
++                fprintf( stderr,
++                         "USB bulk endpoint 0x%02x made no progress after %u of %u bytes (%u zero-length completions)\n",
++                         ep, received, len, zero_length_completions );
++                return -1;
++            }
++        } else {
++            zero_length_completions = 0;
++            received += (uint32_t)transferred;
++            if ((uint32_t)transferred < requested && !reported_short_chunk) {
++                fprintf( stderr,
++                         "USB bulk endpoint 0x%02x returned a short chunk (%d of %u bytes); continuing at byte %u\n",
++                         ep, transferred, requested, received );
++                reported_short_chunk = 1;
++            }
++        }
++
++        if ( received < len && calls >= USB_BULK_ACCUMULATE_MAX_CALLS ) {
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x exceeded %u requests after receiving %u of %u bytes\n",
++                     ep, USB_BULK_ACCUMULATE_MAX_CALLS, received, len );
++            return -1;
++        }
++    }
++
++    return 0;
++}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..fef34e1 100644
+index 9e49a2f..56ecab7 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -28,7 +28,8 @@ void print_hex_memory( void *mem, size_t size ) {
@@ -96,7 +181,7 @@ index 9e49a2f..fef34e1 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -482,25 +495,26 @@ int main( int argc, char *argv[] ) {
+@@ -482,25 +495,64 @@ int main( int argc, char *argv[] ) {
  
              uint32_t remaining = emmc_num_sectors;
              uint32_t sectors_done = 0;
@@ -106,11 +191,14 @@ index 9e49a2f..fef34e1 100644
              while ( remaining > 0 ) {
 -                uint32_t batch = remaining > EMMC_CHUNK_SECTORS ? EMMC_CHUNK_SECTORS : remaining;
 -                uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
-+                uint32_t frame_sectors = emmc_read_frame_sectors(remaining);
-+                uint32_t frame_bytes = frame_sectors * EMMC_SECTOR_SIZE;
++                uint32_t transfer_sectors = emmc_read_usb_transfer_sectors(remaining);
++                uint32_t transfer_bytes = transfer_sectors * EMMC_SECTOR_SIZE;
  
 -                ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_IN, batch_bytes, chunk_buf );
-+                ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_IN, frame_bytes, chunk_buf );
++                /* One USBFS request can collect consecutive 4 KiB EP1_IN
++                 * writes. Keep the payload's BootROM frame size unchanged. */
++                ret = usb_receive_bulk_accumulate( rcm_usb, RCM_EP1_IN,
++                                                   transfer_bytes, chunk_buf );
                  if ( ret < 0 ) {
                      printf( "\nError: USB receive failed at sector %u (0x%x).\n",
                              emmc_start_sector + sectors_done, emmc_start_sector + sectors_done );
@@ -118,19 +206,54 @@ index 9e49a2f..fef34e1 100644
                  }
  
 -                write( dump_fd, chunk_buf, batch_bytes );
-+                write( dump_fd, chunk_buf, frame_bytes );
++                /* Preserve and inspect each payload error marker boundary
++                 * even though several 4 KiB frames share one USB request. */
++                uint32_t frame_remaining = transfer_sectors;
++                uint32_t frame_offset_bytes = 0;
++                while ( frame_remaining > 0 ) {
++                    uint32_t frame_sectors = emmc_read_frame_sectors(frame_remaining);
++                    uint32_t frame_bytes = frame_sectors * EMMC_SECTOR_SIZE;
++                    uint32_t marker = (uint32_t)chunk_buf[frame_offset_bytes] |
++                                      ((uint32_t)chunk_buf[frame_offset_bytes + 1] << 8) |
++                                      ((uint32_t)chunk_buf[frame_offset_bytes + 2] << 16) |
++                                      ((uint32_t)chunk_buf[frame_offset_bytes + 3] << 24);
++                    if ( emmc_read_frame_has_error_marker(chunk_buf + frame_offset_bytes,
++                                                          frame_bytes) ) {
++                        printf( "\nError: eMMC read failed at sector %u (payload code 0x%04x).\n",
++                                emmc_start_sector + sectors_done + transfer_sectors - frame_remaining,
++                                marker & 0xffffU );
++                        goto emmc_exit;
++                    }
++                    frame_offset_bytes += frame_sectors * EMMC_SECTOR_SIZE;
++                    frame_remaining -= frame_sectors;
++                }
++
++                size_t bytes_written = 0;
++                while ( bytes_written < transfer_bytes ) {
++                    ssize_t written = write( dump_fd, chunk_buf + bytes_written,
++                                             transfer_bytes - bytes_written );
++                    if ( written < 0 && errno == EINTR )
++                        continue;
++                    if ( written <= 0 ) {
++                        printf( "\nError: Failed writing dump at sector %u: %s.\n",
++                                emmc_start_sector + sectors_done,
++                                written < 0 ? strerror(errno) : "no progress" );
++                        goto emmc_exit;
++                    }
++                    bytes_written += (size_t)written;
++                }
  
 -                sectors_done += batch;
 -                remaining -= batch;
-+                sectors_done += frame_sectors;
-+                remaining -= frame_sectors;
++                sectors_done += transfer_sectors;
++                remaining -= transfer_sectors;
  
 -                if ( (sectors_done % 8000) == 0 || remaining == 0 ) {
 +                if ( sectors_done >= next_progress_sector || remaining == 0 ) {
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,6 +522,7 @@ int main( int argc, char *argv[] ) {
+@@ -508,6 +560,7 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -138,7 +261,7 @@ index 9e49a2f..fef34e1 100644
                  }
              }
  
-@@ -546,7 +561,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +599,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -147,11 +270,16 @@ index 9e49a2f..fef34e1 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
+@@ -690,4 +743,3 @@ exit:
+     return _ret_main;
+ 
+ }
+-
 diff --git a/include/emmc_server.h b/include/emmc_server.h
-index 5229e2e..dfea465 100644
+index 5229e2e..b3a853a 100644
 --- a/include/emmc_server.h
 +++ b/include/emmc_server.h
-@@ -15,16 +15,32 @@
+@@ -15,16 +15,63 @@
  #define EMMC_CMD_ERASE          0x05  /* Erase a range of sectors (forces reallocation) */
  #define EMMC_CMD_EXIT           0xFF
  
@@ -159,23 +287,26 @@ index 5229e2e..dfea465 100644
 - *
 - * Reads: 8 sectors (4KB) = 1.1 MB/s - OPTIMIZED
 - * Writes: 1 sector (512B) - ORIGINAL (safe)
-+/* Keep eMMC PIO reads to 8-sector CMD18 batches. Aggregate up to 16 of those
-+ * batches into one 64 KiB USB transfer to avoid a host ioctl per 4 KiB. The
-+ * payload buffer at 0x40020000 has 128 KiB available in IRAM.
-+ * Writes are transport-batched, but the payload still commits each sector
-+ * with an individual CMD24 operation.
++/* Keep each BootROM EP1_IN payload frame at 4 KiB. The host can receive up to
++ * sixteen consecutive frames in one USBFS bulk request. Writes remain
++ * transport-batched, while the payload commits each sector with CMD24.
   */
 -#define EMMC_CHUNK_SECTORS_READ    8
 -#define EMMC_CHUNK_SECTORS_WRITE   1
 -#define EMMC_CHUNK_SECTORS         1   /* Default - single sector for compatibility */
 +#define EMMC_READ_BATCH_SECTORS    8
-+#define EMMC_READ_FRAME_SECTORS    128
++#define EMMC_READ_FRAME_SECTORS    EMMC_READ_BATCH_SECTORS
++#define EMMC_READ_FRAMES_PER_USB_TRANSFER 16
++#define EMMC_READ_USB_TRANSFER_SECTORS \
++    (EMMC_READ_FRAME_SECTORS * EMMC_READ_FRAMES_PER_USB_TRANSFER)
 +#define EMMC_CHUNK_SECTORS_WRITE   6
 +#define EMMC_CHUNK_SECTORS         1   /* Legacy default retained for compatibility */
  #define EMMC_SECTOR_SIZE           512
 -#define EMMC_CHUNK_BYTES           (EMMC_CHUNK_SECTORS * EMMC_SECTOR_SIZE)
 +#define EMMC_READ_FRAME_BYTES      (EMMC_READ_FRAME_SECTORS * EMMC_SECTOR_SIZE)
-+#define EMMC_CHUNK_SECTORS_MAX     ((EMMC_READ_FRAME_SECTORS > EMMC_CHUNK_SECTORS_WRITE) ? EMMC_READ_FRAME_SECTORS : EMMC_CHUNK_SECTORS_WRITE)
++#define EMMC_READ_USB_TRANSFER_BYTES \
++    (EMMC_READ_USB_TRANSFER_SECTORS * EMMC_SECTOR_SIZE)
++#define EMMC_CHUNK_SECTORS_MAX     ((EMMC_READ_USB_TRANSFER_SECTORS > EMMC_CHUNK_SECTORS_WRITE) ? EMMC_READ_USB_TRANSFER_SECTORS : EMMC_CHUNK_SECTORS_WRITE)
 +#define EMMC_CHUNK_BYTES           (EMMC_CHUNK_SECTORS_MAX * EMMC_SECTOR_SIZE)
 +
 +static inline uint32_t emmc_write_batch_sectors(uint32_t remaining) {
@@ -187,16 +318,52 @@ index 5229e2e..dfea465 100644
 +}
 +
 +static inline uint32_t emmc_read_frame_sectors(uint32_t remaining) {
-+    return remaining < EMMC_READ_FRAME_SECTORS ? remaining : EMMC_READ_FRAME_SECTORS;
++    return emmc_read_batch_sectors(remaining);
++}
++
++static inline uint32_t emmc_read_usb_transfer_sectors(uint32_t remaining) {
++    return remaining < EMMC_READ_USB_TRANSFER_SECTORS ? remaining : EMMC_READ_USB_TRANSFER_SECTORS;
++}
++
++static inline int emmc_read_frame_has_error_marker(const unsigned char *frame,
++                                                    uint32_t frame_bytes) {
++    uint32_t first_word;
++    if (frame_bytes < 4)
++        return 0;
++
++    first_word = (uint32_t)frame[0] |
++                 ((uint32_t)frame[1] << 8) |
++                 ((uint32_t)frame[2] << 16) |
++                 ((uint32_t)frame[3] << 24);
++    if ((first_word & 0xffff0000U) != 0xdead0000U)
++        return 0;
++
++    /* The payload fills the rest of a failed 4 KiB (or final partial) frame
++     * with 0xDEADDEAD. Check the full signature to avoid rejecting real data
++     * whose first word happens to share the marker's high bits. */
++    for (uint32_t i = 4; i + 3 < frame_bytes; i += 4) {
++        if (frame[i] != 0xad || frame[i + 1] != 0xde ||
++            frame[i + 2] != 0xad || frame[i + 3] != 0xde)
++            return 0;
++    }
++    return 1;
 +}
  
  /* Command structure sent from PC to payload */
  struct emmc_cmd_s {
 diff --git a/include/mini_libusb.h b/include/mini_libusb.h
-index 7c55998..d9e1e97 100644
+index 7c55998..329a042 100644
 --- a/include/mini_libusb.h
 +++ b/include/mini_libusb.h
-@@ -29,6 +29,9 @@
+@@ -20,6 +20,7 @@
+ #define USB_CTRL_GET_STATUS 0x00
+ 
+ #define USB_BULK_TIMEOUT 500
++#define USB_BULK_ACCUMULATE_MAX_CALLS 256
+ 
+ #if DEBUG
+     #define DEBUG_MSG(fmt, ...) do { fprintf( stderr, "%s:%d:%s(): " fmt, \
+@@ -29,9 +30,12 @@
  #endif
  
  int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait );
@@ -205,53 +372,33 @@ index 7c55998..d9e1e97 100644
 +int usb_port_path_matches( const char *device_path, const char *selected_path );
  int usb_close( int usb );
  int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data );
++int usb_receive_bulk_accumulate( int usb, uint32_t ep, uint32_t len, void *data );
  int usb_send_control_txn( int usb, uint8_t bRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint16_t len, uint8_t *data, int32_t timeout );
+ 
+ #endif
+-
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
-index 41601b7..dfb73fc 100644
+index 41601b7..a43d09c 100644
 --- a/payloads/emmc_server.c
 +++ b/payloads/emmc_server.c
-@@ -780,20 +780,29 @@ void entry() {
+@@ -780,7 +780,7 @@ void entry() {
              u32 remaining = cmd.num_sectors;
  
              while (remaining > 0) {
 -                u32 batch = remaining > EMMC_CHUNK_SECTORS_READ ? EMMC_CHUNK_SECTORS_READ : remaining;
--                u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
-+                u32 frame_sectors = emmc_read_frame_sectors(remaining);
-+                u32 frame_bytes = frame_sectors * EMMC_SECTOR_SIZE;
-+                u32 frame_done = 0;
-+
-+                /* Retain the known-working 8-sector PIO/CMD18 batches while
-+                 * coalescing their data into a larger USB frame. Keep error
-+                 * markers at each 4 KiB batch boundary for host detection. */
-+                while (frame_done < frame_sectors) {
-+                    u32 batch = emmc_read_batch_sectors(frame_sectors - frame_done);
-+                    u32 *batch_buffer = (u32*)(buffer + frame_done * EMMC_SECTOR_SIZE);
-+
-+                    int result = read_emmc_sectors(sector, batch, batch_buffer);
-+                    if (result < 0) {
-+                        batch_buffer[0] = 0xDEAD0000 | (u32)((-result) & 0xFFFF);
-+                        for (u32 j = 1; j < batch * 128; j++) batch_buffer[j] = 0xDEADDEAD;
-+                    }
++                u32 batch = emmc_read_batch_sectors(remaining);
+                 u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
  
--                int result = read_emmc_sectors(sector, batch, (u32*)buffer);
--                if (result < 0) {
--                    u32 *err = (u32*)buffer;
--                    err[0] = 0xDEAD0000 | (u32)((-result) & 0xFFFF);
--                    for (u32 j = 1; j < batch * 128; j++) err[j] = 0xDEADDEAD;
-+                    sector += batch;
-+                    remaining -= batch;
-+                    frame_done += batch;
+                 int result = read_emmc_sectors(sector, batch, (u32*)buffer);
+@@ -790,6 +790,7 @@ void entry() {
+                     for (u32 j = 1; j < batch * 128; j++) err[j] = 0xDEADDEAD;
                  }
  
--                ep1_in_write_imm(buffer, batch_bytes, &num_xfer);
--
--                sector += batch;
--                remaining -= batch;
-+                ep1_in_write_imm(buffer, frame_bytes, &num_xfer);
-             }
-             continue;
-         }
-@@ -805,7 +814,7 @@ void entry() {
++                /* Keep the T124 EP1_IN transaction within its proven 4 KiB buffer. */
+                 ep1_in_write_imm(buffer, batch_bytes, &num_xfer);
+ 
+                 sector += batch;
+@@ -805,7 +806,7 @@ void entry() {
              u32 write_result = 0;
  
              while (remaining > 0) {
@@ -262,17 +409,17 @@ index 41601b7..dfb73fc 100644
                  ep1_out_read_imm(buffer, batch_bytes, &num_xfer);
 diff --git a/tests/test_emmc_usb_framing.c b/tests/test_emmc_usb_framing.c
 new file mode 100644
-index 0000000..cf24772
+index 0000000..27315d2
 --- /dev/null
 +++ b/tests/test_emmc_usb_framing.c
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,134 @@
 +#include <assert.h>
 +#include <stdint.h>
 +
 +#include "emmc_server.h"
 +
-+/* Exercise the same batch sizing used by the host USB sender and payload
-+ * receiver. Every sector must appear once, in order, with no oversized frame.
++/* Exercise the same host aggregation and payload frame sizing used by READ.
++ * Every sector must appear once and in order across both framing layers.
 + */
 +static void check_write_framing(uint32_t sectors) {
 +    uint32_t remaining = sectors;
@@ -300,47 +447,58 @@ index 0000000..cf24772
 +static void check_read_framing(uint32_t sectors) {
 +    uint32_t remaining = sectors;
 +    uint32_t next_sector = 0;
++    uint32_t transfer_count = 0;
 +    uint32_t frame_count = 0;
-+    uint32_t batch_count = 0;
 +
 +    while (remaining > 0) {
-+        uint32_t frame = emmc_read_frame_sectors(remaining);
-+        uint32_t frame_bytes = frame * EMMC_SECTOR_SIZE;
-+        uint32_t frame_done = 0;
-+        uint32_t frame_start_sector = next_sector;
++        uint32_t transfer = emmc_read_usb_transfer_sectors(remaining);
++        uint32_t transfer_bytes = transfer * EMMC_SECTOR_SIZE;
++        uint32_t transfer_done = 0;
++        uint32_t transfer_start_sector = next_sector;
 +
-+        assert(frame > 0);
-+        assert(frame <= EMMC_READ_FRAME_SECTORS);
-+        assert(frame_bytes <= EMMC_CHUNK_BYTES);
++        assert(transfer > 0);
++        assert(transfer <= EMMC_READ_USB_TRANSFER_SECTORS);
++        assert(transfer_bytes <= EMMC_READ_USB_TRANSFER_BYTES);
++        assert(transfer_bytes <= EMMC_CHUNK_BYTES);
 +
-+        while (frame_done < frame) {
-+            uint32_t batch = emmc_read_batch_sectors(frame - frame_done);
++        /* Mock the payload's sequence of EP1_IN frames within one host read. */
++        while (transfer_done < transfer) {
++            uint32_t frame = emmc_read_frame_sectors(transfer - transfer_done);
++            uint32_t frame_bytes = frame * EMMC_SECTOR_SIZE;
 +
-+            assert(batch > 0);
-+            assert(batch <= EMMC_READ_BATCH_SECTORS);
-+            assert(next_sector == frame_start_sector + frame_done);
-+            assert(next_sector + batch <= sectors);
++            assert(frame > 0);
++            assert(frame <= EMMC_READ_FRAME_SECTORS);
++            assert(frame_bytes <= EMMC_READ_FRAME_BYTES);
++            assert(next_sector == transfer_start_sector + transfer_done);
++            assert(next_sector + frame <= sectors);
 +
-+            next_sector += batch;
-+            frame_done += batch;
-+            batch_count++;
++            next_sector += frame;
++            transfer_done += frame;
++            frame_count++;
 +        }
 +
-+        assert(frame_done == frame);
-+        assert(next_sector == frame_start_sector + frame);
-+        remaining -= frame;
-+        frame_count++;
++        assert(transfer_done == transfer);
++        assert(next_sector == transfer_start_sector + transfer);
++        remaining -= transfer;
++        transfer_count++;
 +    }
 +
 +    assert(next_sector == sectors);
 +    assert(frame_count == (sectors + EMMC_READ_FRAME_SECTORS - 1) / EMMC_READ_FRAME_SECTORS);
-+    assert(batch_count == (sectors + EMMC_READ_BATCH_SECTORS - 1) / EMMC_READ_BATCH_SECTORS);
++    assert(transfer_count == (sectors + EMMC_READ_USB_TRANSFER_SECTORS - 1) /
++                             EMMC_READ_USB_TRANSFER_SECTORS);
 +}
 +
 +int main(void) {
-+    assert(EMMC_READ_FRAME_BYTES == 64 * 1024);
-+    assert(EMMC_READ_FRAME_BYTES % (EMMC_READ_BATCH_SECTORS * EMMC_SECTOR_SIZE) == 0);
-+    assert(EMMC_CHUNK_BYTES >= EMMC_READ_FRAME_SECTORS * EMMC_SECTOR_SIZE);
++    unsigned char marker_frame[EMMC_READ_FRAME_BYTES];
++    uint32_t marker_tail = 0xdead0001U;
++
++    assert(EMMC_READ_FRAME_BYTES == 4 * 1024);
++    assert(EMMC_READ_FRAME_BYTES == EMMC_READ_BATCH_SECTORS * EMMC_SECTOR_SIZE);
++    assert(EMMC_READ_USB_TRANSFER_BYTES == 64 * 1024);
++    assert(EMMC_READ_USB_TRANSFER_BYTES ==
++           EMMC_READ_FRAMES_PER_USB_TRANSFER * EMMC_READ_FRAME_BYTES);
++    assert(EMMC_CHUNK_BYTES >= EMMC_READ_USB_TRANSFER_BYTES);
 +    assert(EMMC_CHUNK_BYTES >= EMMC_CHUNK_SECTORS_WRITE * EMMC_SECTOR_SIZE);
 +    assert(emmc_read_batch_sectors(0) == 0);
 +    assert(emmc_read_batch_sectors(1) == 1);
@@ -348,8 +506,28 @@ index 0000000..cf24772
 +    assert(emmc_read_batch_sectors(9) == 8);
 +    assert(emmc_read_frame_sectors(0) == 0);
 +    assert(emmc_read_frame_sectors(1) == 1);
-+    assert(emmc_read_frame_sectors(128) == 128);
-+    assert(emmc_read_frame_sectors(129) == 128);
++    assert(emmc_read_frame_sectors(8) == 8);
++    assert(emmc_read_frame_sectors(9) == 8);
++    assert(emmc_read_usb_transfer_sectors(0) == 0);
++    assert(emmc_read_usb_transfer_sectors(1) == 1);
++    assert(emmc_read_usb_transfer_sectors(128) == 128);
++    assert(emmc_read_usb_transfer_sectors(129) == 128);
++    marker_frame[0] = (unsigned char)(marker_tail & 0xffU);
++    marker_frame[1] = (unsigned char)((marker_tail >> 8) & 0xffU);
++    marker_frame[2] = (unsigned char)((marker_tail >> 16) & 0xffU);
++    marker_frame[3] = (unsigned char)((marker_tail >> 24) & 0xffU);
++    for (uint32_t i = 4; i < EMMC_READ_FRAME_BYTES; i += 4) {
++        marker_frame[i] = 0xad;
++        marker_frame[i + 1] = 0xde;
++        marker_frame[i + 2] = 0xad;
++        marker_frame[i + 3] = 0xde;
++    }
++    assert(emmc_read_frame_has_error_marker(marker_frame, EMMC_READ_FRAME_BYTES));
++    marker_frame[EMMC_READ_FRAME_BYTES - 1] = 0;
++    assert(!emmc_read_frame_has_error_marker(marker_frame, EMMC_READ_FRAME_BYTES));
++    marker_frame[EMMC_READ_FRAME_BYTES - 1] = 0xde;
++    marker_frame[16] = 0; /* first-word prefix alone is not the full signature */
++    assert(!emmc_read_frame_has_error_marker(marker_frame, EMMC_READ_FRAME_BYTES));
 +    assert(emmc_write_batch_sectors(0) == 0);
 +    assert(emmc_write_batch_sectors(1) == 1);
 +    assert(emmc_write_batch_sectors(6) == 6);
@@ -360,10 +538,79 @@ index 0000000..cf24772
 +        check_read_framing(sectors);
 +    }
 +
-+    /* 500 MiB is 1,024,000 sectors: aggregate 16 4 KiB reads per USB call. */
++    /* 500 MiB is 1,024,000 sectors: one host call per sixteen payload frames. */
 +    assert((1024 * 1024 * 500 / EMMC_SECTOR_SIZE) == 1024000);
-+    assert((1024000 + EMMC_READ_FRAME_SECTORS - 1) / EMMC_READ_FRAME_SECTORS == 8000);
-+    assert((1024000 + EMMC_READ_BATCH_SECTORS - 1) / EMMC_READ_BATCH_SECTORS == 128000);
++    assert((1024000 + EMMC_READ_USB_TRANSFER_SECTORS - 1) /
++           EMMC_READ_USB_TRANSFER_SECTORS == 8000);
++    assert((1024000 + EMMC_READ_FRAME_SECTORS - 1) /
++           EMMC_READ_FRAME_SECTORS == 128000);
++
++    return 0;
++}
+diff --git a/tests/test_usb_bulk_accumulate.c b/tests/test_usb_bulk_accumulate.c
+new file mode 100644
+index 0000000..de2e064
+--- /dev/null
++++ b/tests/test_usb_bulk_accumulate.c
+@@ -0,0 +1,61 @@
++#include <assert.h>
++#include <stdarg.h>
++#include <stdint.h>
++
++#include "mini_libusb.h"
++#include "emmc_server.h"
++
++static uint32_t mock_stream_offset;
++static uint32_t mock_call_count;
++static uint32_t mock_max_chunk = 512;
++static uint32_t mock_zero_returns;
++
++int mock_ioctl(int fd, unsigned long request, ...) {
++    va_list args;
++    struct usbdevfs_bulktransfer *bulk;
++    uint32_t transferred;
++    unsigned char *destination;
++
++    (void)fd;
++    assert(request == USBDEVFS_BULK);
++    va_start(args, request);
++    bulk = va_arg(args, struct usbdevfs_bulktransfer *);
++    va_end(args);
++
++    assert(bulk->ep == 0x81);
++    assert(bulk->len > 0);
++    mock_call_count++;
++    if (mock_zero_returns > 0) {
++        mock_zero_returns--;
++        return 0;
++    }
++
++    transferred = (uint32_t)bulk->len;
++    if (transferred > mock_max_chunk)
++        transferred = mock_max_chunk;
++    destination = (unsigned char *)bulk->data;
++    for (uint32_t i = 0; i < transferred; i++)
++        destination[i] = (unsigned char)((mock_stream_offset + i) & 0xffU);
++    mock_stream_offset += transferred;
++    return (int)transferred;
++}
++
++int main(void) {
++    unsigned char buffer[EMMC_READ_USB_TRANSFER_BYTES];
++
++    mock_zero_returns = 1;
++    assert(usb_receive_bulk_accumulate(7, 0x81, sizeof(buffer), buffer) == 0);
++    assert(mock_stream_offset == sizeof(buffer));
++    assert(mock_call_count == (sizeof(buffer) / mock_max_chunk) + 1);
++    for (uint32_t i = 0; i < sizeof(buffer); i++)
++        assert(buffer[i] == (unsigned char)(i & 0xffU));
++
++    mock_stream_offset = 0;
++    mock_call_count = 0;
++    mock_zero_returns = 5;
++    assert(usb_receive_bulk_accumulate(7, 0x81, sizeof(buffer), buffer) < 0);
++    assert(mock_call_count == 4);
++    assert(mock_stream_offset == 0);
 +
 +    return 0;
 +}
