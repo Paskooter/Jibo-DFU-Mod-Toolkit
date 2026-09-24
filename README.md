@@ -63,7 +63,7 @@ For the ShofEL transport, place the built `shofel2_t124`, `intermezzo.bin`, and 
 git clone --branch improvements/IncreasedUSBReadWriteSpeed https://github.com/devsparx/ShofEL2-for-T124.git ../ShofEL2-for-T124
 cd ../ShofEL2-for-T124
 git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-rcm-backup.patch
-make shofel2_t124 intermezzo.bin emmc_server.bin
+make shofel2_t124 intermezzo.bin emmc_server.bin dram_probe.bin
 cd ../Jibo-DFU-Mod-Toolkit
 ```
 
@@ -73,11 +73,14 @@ Then run the backup with the exact USB port shown by `python3 jibo_dfu.py detect
 sudo python3 jibo_dfu.py benchmark-rcm --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 sudo python3 jibo_dfu.py benchmark-rcm --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1 --bus-width 8
 sudo python3 jibo_dfu.py backup-var --transport shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
+sudo python3 jibo_dfu.py probe-rcm-dram --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 ```
+
+The DRAM probe is a separate diagnostic for a future ShofEL-to-DFU loader path. Build `dram_probe.bin` beside the ShofEL executable before running it. It reports the memory-controller state without reading eMMC; only after its register checks pass does it test and restore 16 bytes at the future loader address. It does not launch DFU.
 
 The benchmarks read and discard an 8 MiB sample so you can check the USB transfer rate before a full backup. The optional 8-bit test first compares sector 0 and eMMC card information across the bus switch, then returns the bus to 1-bit mode and verifies that restoration. It does not leave a sample image on disk. On Moth, the 8-bit EXT_CSD read failed its preflight (status 9) and the 1-bit interface was restored; this path still needs hardware work. The board's production device tree declares an 8-bit eMMC bus, so this result does not establish that the wiring is limited to 1 bit. After a successful 8-bit benchmark on a robot, add `--bus-width 8` to the `backup-var --transport shofel` command to use the same verified read path for the full partition; the default remains 1-bit.
 
-The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so both adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; all three files are stored under `tools/` and the menu discovers them there.
+The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; add `--dram-probe /path/to/dram_probe.bin` to include the DRAM diagnostic. The files are stored under `tools/` and discovered there.
 
 The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The patched payload sends safe 4 KiB USB frames; the host collects up to 64 KiB per read and handles short USB transfers without losing byte order. The actual transfer rate depends on the robot and USB connection. Read operations show a byte-count progress bar. Generated `.pyz` packages include ShofEL only when all three optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
 

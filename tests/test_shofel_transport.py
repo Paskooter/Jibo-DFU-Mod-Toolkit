@@ -60,6 +60,24 @@ class ShofelTransportTests(unittest.TestCase):
         self.var = b"V" * 4096
         self.calls = []
 
+    def test_dram_probe_uses_exact_rcm_port_and_excludes_chip_id_from_result(self):
+        probe = self.root / "shofel-probe"
+        probe.mkdir(exist_ok=True)
+        (probe / "dram_probe.bin").write_bytes(b"probe")
+        executable = probe / "shofel2_t124"
+        executable.write_bytes(b"host")
+        output = ("Chip ID: 0x01 0x02\nT124 DRAM/EMC probe (no eMMC access)\n"
+                  "  Register preflight: not ready\n"
+                  "  DRAM scratch round-trip: skipped; register preflight did not pass\n")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", return_value=output) as run:
+            result = toolkit.probe_rcm_dram(port="1-2")
+        self.assertEqual(run.call_args.args[0], [str(executable), "--usb-port-path", "1-2", "DRAM_STATUS"])
+        self.assertEqual(result["port"], "1-2")
+        self.assertNotIn("Chip ID", str(result))
+        self.assertIn("Register preflight: not ready", result["details"])
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

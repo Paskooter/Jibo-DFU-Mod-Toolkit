@@ -38,9 +38,11 @@ class PackageTests(unittest.TestCase):
         self.shofel = self.shofel_dir / "shofel2_t124"
         self.payload = self.shofel_dir / "emmc_server.bin"
         self.intermezzo = self.shofel_dir / "intermezzo.bin"
+        self.dram_probe = self.shofel_dir / "dram_probe.bin"
         self.shofel.write_bytes(b"ShofEL executable")
         self.payload.write_bytes(b"eMMC read payload")
         self.intermezzo.write_bytes(b"RCM intermezzo")
+        self.dram_probe.write_bytes(b"DRAM diagnostic payload")
         self.output = self.root / "jibo-tool.pyz"
 
     def argv(self, *extra):
@@ -50,13 +52,14 @@ class PackageTests(unittest.TestCase):
 
     def test_optional_shofel_pair_is_bundled_at_tool_discovery_paths(self):
         args = self.argv("--shofel2", str(self.shofel), "--emmc-server", str(self.payload),
-                         "--intermezzo", str(self.intermezzo))
+                         "--intermezzo", str(self.intermezzo), "--dram-probe", str(self.dram_probe))
         with patch("sys.argv", args):
             package.main()
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(archive.read("tools/shofel2_t124"), b"ShofEL executable")
             self.assertEqual(archive.read("tools/emmc_server.bin"), b"eMMC read payload")
             self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")
+            self.assertEqual(archive.read("tools/dram_probe.bin"), b"DRAM diagnostic payload")
             with tempfile.TemporaryDirectory() as extracted:
                 archive.extractall(extracted)
                 for executable in (Path(extracted) / "tools").iterdir():

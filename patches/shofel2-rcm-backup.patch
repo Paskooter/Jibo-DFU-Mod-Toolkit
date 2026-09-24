@@ -1,3 +1,98 @@
+diff --git a/Makefile b/Makefile
+index 2e4d38e..38129a5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,6 @@
+ CFLAGS := -Wall -Werror -I include -MMD
+ 
+-BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin
++BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin dram_probe.bin
+ 
+ all: shofel2_t124 $(BIN_FILES)
+ 
+@@ -61,6 +61,9 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
+ build/intermezzo.elf: build/obj_arm/intermezzo.o
+ 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
+ 
++build/dram_probe.elf: build/obj_arm/dram_probe.o
++	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
++
+ %.bin: build/%.elf
+ 	$(OBJCOPY_ARM) -O binary $< $@
+ 
+@@ -73,4 +76,3 @@ clean:
+ 
+ cleanall: clean
+ 	rm -f build/obj_arm/*.d build/obj_x86/*.d
+-
+diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
+new file mode 100644
+index 0000000..4576b50
+--- /dev/null
++++ b/STAGE2-PROBE.md
+@@ -0,0 +1,62 @@
++# T124 DRAM probe and DFU-loader route
++
++`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
++small ARMv4T Thumb payload on the T124 boot CPU, reads the BootInfoTable,
++memory-controller, and EMC registers, and returns a fixed 68-byte report over
++BootROM EP1. It does not access eMMC. It requests a reset back into RCM after
++the report is sent.
++
++The probe only touches SDRAM when all of these checks pass:
++
++* The T124 BootInfoTable BCT pointer and size describe a range wholly inside
++  IRAM.
++* `MC_EMEM_CFG` and `MC_EMEM_ARB_CFG` are nonzero.
++* EMC refresh is marked valid, RESET is deasserted, and CKE is active.
++* EMC timing is not stalled and automatic calibration is idle.
++
++When that register gate passes, it saves four words at `0x80108000`, writes
++and reads four test patterns, restores the saved words, and confirms their
++restoration. This is the beginning of the future loader range. The test is
++skipped when the register gate fails. Register values and the test result are
++printed by the host command:
++
++```sh
++sudo ./shofel2_t124 --usb-port-path 1-1 DRAM_STATUS
++```
++
++Run from this repository after `make`, so `dram_probe.bin` and
++`intermezzo.bin` are beside `shofel2_t124`. This probe is host-build validated
++only; it has not been run on a robot.
++
++## Loader handoff findings
++
++NVIDIA's T124 boot-flow note says RCM often begins without a valid BCT, so
++SDRAM may be inaccessible until code configures it. It also says the Boot ROM
++executes the BCT-defined loader on the boot CPU; Tegra124 U-Boot SPL then
++starts the Cortex-A15 CCPLEX explicitly. Therefore the current RCM payload
++cannot treat `0x80108000` as writable merely because it is the loader address.
++The probe is intentionally fail-closed. A BCT pointer by itself is not enough:
++the EMC/MC state and an actual save/write/read/restore test must also pass.
++
++The ShofEL payload is built for ARMv4T Thumb and enters through the Boot ROM's
++Thumb EP1 helpers. The U-Boot bundle is an ARM vector image. Its reset vector
++is the image base (`0x80108000`): the first word branches to startup code at
++`0x80108060`; the `0x80108040` literal used by the exception vectors is a
++default exception loop, not the reset entry. The SPL later uses T124
++`start_cpu()` to program the CCPLEX reset vector, power and clock the Cortex-A15
++cluster, and halt the AVP. A future launch must preserve that split and enter
++the SPL reset vector in ARM state. It must not branch from the AVP directly to
++the main U-Boot image at `0x80110000`.
++
++The current prototype stops at diagnostics. It does not receive or stage the
++415,088-byte loader, and it does not jump to it. The unresolved hardware input
++is whether the selected BCT/EMC settings really initialize SDRAM on Moth, as
++measured by `DRAM_STATUS`; the live board result is required before enabling a
++chunk receiver and the SPL handoff.
++
++## Source references
++
++* NVIDIA, [Tegra Boot Flow](https://http.download.nvidia.com/tegra-public-appnotes/tegra-boot-flow.html): RCM/SDRAM behavior and T124 SPL-to-CCPLEX handoff.
++* ChromiumOS coreboot T124 [`emc.h`](https://chromium.googlesource.com/chromiumos/third_party/coreboot/+/firmware-nyan-5771.B/src/soc/nvidia/tegra124/emc.h) and [`sdram.c`](https://chromium.googlesource.com/chromiumos/third_party/coreboot/+/firmware-nyan-5771.B/src/soc/nvidia/tegra124/sdram.c): T124 EMC register offsets, refresh-valid bit, CKE/reset bits, and calibration sequence.
++* Android Tegra kernel [`tegra12_emc.c`](https://android.googlesource.com/kernel/tegra/+/android-tegra-3.10/arch/arm/mach-tegra/tegra12_emc.c): T124 MC/EMC register use and DRAM geometry reads.
++* NVIDIA U-Boot sources built with the local bundle: `arch/arm/mach-tegra/spl.c` and `arch/arm/mach-tegra/tegra124/cpu.c`, which show the SPL boot-device and Cortex-A15 handoff.
 diff --git a/exploit/mini_libusb.c b/exploit/mini_libusb.c
 index 5343eaa..6525642 100644
 --- a/exploit/mini_libusb.c
@@ -130,7 +225,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..9201302 100644
+index 9e49a2f..ad96b26 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -141,7 +236,15 @@ index 9e49a2f..9201302 100644
  #include <fcntl.h>
  #include <unistd.h>
  
-@@ -28,7 +29,9 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -12,6 +13,7 @@
+ #include "mem_dumper_usb_server.h"
+ #include "emmc_server.h"
+ #include "emmc.h"
++#include "dram_probe.h"
+ 
+ #include <sys/stat.h>
+ #include <time.h>
+@@ -28,7 +30,10 @@ void print_hex_memory( void *mem, size_t size ) {
  
  void print_help() {
  
@@ -149,10 +252,11 @@ index 9e49a2f..9201302 100644
 +    fprintf( stderr, "shofel2_t124 [--usb-port-path PORT] [--bus-width 8] COMMAND [ARGUMENTS]\n"
 +                "\t* --usb-port-path PORT -> Select the exact USB sysfs topology path (for example, 1-2.3).\n"
 +                "\t* --bus-width 8 -> Opt in to a verified 8-bit bus for EMMC_READ only (default: 1-bit).\n"
++                "\t* DRAM_STATUS -> Reports read-only T124 DRAM/EMC state; tests 16 bytes at 0x80108000 only when the register gate passes.\n"
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -60,15 +63,58 @@ int main( int argc, char *argv[] ) {
+@@ -60,15 +65,59 @@ int main( int argc, char *argv[] ) {
      char *dump_filename;
      int dump_fd = -1;
      uint8_t do_print_fuse = 0;
@@ -161,6 +265,7 @@ index 9e49a2f..9201302 100644
 +    char *emmc_temp_filename = NULL;
  
      int emmc_mode = 0; /* 0=none, 1=status, 2=read, 3=write, 4=read_ext_csd, 5=erase */
++    int dram_probe_mode = 0;
      uint32_t emmc_start_sector = 0;
      uint32_t emmc_num_sectors = 0;
      char *emmc_filename = NULL;
@@ -211,7 +316,23 @@ index 9e49a2f..9201302 100644
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -188,6 +234,11 @@ int main( int argc, char *argv[] ) {
+@@ -106,6 +155,15 @@ int main( int argc, char *argv[] ) {
+         }
+         payload_filename = "boot_bct.bin";
+ 
++    } else if ( !strcmp( argv[1], "DRAM_STATUS" ) ) {
++
++        if ( argc != 2 ) {
++            fprintf( stderr, "Error: invalid argument count. shofel2_t124 DRAM_STATUS.\n" );
++            goto exit;
++        }
++        payload_filename = "dram_probe.bin";
++        dram_probe_mode = 1;
++
+     } else if ( !strcmp( argv[1], "PAYLOAD" ) ) {
+ 
+         if ( ( argc != 3 ) && ( argc != 4 ) ) {
+@@ -188,6 +246,11 @@ int main( int argc, char *argv[] ) {
  
      }
  
@@ -223,7 +344,7 @@ index 9e49a2f..9201302 100644
    // --------------------
    
  
-@@ -195,11 +246,11 @@ int main( int argc, char *argv[] ) {
+@@ -195,11 +258,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -238,7 +359,60 @@ index 9e49a2f..9201302 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -464,8 +515,24 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +314,52 @@ int main( int argc, char *argv[] ) {
+ 
+   //----------------------
+ 
++    if ( dram_probe_mode ) {
++        uint8_t report_bytes[DRAM_PROBE_REPORT_SIZE];
++        struct dram_probe_report report;
++
++        memset( report_bytes, 0, sizeof(report_bytes) );
++        ret = usb_receive_bulk_accumulate( rcm_usb, RCM_EP1_IN,
++                                           sizeof(report_bytes), report_bytes );
++        if ( ret < 0 ) {
++            fprintf( stderr, "Error: Failed to receive the DRAM probe report.\n" );
++            goto exit;
++        }
++        memcpy( &report, report_bytes, sizeof(report) );
++        if ( memcmp( report.magic, DRAM_PROBE_MAGIC, 4 ) ||
++             report.version != DRAM_PROBE_VERSION ) {
++            fprintf( stderr, "Error: Invalid DRAM probe report header.\n" );
++            goto exit;
++        }
++
++        printf( "T124 DRAM/EMC probe (no eMMC access)\n" );
++        printf( "  BootInfoTable BCT pointer/size: 0x%08x / 0x%08x (%s)\n",
++                report.bct_ptr, report.bct_size,
++                (report.flags & DRAM_PROBE_BCT_VALID) ? "valid" : "invalid" );
++        printf( "  MC EMEM_CFG / ADR_CFG / ARB_CFG: 0x%08x / 0x%08x / 0x%08x\n",
++                report.mc_emem_cfg, report.mc_emem_adr_cfg,
++                report.mc_emem_arb_cfg );
++        printf( "  EMC CFG / ADR_CFG: 0x%08x / 0x%08x\n",
++                report.emc_cfg, report.emc_adr_cfg );
++        printf( "  EMC REFCTRL / PIN / STATUS / AUTOCAL: 0x%08x / 0x%08x / 0x%08x / 0x%08x\n",
++                report.emc_refctrl, report.emc_pin, report.emc_status,
++                report.emc_auto_cal_status );
++        printf( "  Register preflight: %s\n",
++                (report.flags & DRAM_PROBE_REGS_READY) ? "ready" : "not ready" );
++        if ( report.scratch_result == DRAM_PROBE_TEST_PASSED ) {
++            printf( "  DRAM scratch round-trip at 0x%08x: passed (saved data restored)\n",
++                    report.scratch_addr );
++        } else if ( report.scratch_result == DRAM_PROBE_TEST_FAILED ) {
++            printf( "  DRAM scratch round-trip at 0x%08x: failed (saved data restored)\n",
++                    report.scratch_addr );
++        } else {
++            printf( "  DRAM scratch round-trip: skipped; register preflight did not pass\n" );
++        }
++        printf( "  PMC SCRATCH0: 0x%08x\n", report.pmc_scratch0 );
++        _ret_main = 0;
++        goto exit;
++    }
++
+ 
+   // --- MEM DUMP CMD ----
+ 
+@@ -464,8 +573,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -265,7 +439,7 @@ index 9e49a2f..9201302 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +540,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +598,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -385,14 +559,14 @@ index 9e49a2f..9201302 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,9 +652,59 @@ int main( int argc, char *argv[] ) {
+@@ -508,7 +710,57 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
 +                    next_progress_sector += 8000;
-                 }
-             }
- 
++                }
++            }
++
 +            struct timespec read_finished;
 +            if ( have_read_start_time && clock_gettime(CLOCK_MONOTONIC, &read_finished) == 0 ) {
 +                double transfer_seconds = (double)(read_finished.tv_sec - read_started.tv_sec) +
@@ -429,7 +603,7 @@ index 9e49a2f..9201302 100644
 +                    dump_fd = -1;
 +                    printf( "Error: Failed closing output file: %s\n", strerror(errno) );
 +                    goto emmc_exit;
-+                }
+                 }
 +                dump_fd = -1;
 +            }
 +            if ( emmc_temp_filename ) {
@@ -440,12 +614,10 @@ index 9e49a2f..9201302 100644
 +                }
 +                free(emmc_temp_filename);
 +                emmc_temp_filename = NULL;
-+            }
-+
+             }
+ 
              printf( "\nRead complete. Output: %s\n", emmc_filename );
-             _ret_main = 0;
-         }
-@@ -546,7 +740,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +798,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -454,7 +626,7 @@ index 9e49a2f..9201302 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +857,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +915,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -470,11 +642,66 @@ index 9e49a2f..9201302 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -690,4 +893,3 @@ exit:
+@@ -690,4 +951,3 @@ exit:
      return _ret_main;
  
  }
 -
+diff --git a/include/dram_probe.h b/include/dram_probe.h
+new file mode 100644
+index 0000000..cec09b7
+--- /dev/null
++++ b/include/dram_probe.h
+@@ -0,0 +1,49 @@
++#ifndef _DRAM_PROBE_H_
++#define _DRAM_PROBE_H_
++
++#include <stdint.h>
++
++#define DRAM_PROBE_MAGIC "JDR1"
++#define DRAM_PROBE_VERSION 1u
++#define DRAM_PROBE_REPORT_SIZE 68u
++#define DRAM_PROBE_SCRATCH 0x80108000u
++
++#define DRAM_PROBE_BCT_VALID       (1u << 0)
++#define DRAM_PROBE_MC_CONFIGURED   (1u << 1)
++#define DRAM_PROBE_REFRESH_ENABLED (1u << 2)
++#define DRAM_PROBE_PINS_ACTIVE     (1u << 3)
++#define DRAM_PROBE_TIMING_READY    (1u << 4)
++#define DRAM_PROBE_AUTOCAL_IDLE    (1u << 5)
++#define DRAM_PROBE_REGS_READY      (1u << 31)
++
++enum dram_probe_test_result {
++    DRAM_PROBE_TEST_SKIPPED = 0,
++    DRAM_PROBE_TEST_PASSED = 1,
++    DRAM_PROBE_TEST_FAILED = 2
++};
++
++/* Fixed-width little-endian report shared by the ARM payload and host. */
++struct dram_probe_report {
++    char magic[4];
++    uint32_t version;
++    uint32_t flags;
++    uint32_t bct_ptr;
++    uint32_t bct_size;
++    uint32_t mc_emem_cfg;
++    uint32_t mc_emem_adr_cfg;
++    uint32_t mc_emem_arb_cfg;
++    uint32_t emc_cfg;
++    uint32_t emc_adr_cfg;
++    uint32_t emc_refctrl;
++    uint32_t emc_pin;
++    uint32_t emc_status;
++    uint32_t emc_auto_cal_status;
++    uint32_t scratch_addr;
++    uint32_t scratch_result;
++    uint32_t pmc_scratch0;
++} __attribute__((packed));
++
++typedef char dram_probe_report_must_be_68_bytes[
++    sizeof(struct dram_probe_report) == DRAM_PROBE_REPORT_SIZE ? 1 : -1];
++
++#endif
 diff --git a/include/emmc_server.h b/include/emmc_server.h
 index 5229e2e..b525b10 100644
 --- a/include/emmc_server.h
@@ -585,6 +812,204 @@ index 7c55998..329a042 100644
  
  #endif
 -
+diff --git a/include/t124.h b/include/t124.h
+index 7d73596..57d8805 100644
+--- a/include/t124.h
++++ b/include/t124.h
+@@ -18,6 +18,29 @@
+ #define IRAM_END                0x4003FFFF
+ #define IRAM_LEN                0x00040000
+ 
++/* T124 BootInfoTable fields in IRAM, as used by U-Boot. */
++#define NVBOOTINFOTABLE_BASE        0x40000000
++#define NVBOOTINFOTABLE_BCTSIZE     0x48
++#define NVBOOTINFOTABLE_BCTPTR      0x4C
++
++/* T124 memory controller and EMC register windows. */
++#define T124_MC_BASE                0x70019000
++#define T124_MC_EMEM_CFG            0x050
++#define T124_MC_EMEM_ADR_CFG        0x054
++#define T124_MC_EMEM_ARB_CFG        0x090
++#define T124_EMC_BASE               0x7001B000
++#define T124_EMC_CFG                0x00C
++#define T124_EMC_ADR_CFG            0x010
++#define T124_EMC_REFCTRL            0x020
++#define T124_EMC_PIN                0x024
++#define T124_EMC_AUTO_CAL_STATUS    0x2AC
++#define T124_EMC_STATUS             0x2B4
++#define T124_EMC_REF_VALID          (1u << 31)
++#define T124_EMC_PIN_RESET_INACTIVE (1u << 8)
++#define T124_EMC_PIN_CKE_NORMAL     (1u << 0)
++#define T124_EMC_AUTO_CAL_ACTIVE    (1u << 31)
++#define T124_EMC_TIMING_STALLED     (1u << 23)
++
+ #define BOOTROM_DO_BCT_BOOT         0x00100624
+ #define BOOTROM_EP1_IN_WRITE_IMM    0x001065C0
+ #define BOOTROM_EP1_OUT_READ_IMM    0x00106612
+@@ -99,4 +122,3 @@
+ 
+ 
+ #endif
+-
+diff --git a/payloads/dram_probe.c b/payloads/dram_probe.c
+new file mode 100644
+index 0000000..a2633fb
+--- /dev/null
++++ b/payloads/dram_probe.c
+@@ -0,0 +1,153 @@
++#include "types.h"
++#include "t124.h"
++#include "dram_probe.h"
++
++typedef void (*ep1_x_imm_t)(void *buffer, u32 size, u32 *num_xfer);
++
++static u32 read32(uintptr_t addr)
++{
++    return *(volatile u32 *)addr;
++}
++
++static void write32(uintptr_t addr, u32 value)
++{
++    *(volatile u32 *)addr = value;
++}
++
++static void enter_rcm(void)
++{
++    write32(PMC_BASE + PMC_SCRATCH0,
++            read32(PMC_BASE + PMC_SCRATCH0) | PMC_SCRATCH0_MODE_RCM);
++    write32(PMC_BASE + PMC_CNTRL,
++            read32(PMC_BASE + PMC_CNTRL) | PMC_CNTRL_MAIN_RST);
++    for (;;) {
++    }
++}
++
++static int bct_info_is_valid(u32 ptr, u32 size)
++{
++    if (size == 0 || size > IRAM_LEN)
++        return 0;
++    if (ptr < IRAM_BEGIN || ptr > IRAM_END)
++        return 0;
++    return size <= (IRAM_END + 1u - ptr);
++}
++
++/* Use the future image base as scratch; the RCM Boot CPU is the only live CPU. */
++static u32 round_trip_scratch(u32 addr)
++{
++    volatile u32 *scratch = (volatile u32 *)addr;
++    u32 saved[4];
++    const u32 pattern[4] = {
++        0x5AA55AA5u, 0xA55AA55Au, 0x13579BDFu, 0xECA86420u
++    };
++    u32 ok = 1;
++    u32 i;
++
++    for (i = 0; i < 4; i++)
++        saved[i] = scratch[i];
++
++    for (i = 0; i < 4; i++)
++        scratch[i] = pattern[i];
++    for (i = 0; i < 4; i++) {
++        if (scratch[i] != pattern[i])
++            ok = 0;
++    }
++
++    for (i = 0; i < 4; i++)
++        scratch[i] = saved[i];
++    for (i = 0; i < 4; i++) {
++        if (scratch[i] != saved[i])
++            ok = 0;
++    }
++
++    return ok ? DRAM_PROBE_TEST_PASSED : DRAM_PROBE_TEST_FAILED;
++}
++
++static u32 read_report(struct dram_probe_report *report)
++{
++    u32 ready = 1;
++    u32 emc_refctrl;
++    u32 emc_pin;
++    u32 emc_status;
++    u32 autocal_status;
++
++    report->magic[0] = 'J';
++    report->magic[1] = 'D';
++    report->magic[2] = 'R';
++    report->magic[3] = '1';
++    report->version = DRAM_PROBE_VERSION;
++    report->flags = 0;
++    report->bct_ptr = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTPTR);
++    report->bct_size = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTSIZE);
++    report->mc_emem_cfg = read32(T124_MC_BASE + T124_MC_EMEM_CFG);
++    report->mc_emem_adr_cfg = read32(T124_MC_BASE + T124_MC_EMEM_ADR_CFG);
++    report->mc_emem_arb_cfg = read32(T124_MC_BASE + T124_MC_EMEM_ARB_CFG);
++    report->emc_cfg = read32(T124_EMC_BASE + T124_EMC_CFG);
++    report->emc_adr_cfg = read32(T124_EMC_BASE + T124_EMC_ADR_CFG);
++    emc_refctrl = read32(T124_EMC_BASE + T124_EMC_REFCTRL);
++    emc_pin = read32(T124_EMC_BASE + T124_EMC_PIN);
++    emc_status = read32(T124_EMC_BASE + T124_EMC_STATUS);
++    autocal_status = read32(T124_EMC_BASE + T124_EMC_AUTO_CAL_STATUS);
++    report->emc_refctrl = emc_refctrl;
++    report->emc_pin = emc_pin;
++    report->emc_status = emc_status;
++    report->emc_auto_cal_status = autocal_status;
++    report->scratch_addr = 0;
++    report->scratch_result = DRAM_PROBE_TEST_SKIPPED;
++    report->pmc_scratch0 = read32(PMC_BASE + PMC_SCRATCH0);
++
++    if (bct_info_is_valid(report->bct_ptr, report->bct_size))
++        report->flags |= DRAM_PROBE_BCT_VALID;
++    else
++        ready = 0;
++
++    if (report->mc_emem_cfg != 0 && report->mc_emem_arb_cfg != 0)
++        report->flags |= DRAM_PROBE_MC_CONFIGURED;
++    else
++        ready = 0;
++
++    if (emc_refctrl & T124_EMC_REF_VALID)
++        report->flags |= DRAM_PROBE_REFRESH_ENABLED;
++    else
++        ready = 0;
++
++    if ((emc_pin & (T124_EMC_PIN_RESET_INACTIVE | T124_EMC_PIN_CKE_NORMAL)) ==
++        (T124_EMC_PIN_RESET_INACTIVE | T124_EMC_PIN_CKE_NORMAL))
++        report->flags |= DRAM_PROBE_PINS_ACTIVE;
++    else
++        ready = 0;
++
++    if ((emc_status & T124_EMC_TIMING_STALLED) == 0)
++        report->flags |= DRAM_PROBE_TIMING_READY;
++    else
++        ready = 0;
++
++    if ((autocal_status & T124_EMC_AUTO_CAL_ACTIVE) == 0)
++        report->flags |= DRAM_PROBE_AUTOCAL_IDLE;
++    else
++        ready = 0;
++
++    if (ready)
++        report->flags |= DRAM_PROBE_REGS_READY;
++    return ready;
++}
++
++__attribute__((section(".init")))
++void entry(void)
++{
++    struct dram_probe_report report;
++    u32 num_xfer = 0;
++    u32 regs_ready;
++    ep1_x_imm_t ep1_in_write_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++
++    regs_ready = read_report(&report);
++    if (regs_ready) {
++        report.scratch_addr = DRAM_PROBE_SCRATCH;
++        report.scratch_result = round_trip_scratch(DRAM_PROBE_SCRATCH);
++    }
++
++    ep1_in_write_imm(&report, sizeof(report), &num_xfer);
++    enter_rcm();
++}
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
 index 41601b7..1cc5ebb 100644
 --- a/payloads/emmc_server.c
