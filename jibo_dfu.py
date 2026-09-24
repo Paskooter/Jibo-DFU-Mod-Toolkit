@@ -365,10 +365,13 @@ def read_rcm_boot0_bct(out, port=None, shofel=None):
         raise DfuError("Output already exists; choose a new path: " + str(target))
     if not target.parent.is_dir():
         raise DfuError("Output directory does not exist: " + str(target.parent))
-    run_with_progress([executable, "--usb-port-path", selected["port"],
-                       "EMMC_READ_BOOT0_BCT", str(target)], timeout=90,
-                      label="Reading the 16 KiB Boot0 BCT prefix",
-                      cwd=str(Path(executable).parent))
+    report = run_with_progress([executable, "--usb-port-path", selected["port"],
+                                "EMMC_READ_BOOT0_BCT", str(target)], timeout=90,
+                               label="Reading the 16 KiB Boot0 BCT prefix",
+                               cwd=str(Path(executable).parent))
+    geometry = re.search(r"CSD READ_BL_LEN=(\d+)", report)
+    if geometry is None or not 0 <= int(geometry.group(1)) <= 31:
+        raise DfuError("Boot0 read did not report valid CSD page geometry.")
     try:
         if target.stat().st_size != 16_384:
             raise DfuError("Boot0 read returned the wrong size; discard " + str(target))
@@ -378,7 +381,8 @@ def read_rcm_boot0_bct(out, port=None, shofel=None):
     except OSError as exc:
         raise DfuError("Boot0 read did not produce a valid output: " + str(exc)) from exc
     return {"status": "read complete", "port": selected["port"],
-            "image": str(target), "size_bytes": 16_384, "sha256": digest}
+            "image": str(target), "size_bytes": 16_384, "sha256": digest,
+            "read_bl_len_exp": int(geometry.group(1))}
 
 
 def dfu_alternatives(executable, port):

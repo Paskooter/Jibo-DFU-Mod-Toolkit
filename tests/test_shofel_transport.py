@@ -105,13 +105,14 @@ class ShofelTransportTests(unittest.TestCase):
             self.assertEqual(argv, [str(executable), "--usb-port-path", "1-2",
                                     "EMMC_READ_BOOT0_BCT", str(output)])
             output.write_bytes(b"B" * 16_384)
-            return "Boot0 prefix read complete"
+            return "CSD READ_BL_LEN=9 (page size 512 bytes)\nBoot0 prefix read complete"
 
         with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
                 patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
                 patch.object(toolkit, "run_with_progress", side_effect=transfer) as run:
             result = toolkit.read_rcm_boot0_bct(output, port="1-2")
             self.assertEqual(result["size_bytes"], 16_384)
+            self.assertEqual(result["read_bl_len_exp"], 9)
             self.assertEqual(result["sha256"], hashlib.sha256(b"B" * 16_384).hexdigest())
             with self.assertRaisesRegex(toolkit.DfuError, "already exists"):
                 toolkit.read_rcm_boot0_bct(output, port="1-2")
@@ -122,12 +123,20 @@ class ShofelTransportTests(unittest.TestCase):
 
         def transfer(_argv, **_kwargs):
             output.write_bytes(b"short")
-            return ""
+            return "CSD READ_BL_LEN=9 (page size 512 bytes)"
 
         with patch.object(toolkit, "_shofel_tool", return_value=str(self.root / "shofel2_t124")), \
                 patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
                 patch.object(toolkit, "run_with_progress", side_effect=transfer):
             with self.assertRaisesRegex(toolkit.DfuError, "wrong size"):
+                toolkit.read_rcm_boot0_bct(output, port="1-2")
+
+    def test_boot0_bct_read_requires_page_geometry_report(self):
+        output = self.root / "boot0-no-geometry.bin"
+        with patch.object(toolkit, "_shofel_tool", return_value=str(self.root / "shofel2_t124")), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", return_value="Saved 16384 bytes"):
+            with self.assertRaisesRegex(toolkit.DfuError, "page geometry"):
                 toolkit.read_rcm_boot0_bct(output, port="1-2")
 
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
