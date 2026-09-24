@@ -70,12 +70,15 @@ cd ../Jibo-DFU-Mod-Toolkit
 Then run the backup with the exact USB port shown by `python3 jibo_dfu.py detect`:
 
 ```sh
+sudo python3 jibo_dfu.py benchmark-rcm --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 sudo python3 jibo_dfu.py backup-var --transport shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 ```
 
+The benchmark reads and discards an 8 MiB sample so you can check the USB transfer rate before a full backup. It does not leave a sample image on disk.
+
 The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so both adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; all three files are stored under `tools/` and the menu discovers them there.
 
-The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The host and payloads need to be built with exact USB-port selection and 8-sector read framing. Generated `.pyz` packages include ShofEL only when all three optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
+The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The patched host keeps 8-sector eMMC reads and groups their data into 64 KiB USB frames; the actual transfer rate depends on the robot and USB connection. Read operations show a byte-count progress bar. Generated `.pyz` packages include ShofEL only when all three optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
 
 ## Install an official full-flash update
 

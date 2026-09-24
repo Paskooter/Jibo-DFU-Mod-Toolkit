@@ -135,6 +135,8 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
     interactive = terminal.isatty()
     if not interactive:
         print(label + "...", file=terminal, flush=True)
+    elif progress_path is not None and progress_size:
+        print(label, file=terminal, flush=True)
 
     try:
         with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as log:
@@ -160,8 +162,8 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                             transferred = 0
                         mib = 1024 * 1024
                         filled = int(20 * transferred / progress_size)
-                        status = "{} [{}{}] {:5.1f}% | {:.1f}/{:.1f} MiB | {:.2f} MiB/s | {:0.0f}s".format(
-                            label, "#" * filled, "-" * (20 - filled),
+                        status = "[{}{}] {:5.1f}% | {:.1f}/{:.1f} MiB | {:.2f} MiB/s | {:0.0f}s".format(
+                            "#" * filled, "-" * (20 - filled),
                             100 * transferred / progress_size,
                             transferred / mib, progress_size / mib,
                             transferred / mib / max(elapsed, 0.001), elapsed)
@@ -1039,6 +1041,24 @@ def backup_var_shofel(port=None, shofel=None, out=None, refresh=False):
             "operation_directory": str(directory), "profile": record["profile"]}
 
 
+def benchmark_rcm_read(port=None, shofel=None):
+    """Time a disposable 8 MiB read before attempting a full RCM backup."""
+    executable = _shofel_tool(shofel)
+    selected = select_device(devices(), port)
+    if selected is None or selected["state"] != "rcm":
+        raise DfuError("Connect the robot in RCM/APX before benchmarking ShofEL reads.")
+    size = 8 * 1024 * 1024
+    with tempfile.TemporaryDirectory(prefix="jibo-rcm-read-") as directory:
+        destination = Path(directory) / "sample.img"
+        started = time.monotonic()
+        _read_shofel_range(executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
+                           destination, 120, "Reading an 8 MiB RCM sample")
+        elapsed = time.monotonic() - started
+    return {"status": "read complete", "size_bytes": size,
+            "seconds": round(elapsed, 1), "mib_per_second": round(8 / max(elapsed, 0.001), 2),
+            "sample_removed": True}
+
+
 def _confirm_write(supplied=None, plan=None):
     if callable(supplied):
         try:
@@ -1431,6 +1451,9 @@ def main(argv=None):
     backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin and intermezzo.bin must be beside it")
     backup.add_argument("--out", type=Path, help="New output directory; otherwise ~/Jibo-Backups")
     backup.add_argument("--refresh", action="store_true", help="Capture the current var state instead of reusing the saved baseline")
+    benchmark = sub.add_parser("benchmark-rcm", help="Time an 8 MiB read-only ShofEL sample and discard it")
+    _add_device_arguments(benchmark)
+    benchmark.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1502,6 +1525,8 @@ def main(argv=None):
                 if args.shofel:
                     raise DfuError("Use --shofel only with --transport shofel.")
                 result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
+        elif args.command == "benchmark-rcm":
+            result = benchmark_rcm_read(args.port, args.shofel)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":

@@ -197,6 +197,23 @@ class ShofelTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(toolkit.DfuError, "intermezzo.bin"):
             toolkit._shofel_tool(str(executable))
 
+    def test_benchmark_reads_eight_mib_and_discards_sample(self):
+        captured = []
+
+        def read_sample(executable, port, start, count, destination, timeout, label):
+            captured.append((executable, port, start, count, destination, timeout, label))
+            destination.write_bytes(b"x" * (8 * 1024 * 1024))
+
+        with patch.object(toolkit, "_shofel_tool", return_value="/opt/shofel/shofel2_t124"), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "_read_shofel_range", side_effect=read_sample), \
+                patch.object(toolkit.time, "monotonic", side_effect=(10.0, 12.0)):
+            result = toolkit.benchmark_rcm_read(port="1-2")
+        self.assertEqual(captured[0][2:4], (0, 16384))
+        self.assertFalse(captured[0][4].exists())
+        self.assertEqual(result["mib_per_second"], 4.0)
+        self.assertTrue(result["sample_removed"])
+
     def test_shofel_errors_redact_the_raw_chip_id(self):
         detail = toolkit._transfer_error_detail("Chip ID: " + " ".join(
             "0x{:02x}".format(value) for value in CHIP_ID) + "\nUSB transfer failed")
