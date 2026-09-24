@@ -96,6 +96,40 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertNotIn("Chip ID", str(result))
         self.assertEqual(len(result["phases"]), 2)
 
+    def test_boot0_bct_read_is_bounded_and_does_not_replace_existing_output(self):
+        executable = self.root / "shofel2_t124"
+        executable.write_bytes(b"host")
+        output = self.root / "boot0-prefix.bin"
+
+        def transfer(argv, **_kwargs):
+            self.assertEqual(argv, [str(executable), "--usb-port-path", "1-2",
+                                    "EMMC_READ_BOOT0_BCT", str(output)])
+            output.write_bytes(b"B" * 16_384)
+            return "Boot0 prefix read complete"
+
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", side_effect=transfer) as run:
+            result = toolkit.read_rcm_boot0_bct(output, port="1-2")
+            self.assertEqual(result["size_bytes"], 16_384)
+            self.assertEqual(result["sha256"], hashlib.sha256(b"B" * 16_384).hexdigest())
+            with self.assertRaisesRegex(toolkit.DfuError, "already exists"):
+                toolkit.read_rcm_boot0_bct(output, port="1-2")
+            self.assertEqual(run.call_count, 1)
+
+    def test_boot0_bct_read_rejects_incomplete_output(self):
+        output = self.root / "incomplete-boot0.bin"
+
+        def transfer(_argv, **_kwargs):
+            output.write_bytes(b"short")
+            return ""
+
+        with patch.object(toolkit, "_shofel_tool", return_value=str(self.root / "shofel2_t124")), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", side_effect=transfer):
+            with self.assertRaisesRegex(toolkit.DfuError, "wrong size"):
+                toolkit.read_rcm_boot0_bct(output, port="1-2")
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

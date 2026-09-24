@@ -354,6 +354,32 @@ def trace_rcm_dram(port=None, shofel=None):
             "phases": phases}
 
 
+def read_rcm_boot0_bct(out, port=None, shofel=None):
+    """Read the bounded Boot0 BCT prefix through ShofEL for profile checks."""
+    executable = _shofel_tool(shofel)
+    selected = select_device(devices(), port)
+    if selected is None or selected["state"] != "rcm":
+        raise DfuError("Connect the robot in RCM/APX before reading Boot0.")
+    target = Path(out).resolve()
+    if target.exists():
+        raise DfuError("Output already exists; choose a new path: " + str(target))
+    if not target.parent.is_dir():
+        raise DfuError("Output directory does not exist: " + str(target.parent))
+    run_with_progress([executable, "--usb-port-path", selected["port"],
+                       "EMMC_READ_BOOT0_BCT", str(target)], timeout=90,
+                      label="Reading the 16 KiB Boot0 BCT prefix",
+                      cwd=str(Path(executable).parent))
+    try:
+        if target.stat().st_size != 16_384:
+            raise DfuError("Boot0 read returned the wrong size; discard " + str(target))
+        digest = _sha256_file(target)
+        _chown_to_invoking_user(target)
+    except OSError as exc:
+        raise DfuError("Boot0 read did not produce a valid output: " + str(exc)) from exc
+    return {"status": "read complete", "port": selected["port"],
+            "image": str(target), "size_bytes": 16_384, "sha256": digest}
+
+
 def dfu_alternatives(executable, port):
     output = run([executable, "-d", "0955:701a", "--path", port, "-l"])
     names = re.findall(r'name="([^"]+)"', output)
@@ -1546,6 +1572,11 @@ def main(argv=None):
     dram_trace = sub.add_parser("trace-rcm-dram", help="Trace T124 memory setup one read at a time without eMMC access")
     _add_device_arguments(dram_trace)
     dram_trace.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
+    boot0_bct = sub.add_parser("read-rcm-boot0-bct", help="Read the 16 KiB eMMC Boot0 BCT prefix for board-profile checks")
+    _add_device_arguments(boot0_bct)
+    boot0_bct.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
+    boot0_bct.add_argument("--out", type=Path, required=True,
+                           help="New local output path; existing files are never replaced")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1625,6 +1656,8 @@ def main(argv=None):
             result = probe_rcm_dram(args.port, args.shofel)
         elif args.command == "trace-rcm-dram":
             result = trace_rcm_dram(args.port, args.shofel)
+        elif args.command == "read-rcm-boot0-bct":
+            result = read_rcm_boot0_bct(args.out, args.port, args.shofel)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":
