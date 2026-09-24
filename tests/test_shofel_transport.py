@@ -210,6 +210,7 @@ class ShofelTransportTests(unittest.TestCase):
                 patch.object(toolkit.time, "monotonic", side_effect=(10.0, 12.0)):
             result = toolkit.benchmark_rcm_read(port="1-2")
         self.assertEqual(captured[0][2:4], (0, 16384))
+        self.assertEqual(captured[0][5], 45)
         self.assertFalse(captured[0][4].exists())
         self.assertEqual(result["mib_per_second"], 4.0)
         self.assertTrue(result["sample_removed"])

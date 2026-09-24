@@ -1052,7 +1052,7 @@ def benchmark_rcm_read(port=None, shofel=None):
         destination = Path(directory) / "sample.img"
         started = time.monotonic()
         _read_shofel_range(executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
-                           destination, 120, "Reading an 8 MiB RCM sample")
+                           destination, 45, "Reading an 8 MiB RCM sample")
         elapsed = time.monotonic() - started
     return {"status": "read complete", "size_bytes": size,
             "seconds": round(elapsed, 1), "mib_per_second": round(8 / max(elapsed, 0.001), 2),
