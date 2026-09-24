@@ -225,7 +225,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..ad96b26 100644
+index 9e49a2f..46175bb 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -359,7 +359,7 @@ index 9e49a2f..ad96b26 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -251,6 +314,52 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +314,60 @@ int main( int argc, char *argv[] ) {
  
    //----------------------
  
@@ -378,6 +378,14 @@ index 9e49a2f..ad96b26 100644
 +        if ( memcmp( report.magic, DRAM_PROBE_MAGIC, 4 ) ||
 +             report.version != DRAM_PROBE_VERSION ) {
 +            fprintf( stderr, "Error: Invalid DRAM probe report header.\n" );
++            goto exit;
++        }
++
++        uint32_t host_ack = DRAM_PROBE_HOST_ACK;
++        ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_OUT,
++                                 sizeof(host_ack), &host_ack );
++        if ( ret < 0 ) {
++            fprintf( stderr, "Error: Failed to acknowledge DRAM probe report.\n" );
 +            goto exit;
 +        }
 +
@@ -412,7 +420,7 @@ index 9e49a2f..ad96b26 100644
  
    // --- MEM DUMP CMD ----
  
-@@ -464,8 +573,24 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +581,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -439,7 +447,7 @@ index 9e49a2f..ad96b26 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +598,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +606,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -559,7 +567,7 @@ index 9e49a2f..ad96b26 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,7 +710,57 @@ int main( int argc, char *argv[] ) {
+@@ -508,9 +718,59 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -595,15 +603,15 @@ index 9e49a2f..ad96b26 100644
 +                if ( emmc_read_error || emmc_output_error ) {
 +                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
 +                    goto emmc_exit;
-+                }
-+            }
-+
+                 }
+             }
+ 
 +            if ( dump_fd >= 0 ) {
 +                if ( close(dump_fd) < 0 ) {
 +                    dump_fd = -1;
 +                    printf( "Error: Failed closing output file: %s\n", strerror(errno) );
 +                    goto emmc_exit;
-                 }
++                }
 +                dump_fd = -1;
 +            }
 +            if ( emmc_temp_filename ) {
@@ -614,10 +622,12 @@ index 9e49a2f..ad96b26 100644
 +                }
 +                free(emmc_temp_filename);
 +                emmc_temp_filename = NULL;
-             }
- 
++            }
++
              printf( "\nRead complete. Output: %s\n", emmc_filename );
-@@ -546,7 +798,7 @@ int main( int argc, char *argv[] ) {
+             _ret_main = 0;
+         }
+@@ -546,7 +806,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -626,7 +636,7 @@ index 9e49a2f..ad96b26 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +915,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +923,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -642,17 +652,17 @@ index 9e49a2f..ad96b26 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -690,4 +951,3 @@ exit:
+@@ -690,4 +959,3 @@ exit:
      return _ret_main;
  
  }
 -
 diff --git a/include/dram_probe.h b/include/dram_probe.h
 new file mode 100644
-index 0000000..cec09b7
+index 0000000..f5a756f
 --- /dev/null
 +++ b/include/dram_probe.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,50 @@
 +#ifndef _DRAM_PROBE_H_
 +#define _DRAM_PROBE_H_
 +
@@ -661,6 +671,7 @@ index 0000000..cec09b7
 +#define DRAM_PROBE_MAGIC "JDR1"
 +#define DRAM_PROBE_VERSION 1u
 +#define DRAM_PROBE_REPORT_SIZE 68u
++#define DRAM_PROBE_HOST_ACK 0x4a445241u
 +#define DRAM_PROBE_SCRATCH 0x80108000u
 +
 +#define DRAM_PROBE_BCT_VALID       (1u << 0)
@@ -853,10 +864,10 @@ index 7d73596..57d8805 100644
 -
 diff --git a/payloads/dram_probe.c b/payloads/dram_probe.c
 new file mode 100644
-index 0000000..a2633fb
+index 0000000..0ad676d
 --- /dev/null
 +++ b/payloads/dram_probe.c
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,160 @@
 +#include "types.h"
 +#include "t124.h"
 +#include "dram_probe.h"
@@ -997,9 +1008,12 @@ index 0000000..a2633fb
 +{
 +    struct dram_probe_report report;
 +    u32 num_xfer = 0;
++    u32 host_ack = 0;
 +    u32 regs_ready;
 +    ep1_x_imm_t ep1_in_write_imm =
 +        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++    ep1_x_imm_t ep1_out_read_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_OUT_READ_IMM | 1u);
 +
 +    regs_ready = read_report(&report);
 +    if (regs_ready) {
@@ -1008,6 +1022,10 @@ index 0000000..a2633fb
 +    }
 +
 +    ep1_in_write_imm(&report, sizeof(report), &num_xfer);
++    /* Keep USB alive until the host has actually received the report. */
++    ep1_out_read_imm(&host_ack, sizeof(host_ack), &num_xfer);
++    if (num_xfer != sizeof(host_ack) || host_ack != DRAM_PROBE_HOST_ACK)
++        for (;;) { }
 +    enter_rcm();
 +}
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
