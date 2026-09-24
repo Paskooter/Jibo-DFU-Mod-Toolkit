@@ -128,7 +128,7 @@ def _runtime_env():
     return env
 
 
-def run_with_progress(argv, timeout, label, cwd=None):
+def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None):
     """Run a quiet transfer with a terminal spinner and retain output for errors."""
     started = time.monotonic()
     terminal = sys.stderr
@@ -144,6 +144,7 @@ def run_with_progress(argv, timeout, label, cwd=None):
             spinner = "|/-\\"
             frames = 0
             last_status_length = 0
+            last_report = started
             try:
                 while process.poll() is None:
                     elapsed = time.monotonic() - started
@@ -152,12 +153,28 @@ def run_with_progress(argv, timeout, label, cwd=None):
                         process.wait()
                         timed_out = True
                         break
-                    if interactive:
+                    if progress_path is not None and progress_size:
+                        try:
+                            transferred = min(Path(progress_path).stat().st_size, progress_size)
+                        except OSError:
+                            transferred = 0
+                        mib = 1024 * 1024
+                        filled = int(20 * transferred / progress_size)
+                        status = "{} [{}{}] {:5.1f}% | {:.1f}/{:.1f} MiB | {:.2f} MiB/s | {:0.0f}s".format(
+                            label, "#" * filled, "-" * (20 - filled),
+                            100 * transferred / progress_size,
+                            transferred / mib, progress_size / mib,
+                            transferred / mib / max(elapsed, 0.001), elapsed)
+                    else:
                         status = "{} {} {:0.0f}s".format(label, spinner[frames % len(spinner)], elapsed)
+                    if interactive:
                         terminal.write("\r" + status)
                         terminal.flush()
                         last_status_length = len(status)
                         frames += 1
+                    elif progress_path is not None and elapsed - (last_report - started) >= 5:
+                        print(status, file=terminal, flush=True)
+                        last_report = time.monotonic()
                     time.sleep(0.15)
             except KeyboardInterrupt as exc:
                 process.terminate()
@@ -394,7 +411,8 @@ def _upload_var(dfu_util, port, destination):
     try:
         run_with_progress(
             [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-U", str(destination)],
-            timeout=900, label="Reading the 500 MiB var partition from USB")
+            timeout=900, label="Reading the 500 MiB var partition from USB",
+            progress_path=destination, progress_size=EXPECTED_VAR_SIZE)
         if not destination.is_file():
             raise DfuError("dfu-util completed without creating the var image.")
         destination.chmod(0o600)
@@ -416,7 +434,8 @@ def _upload_partition(dfu_util, port, partition, size, destination):
         run_with_progress(
             [dfu_util, "-d", "0955:701a", "--path", port, "-a", partition,
              "-U", str(destination), "-Z", str(size)],
-            timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size))
+            timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size),
+            progress_path=destination, progress_size=size)
         if destination.stat().st_size != size:
             raise DfuError("Uploaded {} has {} bytes; expected {}.".format(
                 partition, destination.stat().st_size, size))
@@ -926,7 +945,8 @@ def _read_shofel_range(executable, port, start_sector, sector_count, destination
             "0x{:x}".format(start_sector), "0x{:x}".format(sector_count), str(destination)]
     try:
         output = run_with_progress(argv, timeout=timeout, label=label,
-                                   cwd=str(Path(executable).parent))
+                                   cwd=str(Path(executable).parent),
+                                   progress_path=destination, progress_size=sector_count * EMMC_SECTOR_SIZE)
         expected = sector_count * EMMC_SECTOR_SIZE
         if not destination.is_file() or destination.stat().st_size != expected:
             actual = destination.stat().st_size if destination.is_file() else 0

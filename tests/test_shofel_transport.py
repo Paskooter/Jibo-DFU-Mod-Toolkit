@@ -60,7 +60,8 @@ class ShofelTransportTests(unittest.TestCase):
         self.var = b"V" * 4096
         self.calls = []
 
-    def fake_transfer(self, argv, timeout, label, cwd=None, *, payload=None, output=CHIP_ID_OUTPUT):
+    def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
+                      progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))
         self.assertEqual(argv[1:4], ["--usb-port-path", "1-2", "EMMC_READ"])
         self.assertEqual(argv[3], "EMMC_READ")
@@ -68,6 +69,8 @@ class ShofelTransportTests(unittest.TestCase):
         count = int(argv[5], 16)
         destination = Path(argv[6])
         self.assertEqual(cwd, "/opt/shofel")
+        self.assertEqual(Path(progress_path), destination)
+        self.assertEqual(progress_size, count * toolkit.EMMC_SECTOR_SIZE)
         self.assertEqual(count * toolkit.EMMC_SECTOR_SIZE,
                          len(self.gpt) if start == 0 else len(self.var))
         destination.write_bytes(self.gpt if start == 0 else (self.var if payload is None else payload))
@@ -114,8 +117,8 @@ class ShofelTransportTests(unittest.TestCase):
     def test_payload_read_error_sentinel_discards_partial_backup(self):
         sentinel = (0xDEAD0005).to_bytes(4, "little") + bytes.fromhex("addeadde") * 1023
 
-        def transfer(argv, timeout, label, cwd=None):
-            return self.fake_transfer(argv, timeout, label, cwd, payload=sentinel)
+        def transfer(argv, timeout, label, cwd=None, **kwargs):
+            return self.fake_transfer(argv, timeout, label, cwd, payload=sentinel, **kwargs)
 
         with self.patches(transfer=transfer):
             with self.assertRaisesRegex(toolkit.DfuError, "eMMC read error"):
@@ -128,7 +131,7 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertNotIn("Chip ID", record["error"])
 
     def test_short_read_is_rejected_and_partial_file_removed(self):
-        def transfer(argv, timeout, label, cwd=None):
+        def transfer(argv, timeout, label, cwd=None, **kwargs):
             self.calls.append((argv, timeout, label, cwd))
             Path(argv[6]).write_bytes(self.gpt if int(argv[4], 16) == 0 else self.var[:-1])
             return CHIP_ID_OUTPUT
@@ -142,8 +145,8 @@ class ShofelTransportTests(unittest.TestCase):
         changed = "Chip ID: " + " ".join("0x{:02x}".format(value) for value in bytes(reversed(range(16))))
         outputs = iter((CHIP_ID_OUTPUT, changed))
 
-        def transfer(argv, timeout, label, cwd=None):
-            self.fake_transfer(argv, timeout, label, cwd)
+        def transfer(argv, timeout, label, cwd=None, **kwargs):
+            self.fake_transfer(argv, timeout, label, cwd, **kwargs)
             return next(outputs)
 
         with self.patches(transfer=transfer):

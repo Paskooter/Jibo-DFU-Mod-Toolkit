@@ -41,7 +41,9 @@ class SafeWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "current-var.img"
 
-            def failed_transfer(argv, timeout, label):
+            def failed_transfer(argv, timeout, label, **kwargs):
+                self.assertEqual(kwargs["progress_path"], destination)
+                self.assertEqual(kwargs["progress_size"], j.EXPECTED_VAR_SIZE)
                 Path(argv[-1]).write_bytes(b"partial dump")
                 raise j.DfuError("simulated transfer failure")
 
@@ -54,7 +56,9 @@ class SafeWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "current-var.img"
 
-            def failed_transfer(argv, timeout, label):
+            def failed_transfer(argv, timeout, label, **kwargs):
+                self.assertEqual(kwargs["progress_path"], destination)
+                self.assertEqual(kwargs["progress_size"], j.EXPECTED_VAR_SIZE)
                 Path(argv[-1]).write_bytes(b"partial dump")
                 raise j.DfuError("simulated transfer failure")
 
