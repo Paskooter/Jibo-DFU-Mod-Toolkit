@@ -238,6 +238,24 @@ class ShofelTransportTests(unittest.TestCase):
                                            destination, 45, "Reading GPT", include_stats=True)
         self.assertFalse(destination.exists())
 
+    def test_eight_bit_benchmark_passes_bus_width_to_shofel(self):
+        destination = self.root / "sample.img"
+        output = CHIP_ID_OUTPUT + "\nREAD_STATS bytes=32768 transfer_seconds=1.250000\n"
+        captured = []
+
+        def transfer(argv, **kwargs):
+            captured.append(argv)
+            Path(argv[-1]).write_bytes(self.gpt)
+            return output
+
+        with patch.object(toolkit, "run_with_progress", side_effect=transfer):
+            _, seconds = toolkit._read_shofel_range(
+                "/opt/shofel/shofel2_t124", "1-2", 0, 64, destination,
+                45, "Reading GPT", include_stats=True, bus_width=8)
+        self.assertEqual(captured[0][1:6],
+                         ["--usb-port-path", "1-2", "--bus-width", "8", "EMMC_READ"])
+        self.assertEqual(seconds, 1.25)
+
     def test_usb_failure_removes_partial_read_and_requests_rcm_reset(self):
         destination = self.root / "partial.img"
 

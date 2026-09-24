@@ -931,7 +931,7 @@ def _reject_shofel_read_errors(path, start_sector):
 
 
 def _read_shofel_range(executable, port, start_sector, sector_count, destination,
-                       timeout, label, include_stats=False):
+                       timeout, label, include_stats=False, bus_width=1):
     """Read an exact sector range using only ShofEL's EMMC_READ command."""
     try:
         start_sector = int(start_sector)
@@ -943,8 +943,13 @@ def _read_shofel_range(executable, port, start_sector, sector_count, destination
         raise DfuError("ShofEL sector range is outside the supported T124 address range.")
     destination = Path(destination)
     destination.unlink(missing_ok=True)
-    argv = [executable, "--usb-port-path", port, "EMMC_READ",
-            "0x{:x}".format(start_sector), "0x{:x}".format(sector_count), str(destination)]
+    if bus_width not in (1, 8):
+        raise DfuError("ShofEL read bus width must be 1 or 8 bits.")
+    argv = [executable, "--usb-port-path", port]
+    if bus_width == 8:
+        argv.extend(("--bus-width", "8"))
+    argv.extend(("EMMC_READ", "0x{:x}".format(start_sector),
+                 "0x{:x}".format(sector_count), str(destination)))
     try:
         output = run_with_progress(argv, timeout=timeout, label=label,
                                    cwd=str(Path(executable).parent),
@@ -1053,7 +1058,7 @@ def backup_var_shofel(port=None, shofel=None, out=None, refresh=False):
             "operation_directory": str(directory), "profile": record["profile"]}
 
 
-def benchmark_rcm_read(port=None, shofel=None):
+def benchmark_rcm_read(port=None, shofel=None, bus_width=1):
     """Time a disposable 8 MiB read before attempting a full RCM backup."""
     executable = _shofel_tool(shofel)
     selected = select_device(devices(), port)
@@ -1063,15 +1068,18 @@ def benchmark_rcm_read(port=None, shofel=None):
     with tempfile.TemporaryDirectory(prefix="jibo-rcm-read-") as directory:
         destination = Path(directory) / "sample.img"
         started = time.monotonic()
+        options = {"include_stats": True}
+        if bus_width == 8:
+            options["bus_width"] = 8
         _, transfer_seconds = _read_shofel_range(
             executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
-            destination, 45, "Reading an 8 MiB RCM sample", include_stats=True)
+            destination, 45, "Reading an 8 MiB RCM sample", **options)
         elapsed = time.monotonic() - started
     return {"status": "read complete", "size_bytes": size,
             "seconds": round(elapsed, 1), "mib_per_second": round(8 / max(elapsed, 0.001), 2),
             "transfer_seconds": round(transfer_seconds, 1),
             "transfer_mib_per_second": round(8 / transfer_seconds, 2),
-            "sample_removed": True}
+            "bus_width_bits": bus_width, "sample_removed": True}
 
 
 def _confirm_write(supplied=None, plan=None):
@@ -1469,6 +1477,8 @@ def main(argv=None):
     benchmark = sub.add_parser("benchmark-rcm", help="Time an 8 MiB read-only ShofEL sample and discard it")
     _add_device_arguments(benchmark)
     benchmark.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
+    benchmark.add_argument("--bus-width", type=int, choices=(1, 8), default=1,
+                           help="eMMC data bus width for ShofEL reads")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1541,7 +1551,7 @@ def main(argv=None):
                     raise DfuError("Use --shofel only with --transport shofel.")
                 result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
         elif args.command == "benchmark-rcm":
-            result = benchmark_rcm_read(args.port, args.shofel)
+            result = benchmark_rcm_read(args.port, args.shofel, args.bus_width)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":
