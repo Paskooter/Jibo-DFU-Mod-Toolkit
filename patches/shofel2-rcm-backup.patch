@@ -1,43 +1,98 @@
 diff --git a/Makefile b/Makefile
-index 2e4d38e..38129a5 100644
+index 2e4d38e..d67699f 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -1,6 +1,6 @@
+@@ -1,21 +1,30 @@
  CFLAGS := -Wall -Werror -I include -MMD
  
 -BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin
-+BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin dram_probe.bin
++BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin dram_probe.bin dram_trace.bin dfu_stage2.bin
  
  all: shofel2_t124 $(BIN_FILES)
  
-@@ -61,6 +61,9 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
++test_sha256: tests/test_sha256.c common/sha256.c include/sha256.h
++	$(CC_x86) $(CFLAGS_x86) -o $@ tests/test_sha256.c common/sha256.c
++
++test: test_sha256
++	./test_sha256
++
+ # --------- x86 ----------
+ 
+ CC_x86 = gcc
+ CFLAGS_x86 := $(CFLAGS)
+ # shameless copypasta from https://stackoverflow.com/a/2908351/375416
+-C_FILES_x86:= $(wildcard exploit/*.c)
++C_FILES_x86:= $(wildcard exploit/*.c) common/sha256.c
+ OBJ_FILES_x86 := $(addprefix build/obj_x86/,$(notdir $(C_FILES_x86:.c=.o)))
+ -include $(OBJ_FILES_x86:.o=.d)
+ 
+ build/obj_x86/%.o: exploit/%.c
+ 	$(CC_x86) $(CFLAGS_x86) -c -o $@ $<
+ 
++build/obj_x86/sha256.o: common/sha256.c
++	$(CC_x86) $(CFLAGS_x86) -c -o $@ $<
++
+ shofel2_t124: $(OBJ_FILES_x86)
+ 	$(CC_x86) $(CFLAGS_x86) -o $@ $^
+ 
+@@ -61,6 +70,21 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
  build/intermezzo.elf: build/obj_arm/intermezzo.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
-+build/dram_probe.elf: build/obj_arm/dram_probe.o
++build/obj_arm/dram_probe_common.o: payloads/dram_probe_common.c
++	$(CC_ARM) $(CFLAGS_ARM) -c -o $@ $<
++
++build/obj_arm/sha256.o: common/sha256.c
++	$(CC_ARM) $(CFLAGS_ARM) -c -o $@ $<
++
++build/dram_probe.elf: build/obj_arm/dram_probe.o build/obj_arm/dram_probe_common.o
++	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
++
++build/dram_trace.elf: build/obj_arm/dram_trace.o build/obj_arm/dram_probe_common.o
++	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
++
++build/dfu_stage2.elf: build/obj_arm/dfu_stage2.o build/obj_arm/dram_probe_common.o build/obj_arm/sha256.o
 +	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
 +
  %.bin: build/%.elf
  	$(OBJCOPY_ARM) -O binary $< $@
  
-@@ -73,4 +76,3 @@ clean:
+@@ -69,8 +93,7 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
+ 
+ clean:
+ 	rm -f $(OBJ_FILES_ARM) $(OBJ_FILES_x86)
+-	rm -f shofel2_t124 build/*.elf $(BIN_FILES)
++	rm -f shofel2_t124 test_sha256 build/*.elf $(BIN_FILES)
  
  cleanall: clean
  	rm -f build/obj_arm/*.d build/obj_x86/*.d
 -
 diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
 new file mode 100644
-index 0000000..4576b50
+index 0000000..136f4d8
 --- /dev/null
 +++ b/STAGE2-PROBE.md
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,74 @@
 +# T124 DRAM probe and DFU-loader route
 +
 +`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
 +small ARMv4T Thumb payload on the T124 boot CPU, reads the BootInfoTable,
 +memory-controller, and EMC registers, and returns a fixed 68-byte report over
-+BootROM EP1. It does not access eMMC. It requests a reset back into RCM after
-+the report is sent.
++BootROM EP1. It does not access eMMC. The payload waits for a host ACK after
++sending the report, then requests a reset back into RCM.
++
++If the report stalls, run the phase-by-phase diagnostic:
++
++```sh
++sudo ./shofel2_t124 --usb-port-path 1-1 DRAM_TRACE
++```
++
++`DRAM_TRACE` sends a marker immediately on payload entry, then reports each
++BootInfoTable, MC, and EMC register read separately. The host acknowledges
++every marker before the payload proceeds. Its last marker narrows a hang to
++the operation that follows; it also identifies a failure before the
++payload-entry marker. It performs the same gated 16-byte DRAM scratch test and
++resets only after the host acknowledges the final phase.
 +
 +The probe only touches SDRAM when all of these checks pass:
 +
@@ -57,9 +112,9 @@ index 0000000..4576b50
 +sudo ./shofel2_t124 --usb-port-path 1-1 DRAM_STATUS
 +```
 +
-+Run from this repository after `make`, so `dram_probe.bin` and
-+`intermezzo.bin` are beside `shofel2_t124`. This probe is host-build validated
-+only; it has not been run on a robot.
++Run from this repository after `make`, so `dram_probe.bin`, `dram_trace.bin`,
++and `intermezzo.bin` are beside `shofel2_t124`. These diagnostics are
++host-build validated only; they have not been run on a robot.
 +
 +## Loader handoff findings
 +
@@ -81,11 +136,10 @@ index 0000000..4576b50
 +the SPL reset vector in ARM state. It must not branch from the AVP directly to
 +the main U-Boot image at `0x80110000`.
 +
-+The current prototype stops at diagnostics. It does not receive or stage the
-+415,088-byte loader, and it does not jump to it. The unresolved hardware input
-+is whether the selected BCT/EMC settings really initialize SDRAM on Moth, as
-+measured by `DRAM_STATUS`; the live board result is required before enabling a
-+chunk receiver and the SPL handoff.
++The receiver is implemented, but no robot transfer has been run. The
++unresolved hardware input is whether the selected BCT/EMC settings really
++initialize SDRAM on Moth, as measured by `DRAM_STATUS`; the live board result
++and a reviewed SPL handoff are still required before any launch.
 +
 +## Source references
 +
@@ -93,6 +147,147 @@ index 0000000..4576b50
 +* ChromiumOS coreboot T124 [`emc.h`](https://chromium.googlesource.com/chromiumos/third_party/coreboot/+/firmware-nyan-5771.B/src/soc/nvidia/tegra124/emc.h) and [`sdram.c`](https://chromium.googlesource.com/chromiumos/third_party/coreboot/+/firmware-nyan-5771.B/src/soc/nvidia/tegra124/sdram.c): T124 EMC register offsets, refresh-valid bit, CKE/reset bits, and calibration sequence.
 +* Android Tegra kernel [`tegra12_emc.c`](https://android.googlesource.com/kernel/tegra/+/android-tegra-3.10/arch/arm/mach-tegra/tegra12_emc.c): T124 MC/EMC register use and DRAM geometry reads.
 +* NVIDIA U-Boot sources built with the local bundle: `arch/arm/mach-tegra/spl.c` and `arch/arm/mach-tegra/tegra124/cpu.c`, which show the SPL boot-device and Cortex-A15 handoff.
+diff --git a/common/sha256.c b/common/sha256.c
+new file mode 100644
+index 0000000..0c711ea
+--- /dev/null
++++ b/common/sha256.c
+@@ -0,0 +1,135 @@
++#include "sha256.h"
++
++static const uint32_t k[64] = {
++    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
++    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
++    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
++    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
++    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
++    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
++    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
++    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
++    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
++    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
++    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
++    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
++    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
++    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
++    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
++    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
++};
++
++static uint32_t rotr(uint32_t x, uint32_t n)
++{
++    return (x >> n) | (x << (32u - n));
++}
++
++static uint32_t load_be32(const uint8_t *p)
++{
++    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++static void store_be32(uint8_t *p, uint32_t v)
++{
++    p[0] = (uint8_t)(v >> 24);
++    p[1] = (uint8_t)(v >> 16);
++    p[2] = (uint8_t)(v >> 8);
++    p[3] = (uint8_t)v;
++}
++
++static void transform(struct sha256_ctx *ctx, const uint8_t block[64])
++{
++    uint32_t w[64];
++    uint32_t a, b, c, d, e, f, g, h;
++    uint32_t i;
++
++    for (i = 0; i < 16; i++)
++        w[i] = load_be32(block + i * 4u);
++    for (; i < 64; i++) {
++        uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^
++                      (w[i - 15] >> 3);
++        uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^
++                      (w[i - 2] >> 10);
++        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
++    }
++
++    a = ctx->state[0]; b = ctx->state[1];
++    c = ctx->state[2]; d = ctx->state[3];
++    e = ctx->state[4]; f = ctx->state[5];
++    g = ctx->state[6]; h = ctx->state[7];
++
++    for (i = 0; i < 64; i++) {
++        uint32_t s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
++        uint32_t ch = (e & f) ^ (~e & g);
++        uint32_t t1 = h + s1 + ch + k[i] + w[i];
++        uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
++        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
++        uint32_t t2 = s0 + maj;
++        h = g; g = f; f = e; e = d + t1;
++        d = c; c = b; b = a; a = t1 + t2;
++    }
++
++    ctx->state[0] += a; ctx->state[1] += b;
++    ctx->state[2] += c; ctx->state[3] += d;
++    ctx->state[4] += e; ctx->state[5] += f;
++    ctx->state[6] += g; ctx->state[7] += h;
++}
++
++void sha256_init(struct sha256_ctx *ctx)
++{
++    static const uint32_t initial[8] = {
++        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
++        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
++    };
++    uint32_t i;
++
++    for (i = 0; i < 8; i++)
++        ctx->state[i] = initial[i];
++    ctx->bit_count = 0;
++    ctx->block_used = 0;
++}
++
++void sha256_update(struct sha256_ctx *ctx, const void *data, uint32_t len)
++{
++    const uint8_t *p = (const uint8_t *)data;
++
++    ctx->bit_count += (uint64_t)len * 8u;
++    while (len != 0) {
++        uint32_t take = 64u - ctx->block_used;
++        uint32_t i;
++
++        if (take > len)
++            take = len;
++        for (i = 0; i < take; i++)
++            ctx->block[ctx->block_used + i] = p[i];
++        ctx->block_used += take;
++        p += take;
++        len -= take;
++        if (ctx->block_used == 64u) {
++            transform(ctx, ctx->block);
++            ctx->block_used = 0;
++        }
++    }
++}
++
++void sha256_final(struct sha256_ctx *ctx, uint8_t digest[32])
++{
++    uint32_t i;
++    uint64_t bits = ctx->bit_count;
++
++    ctx->block[ctx->block_used++] = 0x80;
++    if (ctx->block_used > 56u) {
++        while (ctx->block_used < 64u)
++            ctx->block[ctx->block_used++] = 0;
++        transform(ctx, ctx->block);
++        ctx->block_used = 0;
++    }
++    while (ctx->block_used < 56u)
++        ctx->block[ctx->block_used++] = 0;
++    for (i = 0; i < 8; i++)
++        ctx->block[63u - i] = (uint8_t)(bits >> (i * 8u));
++    transform(ctx, ctx->block);
++    for (i = 0; i < 8; i++)
++        store_be32(digest + i * 4u, ctx->state[i]);
++}
 diff --git a/exploit/mini_libusb.c b/exploit/mini_libusb.c
 index 5343eaa..6525642 100644
 --- a/exploit/mini_libusb.c
@@ -225,7 +420,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..46175bb 100644
+index 9e49a2f..f017dd3 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -236,16 +431,299 @@ index 9e49a2f..46175bb 100644
  #include <fcntl.h>
  #include <unistd.h>
  
-@@ -12,6 +13,7 @@
+@@ -12,6 +13,10 @@
  #include "mem_dumper_usb_server.h"
  #include "emmc_server.h"
  #include "emmc.h"
 +#include "dram_probe.h"
++#include "dram_trace.h"
++#include "dfu_stage2_protocol.h"
++#include "sha256.h"
  
  #include <sys/stat.h>
  #include <time.h>
-@@ -28,7 +30,10 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -26,9 +31,292 @@ void print_hex_memory( void *mem, size_t size ) {
+   printf( "\n" );
+ }
  
++static int digest_equals_expected(const uint8_t digest[32])
++{
++    uint32_t i;
++    uint8_t different = 0;
++
++    for (i = 0; i < 32; i++)
++        different |= digest[i] ^ DFU_STAGE2_EXPECTED_SHA256[i];
++    return different == 0;
++}
++
++static int hash_loader_fd(int fd, uint8_t digest[32])
++{
++    uint8_t buffer[DFU_STAGE2_CHUNK_SIZE];
++    struct sha256_ctx ctx;
++    uint32_t total = 0;
++
++    if (lseek(fd, 0, SEEK_SET) < 0)
++        return -1;
++    sha256_init(&ctx);
++    for (;;) {
++        ssize_t count = read(fd, buffer, sizeof(buffer));
++        if (count < 0) {
++            if (errno == EINTR)
++                continue;
++            return -1;
++        }
++        if (count == 0)
++            break;
++        total += (uint32_t)count;
++        if (total > DFU_STAGE2_LOADER_SIZE) {
++            errno = EFBIG;
++            return -1;
++        }
++        sha256_update(&ctx, buffer, (uint32_t)count);
++    }
++    if (total != DFU_STAGE2_LOADER_SIZE) {
++        errno = EINVAL;
++        return -1;
++    }
++    sha256_final(&ctx, digest);
++    if (lseek(fd, 0, SEEK_SET) < 0)
++        return -1;
++    return 0;
++}
++
++static int receive_stage_ack(int rcm_usb, struct dfu_stage2_ack *ack)
++{
++    int ret = usb_receive_bulk_accumulate(rcm_usb, RCM_EP1_IN,
++                                          sizeof(*ack), ack);
++    if (ret < 0)
++        return -1;
++    if (memcmp(ack->magic, DFU_STAGE2_ACK_MAGIC, 4) ||
++        ack->version != DFU_STAGE2_VERSION)
++        return -1;
++    return 0;
++}
++
++static int send_probe_ack(int rcm_usb)
++{
++    char ack[4] = { 'J', 'D', 'R', 'A' };
++
++    return usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(ack), ack);
++}
++
++static int send_start_token(int rcm_usb, const char magic[4])
++{
++    char token[4];
++
++    memcpy(token, magic, sizeof(token));
++    return usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(token), token);
++}
++
++static int send_stage_reset(int rcm_usb)
++{
++    char control[4] = { 'J', 'R', 'C', 'M' };
++
++    return usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(control), control);
++}
++
++static int receive_dram_probe(int rcm_usb,
++                              struct dram_probe_report *report)
++{
++    uint8_t bytes[DRAM_PROBE_REPORT_SIZE];
++    int ret;
++
++    memset(bytes, 0, sizeof(bytes));
++    ret = usb_receive_bulk_accumulate(rcm_usb, RCM_EP1_IN,
++                                      sizeof(bytes), bytes);
++    if (ret < 0)
++        return -1;
++    memcpy(report, bytes, sizeof(*report));
++    if (memcmp(report->magic, DRAM_PROBE_MAGIC, 4) ||
++        report->version != DRAM_PROBE_VERSION)
++        return -1;
++    return 0;
++}
++
++static const char *dram_trace_phase_name(uint32_t phase)
++{
++    static const char *const names[] = {
++        "payload entry", "BootInfoTable BCT pointer",
++        "BootInfoTable BCT size", "MC_EMEM_CFG",
++        "MC_EMEM_ADR_CFG", "MC_EMEM_ARB_CFG", "EMC_CFG",
++        "EMC_ADR_CFG", "EMC_REFCTRL", "EMC_PIN", "EMC_STATUS",
++        "EMC_AUTO_CAL_STATUS", "register gate", "DRAM scratch round-trip",
++        "PMC_SCRATCH0", "complete"
++    };
++
++    if (phase >= sizeof(names) / sizeof(names[0]))
++        return "unknown phase";
++    return names[phase];
++}
++
++static int run_dram_trace(int rcm_usb)
++{
++    struct dram_trace_event event;
++    uint32_t last_phase = DRAM_TRACE_ENTRY;
++    int have_phase = 0;
++
++    for (;;) {
++        struct dram_trace_ack ack;
++
++        if (usb_receive_bulk_accumulate(rcm_usb, RCM_EP1_IN,
++                                        sizeof(event), &event) < 0) {
++            if (have_phase) {
++                fprintf(stderr, "DRAM_TRACE stalled after phase %u (%s).\n",
++                        last_phase,
++                        dram_trace_phase_name(last_phase));
++            } else {
++                fprintf(stderr,
++                        "DRAM_TRACE stalled before the payload-entry marker.\n");
++            }
++            return -1;
++        }
++        if (memcmp(event.magic, DRAM_TRACE_MAGIC, 4) ||
++            event.phase > DRAM_TRACE_DONE) {
++            fprintf(stderr, "Error: invalid DRAM_TRACE event.\n");
++            return -1;
++        }
++
++        printf("DRAM_TRACE phase %u (%s): 0x%08x\n",
++               event.phase, dram_trace_phase_name(event.phase), event.value);
++        fflush(stdout);
++        last_phase = event.phase;
++        have_phase = 1;
++
++        memcpy(ack.magic, DRAM_TRACE_ACK_MAGIC, 4);
++        ack.phase = event.phase;
++        if (usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(ack), &ack) < 0) {
++            fprintf(stderr, "Error: failed to acknowledge DRAM_TRACE phase.\n");
++            return -1;
++        }
++        if (event.phase == DRAM_TRACE_DONE)
++            return 0;
++    }
++}
++
++static void print_dram_probe(const struct dram_probe_report *report)
++{
++    printf("T124 DRAM/EMC probe (no eMMC access)\n");
++    printf("  BootInfoTable BCT pointer/size: 0x%08x / 0x%08x (%s)\n",
++           report->bct_ptr, report->bct_size,
++           (report->flags & DRAM_PROBE_BCT_VALID) ? "valid" : "invalid");
++    printf("  MC EMEM_CFG / ADR_CFG / ARB_CFG: 0x%08x / 0x%08x / 0x%08x\n",
++           report->mc_emem_cfg, report->mc_emem_adr_cfg,
++           report->mc_emem_arb_cfg);
++    printf("  EMC CFG / ADR_CFG: 0x%08x / 0x%08x\n",
++           report->emc_cfg, report->emc_adr_cfg);
++    printf("  EMC REFCTRL / PIN / STATUS / AUTOCAL: 0x%08x / 0x%08x / 0x%08x / 0x%08x\n",
++           report->emc_refctrl, report->emc_pin, report->emc_status,
++           report->emc_auto_cal_status);
++    printf("  Register preflight: %s\n",
++           (report->flags & DRAM_PROBE_REGS_READY) ? "ready" : "not ready");
++    if (report->scratch_result == DRAM_PROBE_TEST_PASSED) {
++        printf("  DRAM scratch round-trip at 0x%08x: passed (saved data restored)\n",
++               report->scratch_addr);
++    } else if (report->scratch_result == DRAM_PROBE_TEST_FAILED) {
++        printf("  DRAM scratch round-trip at 0x%08x: failed (saved data restored)\n",
++               report->scratch_addr);
++    } else {
++        printf("  DRAM scratch round-trip: skipped; register preflight did not pass\n");
++    }
++    printf("  PMC SCRATCH0: 0x%08x\n", report->pmc_scratch0);
++}
++
++static int stage_loader(int rcm_usb, int loader_fd, int launch_requested)
++{
++    struct dfu_stage2_request request;
++    struct dfu_stage2_ack ack;
++    uint8_t buffer[DFU_STAGE2_CHUNK_SIZE];
++    uint32_t offset = 0;
++    uint32_t chunk_index = 0;
++
++    memset(&request, 0, sizeof(request));
++    memcpy(request.magic, DFU_STAGE2_REQUEST_MAGIC, 4);
++    request.version = DFU_STAGE2_VERSION;
++    request.image_size = DFU_STAGE2_LOADER_SIZE;
++    request.load_address = DFU_STAGE2_LOAD_ADDRESS;
++    request.entry_address = DFU_STAGE2_ENTRY_ADDRESS;
++    request.chunk_size = DFU_STAGE2_CHUNK_SIZE;
++    request.entry_mode = DFU_STAGE2_ENTRY_MODE_ARM;
++    request.flags = launch_requested ? DFU_STAGE2_FLAG_REQUEST_LAUNCH : 0;
++    memcpy(request.sha256, DFU_STAGE2_EXPECTED_SHA256,
++           sizeof(request.sha256));
++
++    if (usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(request), &request) < 0)
++        return -1;
++    if (receive_stage_ack(rcm_usb, &ack) < 0 ||
++        ack.code != DFU_STAGE2_ACK_ACCEPTED || ack.chunk_index != 0 ||
++        ack.length != DFU_STAGE2_LOADER_SIZE) {
++        fprintf(stderr, "Error: stage-2 rejected loader metadata.\n");
++        send_stage_reset(rcm_usb);
++        return -1;
++    }
++
++    while (offset < DFU_STAGE2_LOADER_SIZE) {
++        uint32_t length = DFU_STAGE2_LOADER_SIZE - offset;
++        uint32_t received = 0;
++
++        if (length > sizeof(buffer))
++            length = sizeof(buffer);
++        while (received < length) {
++            ssize_t count = read(loader_fd, buffer + received,
++                                 length - received);
++            if (count < 0) {
++                if (errno == EINTR)
++                    continue;
++                fprintf(stderr, "Error: reading loader file: %s\n",
++                        strerror(errno));
++                return -1;
++            }
++            if (count == 0) {
++                fprintf(stderr, "Error: loader file ended during transfer.\n");
++                return -1;
++            }
++            received += (uint32_t)count;
++        }
++
++        if (usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, length, buffer) < 0)
++            return -1;
++        if (receive_stage_ack(rcm_usb, &ack) < 0 ||
++            ack.code != DFU_STAGE2_ACK_CHUNK ||
++            ack.chunk_index != chunk_index || ack.length != length) {
++            fprintf(stderr, "Error: stage-2 transfer failed at chunk %u.\n",
++                    chunk_index);
++            send_stage_reset(rcm_usb);
++            return -1;
++        }
++        offset += length;
++        chunk_index++;
++        printf("\rStaged %u / %u bytes", offset, DFU_STAGE2_LOADER_SIZE);
++        fflush(stdout);
++    }
++    printf("\n");
++
++    if (receive_stage_ack(rcm_usb, &ack) < 0 ||
++        ack.code != DFU_STAGE2_ACK_COMPLETE ||
++        ack.chunk_index != chunk_index || ack.length != 0) {
++        fprintf(stderr,
++                "Error: stage-2 did not confirm both stream and DRAM readback hashes.\n");
++        send_stage_reset(rcm_usb);
++        return -1;
++    }
++    printf("Loader copied to 0x%08x and verified by SHA-256 readback.\n",
++           DFU_STAGE2_LOAD_ADDRESS);
++    if (launch_requested) {
++        fprintf(stderr, "Error: the Cortex-A15 launch path is not implemented.\n");
++        send_stage_reset(rcm_usb);
++        return -1;
++    }
++    if (send_stage_reset(rcm_usb) < 0) {
++        fprintf(stderr, "Error: failed to acknowledge the final transfer status.\n");
++        return -1;
++    }
++    printf("The SPL was not started; the robot is returning to RCM.\n");
++    return 0;
++}
++
  void print_help() {
  
 -    fprintf( stderr, "shofel2_t124 ( MEM_DUMP | READ_FUSES | BOOT_BCT | PAYLOAD | DUMP_STACK | EMMC_STATUS | EMMC_READ | EMMC_WRITE | EMMC_READ_EXT_CSD | EMMC_ERASE ) [options]\n"
@@ -253,10 +731,23 @@ index 9e49a2f..46175bb 100644
 +                "\t* --usb-port-path PORT -> Select the exact USB sysfs topology path (for example, 1-2.3).\n"
 +                "\t* --bus-width 8 -> Opt in to a verified 8-bit bus for EMMC_READ only (default: 1-bit).\n"
 +                "\t* DRAM_STATUS -> Reports read-only T124 DRAM/EMC state; tests 16 bytes at 0x80108000 only when the register gate passes.\n"
++                "\t* DRAM_TRACE -> Reads T124 DRAM/EMC state one operation at a time, with EP1 ACKs between phases.\n"
++                "\t* DFU_STAGE loader.bin [--launch] -> Verifies and stages the pinned 415088-byte RAM DFU image; never accesses eMMC. The launch gate is disabled.\n"
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -60,15 +65,59 @@ int main( int argc, char *argv[] ) {
+@@ -53,6 +341,10 @@ int main( int argc, char *argv[] ) {
+ 
+     char *payload_filename = NULL;
+     uint32_t payload_thumb_mode = 1;
++    int stage_loader_mode = 0;
++    int launch_requested = 0;
++    int stage_loader_fd = -1;
++    char *stage_loader_filename = NULL;
+ 
+     uint8_t *dump = NULL;
+     uint32_t dump_start = 0;
+@@ -60,15 +352,60 @@ int main( int argc, char *argv[] ) {
      char *dump_filename;
      int dump_fd = -1;
      uint8_t do_print_fuse = 0;
@@ -266,6 +757,7 @@ index 9e49a2f..46175bb 100644
  
      int emmc_mode = 0; /* 0=none, 1=status, 2=read, 3=write, 4=read_ext_csd, 5=erase */
 +    int dram_probe_mode = 0;
++    int dram_trace_mode = 0;
      uint32_t emmc_start_sector = 0;
      uint32_t emmc_num_sectors = 0;
      char *emmc_filename = NULL;
@@ -316,7 +808,7 @@ index 9e49a2f..46175bb 100644
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -106,6 +155,15 @@ int main( int argc, char *argv[] ) {
+@@ -106,6 +443,46 @@ int main( int argc, char *argv[] ) {
          }
          payload_filename = "boot_bct.bin";
  
@@ -329,10 +821,41 @@ index 9e49a2f..46175bb 100644
 +        payload_filename = "dram_probe.bin";
 +        dram_probe_mode = 1;
 +
++    } else if ( !strcmp( argv[1], "DRAM_TRACE" ) ) {
++
++        if ( argc != 2 ) {
++            fprintf( stderr, "Error: invalid argument count. shofel2_t124 DRAM_TRACE.\n" );
++            goto exit;
++        }
++        payload_filename = "dram_trace.bin";
++        dram_trace_mode = 1;
++
++    } else if ( !strcmp( argv[1], "DFU_STAGE" ) ) {
++
++        if ( ( argc != 3 ) && ( argc != 4 ) ) {
++            fprintf( stderr, "Error: invalid argument count. shofel2_t124 DFU_STAGE loader.bin [--launch].\n" );
++            goto exit;
++        }
++        if ( argc == 4 ) {
++            if ( strcmp(argv[3], "--launch") != 0 ) {
++                fprintf(stderr, "Error: expected optional --launch.\n");
++                goto exit;
++            }
++            launch_requested = 1;
++            if (!DFU_STAGE2_ENABLE_LAUNCH) {
++                fprintf(stderr,
++                        "Error: --launch is compile-time disabled until DRAM readiness and the Cortex-A15 handoff are verified.\n");
++                goto exit;
++            }
++        }
++        stage_loader_filename = argv[2];
++        payload_filename = "dfu_stage2.bin";
++        stage_loader_mode = 1;
++
      } else if ( !strcmp( argv[1], "PAYLOAD" ) ) {
  
          if ( ( argc != 3 ) && ( argc != 4 ) ) {
-@@ -188,6 +246,11 @@ int main( int argc, char *argv[] ) {
+@@ -188,6 +565,37 @@ int main( int argc, char *argv[] ) {
  
      }
  
@@ -341,10 +864,36 @@ index 9e49a2f..46175bb 100644
 +        goto exit;
 +    }
 +
++    if ( stage_loader_mode ) {
++        uint8_t loader_digest[32];
++
++        stage_loader_fd = open(stage_loader_filename, O_RDONLY);
++        if (stage_loader_fd < 0) {
++            fprintf(stderr, "Error: couldn't open loader file %s: %s\n",
++                    stage_loader_filename, strerror(errno));
++            goto exit;
++        }
++        if (hash_loader_fd(stage_loader_fd, loader_digest) < 0) {
++            fprintf(stderr,
++                    "Error: loader must be exactly %u bytes and readable: %s\n",
++                    DFU_STAGE2_LOADER_SIZE, strerror(errno));
++            goto exit;
++        }
++        if (!digest_equals_expected(loader_digest)) {
++            fprintf(stderr, "Error: loader SHA-256 does not match the pinned Jibo RAM DFU image.\n");
++            goto exit;
++        }
++        printf("Pinned loader validated: %u bytes, SHA-256 ",
++               DFU_STAGE2_LOADER_SIZE);
++        for (uint32_t i = 0; i < sizeof(loader_digest); i++)
++            printf("%02x", loader_digest[i]);
++        printf("\n");
++    }
++
    // --------------------
    
  
-@@ -195,11 +258,11 @@ int main( int argc, char *argv[] ) {
+@@ -195,11 +603,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -359,60 +908,60 @@ index 9e49a2f..46175bb 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -251,6 +314,60 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +659,60 @@ int main( int argc, char *argv[] ) {
  
    //----------------------
  
-+    if ( dram_probe_mode ) {
-+        uint8_t report_bytes[DRAM_PROBE_REPORT_SIZE];
++    if (dram_trace_mode &&
++        send_start_token(rcm_usb, DRAM_TRACE_REQUEST_MAGIC) < 0) {
++        fprintf(stderr, "Error: failed to start DRAM_TRACE.\n");
++        goto exit;
++    }
++    if (dram_probe_mode &&
++        send_start_token(rcm_usb, DRAM_PROBE_REQUEST_MAGIC) < 0) {
++        fprintf(stderr, "Error: failed to start DRAM_STATUS.\n");
++        goto exit;
++    }
++    if (stage_loader_mode &&
++        send_start_token(rcm_usb, DFU_STAGE2_START_MAGIC) < 0) {
++        fprintf(stderr, "Error: failed to start DFU_STAGE preflight.\n");
++        goto exit;
++    }
++
++    if (dram_trace_mode) {
++        if (run_dram_trace(rcm_usb) < 0)
++            goto exit;
++        _ret_main = 0;
++        goto exit;
++    }
++
++    if ( dram_probe_mode || stage_loader_mode ) {
 +        struct dram_probe_report report;
 +
-+        memset( report_bytes, 0, sizeof(report_bytes) );
-+        ret = usb_receive_bulk_accumulate( rcm_usb, RCM_EP1_IN,
-+                                           sizeof(report_bytes), report_bytes );
-+        if ( ret < 0 ) {
++        if (receive_dram_probe(rcm_usb, &report) < 0) {
 +            fprintf( stderr, "Error: Failed to receive the DRAM probe report.\n" );
++            /* If the payload reached its report wait, let it leave cleanly. */
++            send_probe_ack(rcm_usb);
 +            goto exit;
 +        }
-+        memcpy( &report, report_bytes, sizeof(report) );
-+        if ( memcmp( report.magic, DRAM_PROBE_MAGIC, 4 ) ||
-+             report.version != DRAM_PROBE_VERSION ) {
-+            fprintf( stderr, "Error: Invalid DRAM probe report header.\n" );
++        print_dram_probe(&report);
++        if (dram_probe_mode) {
++            if (send_probe_ack(rcm_usb) < 0) {
++                fprintf(stderr, "Error: failed to acknowledge the DRAM report.\n");
++                goto exit;
++            }
++            _ret_main = 0;
 +            goto exit;
 +        }
-+
-+        uint32_t host_ack = DRAM_PROBE_HOST_ACK;
-+        ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_OUT,
-+                                 sizeof(host_ack), &host_ack );
-+        if ( ret < 0 ) {
-+            fprintf( stderr, "Error: Failed to acknowledge DRAM probe report.\n" );
++        if (!(report.flags & DRAM_PROBE_REGS_READY) ||
++            report.scratch_result != DRAM_PROBE_TEST_PASSED) {
++            fprintf(stderr,
++                    "Error: DRAM preflight failed; refusing to stage the loader.\n");
++            send_probe_ack(rcm_usb);
 +            goto exit;
 +        }
-+
-+        printf( "T124 DRAM/EMC probe (no eMMC access)\n" );
-+        printf( "  BootInfoTable BCT pointer/size: 0x%08x / 0x%08x (%s)\n",
-+                report.bct_ptr, report.bct_size,
-+                (report.flags & DRAM_PROBE_BCT_VALID) ? "valid" : "invalid" );
-+        printf( "  MC EMEM_CFG / ADR_CFG / ARB_CFG: 0x%08x / 0x%08x / 0x%08x\n",
-+                report.mc_emem_cfg, report.mc_emem_adr_cfg,
-+                report.mc_emem_arb_cfg );
-+        printf( "  EMC CFG / ADR_CFG: 0x%08x / 0x%08x\n",
-+                report.emc_cfg, report.emc_adr_cfg );
-+        printf( "  EMC REFCTRL / PIN / STATUS / AUTOCAL: 0x%08x / 0x%08x / 0x%08x / 0x%08x\n",
-+                report.emc_refctrl, report.emc_pin, report.emc_status,
-+                report.emc_auto_cal_status );
-+        printf( "  Register preflight: %s\n",
-+                (report.flags & DRAM_PROBE_REGS_READY) ? "ready" : "not ready" );
-+        if ( report.scratch_result == DRAM_PROBE_TEST_PASSED ) {
-+            printf( "  DRAM scratch round-trip at 0x%08x: passed (saved data restored)\n",
-+                    report.scratch_addr );
-+        } else if ( report.scratch_result == DRAM_PROBE_TEST_FAILED ) {
-+            printf( "  DRAM scratch round-trip at 0x%08x: failed (saved data restored)\n",
-+                    report.scratch_addr );
-+        } else {
-+            printf( "  DRAM scratch round-trip: skipped; register preflight did not pass\n" );
-+        }
-+        printf( "  PMC SCRATCH0: 0x%08x\n", report.pmc_scratch0 );
++        if (stage_loader(rcm_usb, stage_loader_fd, launch_requested) < 0)
++            goto exit;
 +        _ret_main = 0;
 +        goto exit;
 +    }
@@ -420,7 +969,7 @@ index 9e49a2f..46175bb 100644
  
    // --- MEM DUMP CMD ----
  
-@@ -464,8 +581,24 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +926,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -447,7 +996,7 @@ index 9e49a2f..46175bb 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +606,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +951,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -567,14 +1116,14 @@ index 9e49a2f..46175bb 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,9 +718,59 @@ int main( int argc, char *argv[] ) {
+@@ -508,9 +1063,59 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
 +                    next_progress_sector += 8000;
-+                }
-+            }
-+
+                 }
+             }
+ 
 +            struct timespec read_finished;
 +            if ( have_read_start_time && clock_gettime(CLOCK_MONOTONIC, &read_finished) == 0 ) {
 +                double transfer_seconds = (double)(read_finished.tv_sec - read_started.tv_sec) +
@@ -603,9 +1152,9 @@ index 9e49a2f..46175bb 100644
 +                if ( emmc_read_error || emmc_output_error ) {
 +                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
 +                    goto emmc_exit;
-                 }
-             }
- 
++                }
++            }
++
 +            if ( dump_fd >= 0 ) {
 +                if ( close(dump_fd) < 0 ) {
 +                    dump_fd = -1;
@@ -627,7 +1176,7 @@ index 9e49a2f..46175bb 100644
              printf( "\nRead complete. Output: %s\n", emmc_filename );
              _ret_main = 0;
          }
-@@ -546,7 +806,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +1151,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -636,7 +1185,7 @@ index 9e49a2f..46175bb 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +923,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +1268,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -652,23 +1201,104 @@ index 9e49a2f..46175bb 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -690,4 +959,3 @@ exit:
+@@ -686,8 +1300,8 @@ exit:
+     if ( dump ) free( dump );
+     if ( dump_fd > 0 ) close( dump_fd );
+     if ( data ) free( data );
++    if ( stage_loader_fd >= 0 ) close(stage_loader_fd);
+ 
      return _ret_main;
  
  }
 -
+diff --git a/include/dfu_stage2_protocol.h b/include/dfu_stage2_protocol.h
+new file mode 100644
+index 0000000..5cdd206
+--- /dev/null
++++ b/include/dfu_stage2_protocol.h
+@@ -0,0 +1,69 @@
++#ifndef _DFU_STAGE2_PROTOCOL_H_
++#define _DFU_STAGE2_PROTOCOL_H_
++
++#include <stdint.h>
++
++#define DFU_STAGE2_REQUEST_MAGIC "JLD1"
++#define DFU_STAGE2_START_MAGIC "JSTG"
++#define DFU_STAGE2_ACK_MAGIC "JACK"
++#define DFU_STAGE2_VERSION 1u
++#define DFU_STAGE2_CHUNK_SIZE 4096u
++#define DFU_STAGE2_LOADER_SIZE 415088u
++#define DFU_STAGE2_LOAD_ADDRESS 0x80108000u
++#define DFU_STAGE2_ENTRY_ADDRESS 0x80108000u
++#define DFU_STAGE2_ENTRY_MODE_ARM 0u
++#define DFU_STAGE2_REQUEST_SIZE 64u
++#define DFU_STAGE2_ACK_SIZE 20u
++#define DFU_STAGE2_IRAM_BUFFER 0x40020000u
++#define DFU_STAGE2_VECTOR_WORD 0xEA000016u
++#define DFU_STAGE2_FLAG_REQUEST_LAUNCH (1u << 0)
++#define DFU_STAGE2_ENABLE_LAUNCH 0u
++#define DFU_STAGE2_PROBE_ACK_MAGIC "JDRA"
++#define DFU_STAGE2_CONTROL_RESET_MAGIC "JRCM"
++#define DFU_STAGE2_CONTROL_LAUNCH_MAGIC "JGO1"
++
++enum dfu_stage2_ack_code {
++    DFU_STAGE2_ACK_ACCEPTED = 1,
++    DFU_STAGE2_ACK_CHUNK = 2,
++    DFU_STAGE2_ACK_COMPLETE = 3,
++    DFU_STAGE2_ACK_REJECTED = 0x80000001u,
++    DFU_STAGE2_ACK_READ_FAILED = 0x80000002u,
++    DFU_STAGE2_ACK_HASH_FAILED = 0x80000003u,
++    DFU_STAGE2_ACK_READBACK_FAILED = 0x80000004u,
++    DFU_STAGE2_ACK_VECTOR_FAILED = 0x80000005u
++};
++
++struct dfu_stage2_request {
++    char magic[4];
++    uint32_t version;
++    uint32_t image_size;
++    uint32_t load_address;
++    uint32_t entry_address;
++    uint32_t chunk_size;
++    uint32_t entry_mode;
++    uint32_t flags;
++    uint8_t sha256[32];
++} __attribute__((packed));
++
++struct dfu_stage2_ack {
++    char magic[4];
++    uint32_t version;
++    uint32_t code;
++    uint32_t chunk_index;
++    uint32_t length;
++} __attribute__((packed));
++
++typedef char dfu_stage2_request_must_be_64_bytes[
++    sizeof(struct dfu_stage2_request) == DFU_STAGE2_REQUEST_SIZE ? 1 : -1];
++typedef char dfu_stage2_ack_must_be_20_bytes[
++    sizeof(struct dfu_stage2_ack) == DFU_STAGE2_ACK_SIZE ? 1 : -1];
++
++/* SHA-256 of the current signed-skills-bundle-20260923/loader.bin. */
++static const uint8_t DFU_STAGE2_EXPECTED_SHA256[32] = {
++    0x8f, 0x46, 0x06, 0x2f, 0x2d, 0x20, 0x18, 0x24,
++    0x33, 0x70, 0x93, 0xa1, 0xe4, 0xc1, 0x54, 0xe3,
++    0x04, 0x8c, 0x01, 0x9b, 0x14, 0x79, 0x30, 0xda,
++    0x35, 0xb9, 0xd6, 0x2e, 0x00, 0xc5, 0xe6, 0x89
++};
++
++#endif
 diff --git a/include/dram_probe.h b/include/dram_probe.h
 new file mode 100644
-index 0000000..f5a756f
+index 0000000..38be1c2
 --- /dev/null
 +++ b/include/dram_probe.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +#ifndef _DRAM_PROBE_H_
 +#define _DRAM_PROBE_H_
 +
 +#include <stdint.h>
 +
 +#define DRAM_PROBE_MAGIC "JDR1"
++#define DRAM_PROBE_REQUEST_MAGIC "JDRQ"
 +#define DRAM_PROBE_VERSION 1u
 +#define DRAM_PROBE_REPORT_SIZE 68u
 +#define DRAM_PROBE_HOST_ACK 0x4a445241u
@@ -711,6 +1341,76 @@ index 0000000..f5a756f
 +
 +typedef char dram_probe_report_must_be_68_bytes[
 +    sizeof(struct dram_probe_report) == DRAM_PROBE_REPORT_SIZE ? 1 : -1];
++
++#endif
+diff --git a/include/dram_probe_payload.h b/include/dram_probe_payload.h
+new file mode 100644
+index 0000000..bfd4e8c
+--- /dev/null
++++ b/include/dram_probe_payload.h
+@@ -0,0 +1,11 @@
++#ifndef _DRAM_PROBE_PAYLOAD_H_
++#define _DRAM_PROBE_PAYLOAD_H_
++
++#include "types.h"
++#include "dram_probe.h"
++
++u32 dram_probe_read_report(struct dram_probe_report *report);
++u32 dram_probe_round_trip(u32 addr);
++void t124_enter_rcm(void);
++
++#endif
+diff --git a/include/dram_trace.h b/include/dram_trace.h
+new file mode 100644
+index 0000000..933878f
+--- /dev/null
++++ b/include/dram_trace.h
+@@ -0,0 +1,47 @@
++#ifndef _DRAM_TRACE_H_
++#define _DRAM_TRACE_H_
++
++#include <stdint.h>
++
++#define DRAM_TRACE_MAGIC "JDT1"
++#define DRAM_TRACE_REQUEST_MAGIC "JTRC"
++#define DRAM_TRACE_ACK_MAGIC "JTAK"
++#define DRAM_TRACE_EVENT_SIZE 12u
++#define DRAM_TRACE_ACK_SIZE 8u
++
++enum dram_trace_phase {
++    DRAM_TRACE_ENTRY = 0,
++    DRAM_TRACE_BCT_PTR,
++    DRAM_TRACE_BCT_SIZE,
++    DRAM_TRACE_MC_EMEM_CFG,
++    DRAM_TRACE_MC_EMEM_ADR_CFG,
++    DRAM_TRACE_MC_EMEM_ARB_CFG,
++    DRAM_TRACE_EMC_CFG,
++    DRAM_TRACE_EMC_ADR_CFG,
++    DRAM_TRACE_EMC_REFCTRL,
++    DRAM_TRACE_EMC_PIN,
++    DRAM_TRACE_EMC_STATUS,
++    DRAM_TRACE_EMC_AUTOCAL,
++    DRAM_TRACE_REGISTER_GATE,
++    DRAM_TRACE_SCRATCH,
++    DRAM_TRACE_PMC_SCRATCH0,
++    DRAM_TRACE_DONE
++};
++
++struct dram_trace_event {
++    char magic[4];
++    uint32_t phase;
++    uint32_t value;
++} __attribute__((packed));
++
++struct dram_trace_ack {
++    char magic[4];
++    uint32_t phase;
++} __attribute__((packed));
++
++typedef char dram_trace_event_size_check[
++    sizeof(struct dram_trace_event) == DRAM_TRACE_EVENT_SIZE ? 1 : -1];
++typedef char dram_trace_ack_size_check[
++    sizeof(struct dram_trace_ack) == DRAM_TRACE_ACK_SIZE ? 1 : -1];
 +
 +#endif
 diff --git a/include/emmc_server.h b/include/emmc_server.h
@@ -823,6 +1523,29 @@ index 7c55998..329a042 100644
  
  #endif
 -
+diff --git a/include/sha256.h b/include/sha256.h
+new file mode 100644
+index 0000000..4ab2396
+--- /dev/null
++++ b/include/sha256.h
+@@ -0,0 +1,17 @@
++#ifndef _SHA256_H_
++#define _SHA256_H_
++
++#include <stdint.h>
++
++struct sha256_ctx {
++    uint32_t state[8];
++    uint64_t bit_count;
++    uint8_t block[64];
++    uint32_t block_used;
++};
++
++void sha256_init(struct sha256_ctx *ctx);
++void sha256_update(struct sha256_ctx *ctx, const void *data, uint32_t len);
++void sha256_final(struct sha256_ctx *ctx, uint8_t digest[32]);
++
++#endif
 diff --git a/include/t124.h b/include/t124.h
 index 7d73596..57d8805 100644
 --- a/include/t124.h
@@ -862,17 +1585,305 @@ index 7d73596..57d8805 100644
  
  #endif
 -
-diff --git a/payloads/dram_probe.c b/payloads/dram_probe.c
+diff --git a/payloads/dfu_stage2.c b/payloads/dfu_stage2.c
 new file mode 100644
-index 0000000..0ad676d
+index 0000000..fb4f926
 --- /dev/null
-+++ b/payloads/dram_probe.c
-@@ -0,0 +1,160 @@
++++ b/payloads/dfu_stage2.c
+@@ -0,0 +1,226 @@
 +#include "types.h"
 +#include "t124.h"
 +#include "dram_probe.h"
++#include "dram_probe_payload.h"
++#include "dfu_stage2_protocol.h"
++#include "sha256.h"
 +
 +typedef void (*ep1_x_imm_t)(void *buffer, u32 size, u32 *num_xfer);
++
++static const u8 expected_sha256[32] = {
++    0x8f, 0x46, 0x06, 0x2f, 0x2d, 0x20, 0x18, 0x24,
++    0x33, 0x70, 0x93, 0xa1, 0xe4, 0xc1, 0x54, 0xe3,
++    0x04, 0x8c, 0x01, 0x9b, 0x14, 0x79, 0x30, 0xda,
++    0x35, 0xb9, 0xd6, 0x2e, 0x00, 0xc5, 0xe6, 0x89
++};
++
++static u32 read32(uintptr_t addr)
++{
++    return *(volatile u32 *)addr;
++}
++
++static void copy_to_dram(u32 address, const u8 *source, u32 length)
++{
++    volatile u8 *destination = (volatile u8 *)address;
++    u32 i;
++
++    for (i = 0; i < length; i++)
++        destination[i] = source[i];
++}
++
++static void hash_dram(struct sha256_ctx *ctx, u32 address, u32 length,
++                      u8 *buffer)
++{
++    const volatile u8 *source = (const volatile u8 *)address;
++    u32 remaining = length;
++
++    sha256_init(ctx);
++    while (remaining != 0) {
++        u32 count = remaining > DFU_STAGE2_CHUNK_SIZE ?
++                    DFU_STAGE2_CHUNK_SIZE : remaining;
++        u32 i;
++        for (i = 0; i < count; i++)
++            buffer[i] = source[i];
++        sha256_update(ctx, buffer, count);
++        source += count;
++        remaining -= count;
++    }
++}
++
++static int digest_matches(const u8 *digest)
++{
++    u32 i;
++    u8 different = 0;
++
++    for (i = 0; i < 32; i++)
++        different |= digest[i] ^ expected_sha256[i];
++    return different == 0;
++}
++
++static void send_ack(ep1_x_imm_t ep1_in_write_imm,
++                     struct dfu_stage2_ack *ack, u32 code,
++                     u32 chunk_index, u32 length)
++{
++    u32 num_xfer = 0;
++
++    ack->magic[0] = 'J';
++    ack->magic[1] = 'A';
++    ack->magic[2] = 'C';
++    ack->magic[3] = 'K';
++    ack->version = DFU_STAGE2_VERSION;
++    ack->code = code;
++    ack->chunk_index = chunk_index;
++    ack->length = length;
++    ep1_in_write_imm(ack, sizeof(*ack), &num_xfer);
++}
++
++static int request_is_exact(const struct dfu_stage2_request *request)
++{
++    u32 i;
++    u8 different = 0;
++
++    if (request->magic[0] != 'J' || request->magic[1] != 'L' ||
++        request->magic[2] != 'D' || request->magic[3] != '1')
++        return 0;
++    if (request->version != DFU_STAGE2_VERSION ||
++        request->image_size != DFU_STAGE2_LOADER_SIZE ||
++        request->load_address != DFU_STAGE2_LOAD_ADDRESS ||
++        request->entry_address != DFU_STAGE2_ENTRY_ADDRESS ||
++        request->chunk_size != DFU_STAGE2_CHUNK_SIZE ||
++        request->entry_mode != DFU_STAGE2_ENTRY_MODE_ARM ||
++        (request->flags & ~DFU_STAGE2_FLAG_REQUEST_LAUNCH) != 0 ||
++        ((request->flags & DFU_STAGE2_FLAG_REQUEST_LAUNCH) &&
++         !DFU_STAGE2_ENABLE_LAUNCH))
++        return 0;
++    for (i = 0; i < 32; i++)
++        different |= request->sha256[i] ^ expected_sha256[i];
++    return different == 0;
++}
++
++static void await_final_control_and_reset(ep1_x_imm_t ep1_out_read_imm)
++{
++    char control[4];
++    u32 num_xfer = 0;
++
++    ep1_out_read_imm(control, sizeof(control), &num_xfer);
++    /* Launch stays disabled until the T124 A15 handoff has been verified. */
++    if (num_xfer == sizeof(control) &&
++        control[0] == 'J' && control[1] == 'R' &&
++        control[2] == 'C' && control[3] == 'M')
++        t124_enter_rcm();
++    t124_enter_rcm();
++}
++
++static void receive_loader(ep1_x_imm_t ep1_out_read_imm,
++                           ep1_x_imm_t ep1_in_write_imm,
++                           struct dfu_stage2_ack *ack)
++{
++    struct dfu_stage2_request request;
++    struct sha256_ctx hash_ctx;
++    u8 digest[32];
++    u8 *buffer = (u8 *)DFU_STAGE2_IRAM_BUFFER;
++    u32 num_xfer = 0;
++    u32 offset = 0;
++    u32 chunk_index = 0;
++
++    ep1_out_read_imm(&request, sizeof(request), &num_xfer);
++    if (num_xfer != sizeof(request) || !request_is_exact(&request)) {
++        send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_REJECTED,
++                 0, num_xfer);
++        await_final_control_and_reset(ep1_out_read_imm);
++    }
++
++    send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_ACCEPTED, 0,
++             DFU_STAGE2_LOADER_SIZE);
++    sha256_init(&hash_ctx);
++
++    while (offset < DFU_STAGE2_LOADER_SIZE) {
++        u32 length = DFU_STAGE2_LOADER_SIZE - offset;
++        if (length > DFU_STAGE2_CHUNK_SIZE)
++            length = DFU_STAGE2_CHUNK_SIZE;
++
++        num_xfer = 0;
++        ep1_out_read_imm(buffer, length, &num_xfer);
++        if (num_xfer != length) {
++            send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_READ_FAILED,
++                     chunk_index, num_xfer);
++            await_final_control_and_reset(ep1_out_read_imm);
++        }
++
++        copy_to_dram(DFU_STAGE2_LOAD_ADDRESS + offset, buffer, length);
++        sha256_update(&hash_ctx, buffer, length);
++        send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_CHUNK,
++                 chunk_index, length);
++        offset += length;
++        chunk_index++;
++    }
++
++    sha256_final(&hash_ctx, digest);
++    if (!digest_matches(digest)) {
++        send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_HASH_FAILED,
++                 chunk_index, 0);
++        await_final_control_and_reset(ep1_out_read_imm);
++    }
++
++    hash_dram(&hash_ctx, DFU_STAGE2_LOAD_ADDRESS,
++              DFU_STAGE2_LOADER_SIZE, buffer);
++    sha256_final(&hash_ctx, digest);
++    if (!digest_matches(digest)) {
++        send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_READBACK_FAILED,
++                 chunk_index, 0);
++        await_final_control_and_reset(ep1_out_read_imm);
++    }
++
++    if (read32(DFU_STAGE2_LOAD_ADDRESS) != DFU_STAGE2_VECTOR_WORD) {
++        send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_VECTOR_FAILED,
++                 chunk_index, 0);
++        await_final_control_and_reset(ep1_out_read_imm);
++    }
++
++    /* The image is verified in DRAM; wait for host to consume this response. */
++    send_ack(ep1_in_write_imm, ack, DFU_STAGE2_ACK_COMPLETE,
++             chunk_index, 0);
++    await_final_control_and_reset(ep1_out_read_imm);
++}
++
++__attribute__((section(".init")))
++void entry(void)
++{
++    struct dram_probe_report report;
++    struct dfu_stage2_ack ack;
++    u32 num_xfer = 0;
++    u32 regs_ready;
++    char start_request[4];
++    ep1_x_imm_t ep1_out_read_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_OUT_READ_IMM | 1u);
++    ep1_x_imm_t ep1_in_write_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++
++    start_request[0] = start_request[1] =
++        start_request[2] = start_request[3] = 0;
++    num_xfer = 0;
++    ep1_out_read_imm(start_request, sizeof(start_request), &num_xfer);
++    if (num_xfer != sizeof(start_request) ||
++        start_request[0] != 'J' || start_request[1] != 'S' ||
++        start_request[2] != 'T' || start_request[3] != 'G')
++        t124_enter_rcm();
++    (void)num_xfer;
++
++    regs_ready = dram_probe_read_report(&report);
++    if (regs_ready) {
++        report.scratch_addr = DRAM_PROBE_SCRATCH;
++        report.scratch_result =
++            dram_probe_round_trip(DRAM_PROBE_SCRATCH);
++    }
++    ep1_in_write_imm(&report, sizeof(report), &num_xfer);
++
++    if (!regs_ready ||
++        report.scratch_result != DRAM_PROBE_TEST_PASSED) {
++        char probe_ack[4];
++        num_xfer = 0;
++        ep1_out_read_imm(probe_ack, sizeof(probe_ack), &num_xfer);
++        t124_enter_rcm();
++    }
++
++    receive_loader(ep1_out_read_imm, ep1_in_write_imm, &ack);
++}
+diff --git a/payloads/dram_probe.c b/payloads/dram_probe.c
+new file mode 100644
+index 0000000..ffa2479
+--- /dev/null
++++ b/payloads/dram_probe.c
+@@ -0,0 +1,51 @@
++#include "types.h"
++#include "t124.h"
++#include "dram_probe.h"
++#include "dram_probe_payload.h"
++
++typedef void (*ep1_x_imm_t)(void *buffer, u32 size, u32 *num_xfer);
++
++static void await_host_ack_then_reset(ep1_x_imm_t ep1_out_read_imm)
++{
++    char ack[4];
++    u32 num_xfer = 0;
++
++    ep1_out_read_imm(ack, sizeof(ack), &num_xfer);
++    /* Keep EP1 alive until the host has consumed the report. */
++    (void)num_xfer;
++    (void)ack;
++    t124_enter_rcm();
++}
++
++__attribute__((section(".init")))
++void entry(void)
++{
++    struct dram_probe_report report;
++    char request[4];
++    u32 request_len = 0;
++    u32 num_xfer = 0;
++    u32 regs_ready;
++    ep1_x_imm_t ep1_out_read_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_OUT_READ_IMM | 1u);
++    ep1_x_imm_t ep1_in_write_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++
++    /* BootROM EP1 services are request driven; do not send unsolicited IN. */
++    request[0] = request[1] = request[2] = request[3] = 0;
++    ep1_out_read_imm(request, sizeof(request), &request_len);
++    if (request_len != sizeof(request) ||
++        request[0] != 'J' || request[1] != 'D' ||
++        request[2] != 'R' || request[3] != 'Q')
++        t124_enter_rcm();
++    (void)request_len;
++
++    regs_ready = dram_probe_read_report(&report);
++    if (regs_ready) {
++        report.scratch_addr = DRAM_PROBE_SCRATCH;
++        report.scratch_result =
++            dram_probe_round_trip(DRAM_PROBE_SCRATCH);
++    }
++
++    ep1_in_write_imm(&report, sizeof(report), &num_xfer);
++    await_host_ack_then_reset(ep1_out_read_imm);
++}
+diff --git a/payloads/dram_probe_common.c b/payloads/dram_probe_common.c
+new file mode 100644
+index 0000000..007debd
+--- /dev/null
++++ b/payloads/dram_probe_common.c
+@@ -0,0 +1,132 @@
++#include "types.h"
++#include "t124.h"
++#include "dram_probe.h"
++#include "dram_probe_payload.h"
 +
 +static u32 read32(uintptr_t addr)
 +{
@@ -884,7 +1895,7 @@ index 0000000..0ad676d
 +    *(volatile u32 *)addr = value;
 +}
 +
-+static void enter_rcm(void)
++void t124_enter_rcm(void)
 +{
 +    write32(PMC_BASE + PMC_SCRATCH0,
 +            read32(PMC_BASE + PMC_SCRATCH0) | PMC_SCRATCH0_MODE_RCM);
@@ -903,8 +1914,7 @@ index 0000000..0ad676d
 +    return size <= (IRAM_END + 1u - ptr);
 +}
 +
-+/* Use the future image base as scratch; the RCM Boot CPU is the only live CPU. */
-+static u32 round_trip_scratch(u32 addr)
++u32 dram_probe_round_trip(u32 addr)
 +{
 +    volatile u32 *scratch = (volatile u32 *)addr;
 +    u32 saved[4];
@@ -934,7 +1944,7 @@ index 0000000..0ad676d
 +    return ok ? DRAM_PROBE_TEST_PASSED : DRAM_PROBE_TEST_FAILED;
 +}
 +
-+static u32 read_report(struct dram_probe_report *report)
++u32 dram_probe_read_report(struct dram_probe_report *report)
 +{
 +    u32 ready = 1;
 +    u32 emc_refctrl;
@@ -1002,31 +2012,169 @@ index 0000000..0ad676d
 +        report->flags |= DRAM_PROBE_REGS_READY;
 +    return ready;
 +}
+diff --git a/payloads/dram_trace.c b/payloads/dram_trace.c
+new file mode 100644
+index 0000000..f76452e
+--- /dev/null
++++ b/payloads/dram_trace.c
+@@ -0,0 +1,158 @@
++#include "types.h"
++#include "t124.h"
++#include "dram_probe.h"
++#include "dram_probe_payload.h"
++#include "dram_trace.h"
++
++typedef void (*ep1_x_imm_t)(void *buffer, u32 size, u32 *num_xfer);
++
++static u32 read32(uintptr_t address)
++{
++    return *(volatile u32 *)address;
++}
++
++static void trace_phase(ep1_x_imm_t ep1_in_write_imm,
++                        ep1_x_imm_t ep1_out_read_imm,
++                        struct dram_trace_event *event,
++                        u32 phase, u32 value)
++{
++    struct dram_trace_ack ack;
++    u32 sent = 0;
++    u32 received = 0;
++
++    event->magic[0] = 'J';
++    event->magic[1] = 'D';
++    event->magic[2] = 'T';
++    event->magic[3] = '1';
++    event->phase = phase;
++    event->value = value;
++    ep1_in_write_imm(event, sizeof(*event), &sent);
++    (void)sent;
++
++    ep1_out_read_imm(&ack, sizeof(ack), &received);
++    if (received != sizeof(ack) ||
++        ack.magic[0] != 'J' || ack.magic[1] != 'T' ||
++        ack.magic[2] != 'A' || ack.magic[3] != 'K' ||
++        ack.phase != phase)
++        t124_enter_rcm();
++}
++
++static int bct_info_is_valid(u32 ptr, u32 size)
++{
++    if (size == 0 || size > IRAM_LEN)
++        return 0;
++    if (ptr < IRAM_BEGIN || ptr > IRAM_END)
++        return 0;
++    return size <= (IRAM_END + 1u - ptr);
++}
 +
 +__attribute__((section(".init")))
 +void entry(void)
 +{
-+    struct dram_probe_report report;
-+    u32 num_xfer = 0;
-+    u32 host_ack = 0;
-+    u32 regs_ready;
-+    ep1_x_imm_t ep1_in_write_imm =
-+        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++    struct dram_trace_event event;
 +    ep1_x_imm_t ep1_out_read_imm =
 +        (ep1_x_imm_t)(BOOTROM_EP1_OUT_READ_IMM | 1u);
++    ep1_x_imm_t ep1_in_write_imm =
++        (ep1_x_imm_t)(BOOTROM_EP1_IN_WRITE_IMM | 1u);
++    u32 bct_ptr, bct_size, mc_cfg, mc_adr, mc_arb;
++    u32 emc_cfg, emc_adr, emc_refctrl, emc_pin, emc_status, emc_autocal;
++    u32 gate = 1;
++    u32 flags = 0;
++    char request[4];
++    u32 request_len = 0;
 +
-+    regs_ready = read_report(&report);
-+    if (regs_ready) {
-+        report.scratch_addr = DRAM_PROBE_SCRATCH;
-+        report.scratch_result = round_trip_scratch(DRAM_PROBE_SCRATCH);
++    request[0] = request[1] = request[2] = request[3] = 0;
++    ep1_out_read_imm(request, sizeof(request), &request_len);
++    if (request_len != sizeof(request) ||
++        request[0] != 'J' || request[1] != 'T' ||
++        request[2] != 'R' || request[3] != 'C')
++        t124_enter_rcm();
++    (void)request_len;
++
++    /* A visible handshake before any memory-mapped register access. */
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_ENTRY, 0);
++
++    bct_ptr = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTPTR);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_BCT_PTR, bct_ptr);
++    bct_size = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTSIZE);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_BCT_SIZE, bct_size);
++    if (bct_info_is_valid(bct_ptr, bct_size))
++        flags |= DRAM_PROBE_BCT_VALID;
++    else
++        gate = 0;
++
++    mc_cfg = read32(T124_MC_BASE + T124_MC_EMEM_CFG);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_MC_EMEM_CFG, mc_cfg);
++    mc_adr = read32(T124_MC_BASE + T124_MC_EMEM_ADR_CFG);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_MC_EMEM_ADR_CFG, mc_adr);
++    mc_arb = read32(T124_MC_BASE + T124_MC_EMEM_ARB_CFG);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_MC_EMEM_ARB_CFG, mc_arb);
++    if (mc_cfg != 0 && mc_arb != 0)
++        flags |= DRAM_PROBE_MC_CONFIGURED;
++    else
++        gate = 0;
++
++    emc_cfg = read32(T124_EMC_BASE + T124_EMC_CFG);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_CFG, emc_cfg);
++    emc_adr = read32(T124_EMC_BASE + T124_EMC_ADR_CFG);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_ADR_CFG, emc_adr);
++    emc_refctrl = read32(T124_EMC_BASE + T124_EMC_REFCTRL);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_REFCTRL, emc_refctrl);
++    if (emc_refctrl & T124_EMC_REF_VALID)
++        flags |= DRAM_PROBE_REFRESH_ENABLED;
++    else
++        gate = 0;
++
++    emc_pin = read32(T124_EMC_BASE + T124_EMC_PIN);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_PIN, emc_pin);
++    if ((emc_pin & (T124_EMC_PIN_RESET_INACTIVE | T124_EMC_PIN_CKE_NORMAL)) ==
++        (T124_EMC_PIN_RESET_INACTIVE | T124_EMC_PIN_CKE_NORMAL))
++        flags |= DRAM_PROBE_PINS_ACTIVE;
++    else
++        gate = 0;
++
++    emc_status = read32(T124_EMC_BASE + T124_EMC_STATUS);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_STATUS, emc_status);
++    if ((emc_status & T124_EMC_TIMING_STALLED) == 0)
++        flags |= DRAM_PROBE_TIMING_READY;
++    else
++        gate = 0;
++
++    emc_autocal = read32(T124_EMC_BASE + T124_EMC_AUTO_CAL_STATUS);
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_EMC_AUTOCAL, emc_autocal);
++    if ((emc_autocal & T124_EMC_AUTO_CAL_ACTIVE) == 0)
++        flags |= DRAM_PROBE_AUTOCAL_IDLE;
++    else
++        gate = 0;
++
++    if (gate)
++        flags |= DRAM_PROBE_REGS_READY;
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_REGISTER_GATE, flags);
++
++    if (gate) {
++        u32 scratch_result =
++            dram_probe_round_trip(DRAM_PROBE_SCRATCH);
++        trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                    DRAM_TRACE_SCRATCH, scratch_result);
 +    }
 +
-+    ep1_in_write_imm(&report, sizeof(report), &num_xfer);
-+    /* Keep USB alive until the host has actually received the report. */
-+    ep1_out_read_imm(&host_ack, sizeof(host_ack), &num_xfer);
-+    if (num_xfer != sizeof(host_ack) || host_ack != DRAM_PROBE_HOST_ACK)
-+        for (;;) { }
-+    enter_rcm();
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_PMC_SCRATCH0,
++                read32(PMC_BASE + PMC_SCRATCH0));
++    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                DRAM_TRACE_DONE, gate);
++    t124_enter_rcm();
 +}
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
 index 41601b7..1cc5ebb 100644
@@ -1483,6 +2631,85 @@ index 0000000..fcbf670
 +    assert((1024000 + EMMC_READ_FRAME_SECTORS - 1) /
 +           EMMC_READ_FRAME_SECTORS == 128000);
 +
++    return 0;
++}
+diff --git a/tests/test_sha256.c b/tests/test_sha256.c
+new file mode 100644
+index 0000000..9757621
+--- /dev/null
++++ b/tests/test_sha256.c
+@@ -0,0 +1,73 @@
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "sha256.h"
++
++static int decode_hex(const char *hex, uint8_t *out, uint32_t length)
++{
++    uint32_t i;
++
++    for (i = 0; i < length; i++) {
++        unsigned int value;
++        if (sscanf(hex + i * 2u, "%2x", &value) != 1)
++            return -1;
++        out[i] = (uint8_t)value;
++    }
++    return 0;
++}
++
++static int check_vector(const char *message, uint32_t length,
++                        const char *expected_hex)
++{
++    struct sha256_ctx ctx;
++    uint8_t actual[32];
++    uint8_t expected[32];
++
++    if (decode_hex(expected_hex, expected, sizeof(expected)) < 0)
++        return -1;
++    sha256_init(&ctx);
++    sha256_update(&ctx, message, length);
++    sha256_final(&ctx, actual);
++    if (memcmp(actual, expected, sizeof(actual)) != 0) {
++        fprintf(stderr, "SHA-256 test vector failed for %u-byte input\n", length);
++        return -1;
++    }
++    return 0;
++}
++
++int main(void)
++{
++    static const char long_message[] =
++        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
++    struct sha256_ctx ctx;
++    uint8_t actual[32];
++    uint8_t expected[32];
++    const char *million_a_digest =
++        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
++    uint8_t block[1000];
++    uint32_t i;
++
++    if (check_vector("", 0,
++        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") < 0 ||
++        check_vector("abc", 3,
++        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") < 0 ||
++        check_vector(long_message, sizeof(long_message) - 1,
++        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") < 0)
++        return 1;
++
++    if (decode_hex(million_a_digest, expected, sizeof(expected)) < 0)
++        return 1;
++    memset(block, 'a', sizeof(block));
++    sha256_init(&ctx);
++    for (i = 0; i < 1000; i++)
++        sha256_update(&ctx, block, sizeof(block));
++    sha256_final(&ctx, actual);
++    if (memcmp(actual, expected, sizeof(actual)) != 0) {
++        fprintf(stderr, "SHA-256 million-byte streaming test failed\n");
++        return 1;
++    }
++
++    puts("SHA-256 vectors passed.");
 +    return 0;
 +}
 diff --git a/tests/test_usb_bulk_accumulate.c b/tests/test_usb_bulk_accumulate.c
