@@ -130,7 +130,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..4ace6bb 100644
+index 9e49a2f..9201302 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -265,7 +265,7 @@ index 9e49a2f..4ace6bb 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +540,105 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +540,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -292,6 +292,12 @@ index 9e49a2f..4ace6bb 100644
 +                        printf( "The 1-bit and 8-bit sector 0 samples differ; no dump was saved.\n" );
 +                    if ( preflight_result == 8 )
 +                        printf( "The payload could not verify restoration to 1-bit mode.\n" );
++                    if ( preflight_result == 9 )
++                        printf( "EXT_CSD could not be read over the 8-bit bus; 1-bit mode was restored.\n" );
++                    if ( preflight_result == 10 )
++                        printf( "EXT_CSD did not report 8-bit width; 1-bit mode was restored.\n" );
++                    if ( preflight_result == 11 )
++                        printf( "EXT_CSD card fields changed across the bus switch; 1-bit mode was restored.\n" );
 +                    goto emmc_exit;
 +                }
 +                printf( "8-bit eMMC mode verified against the 1-bit sector 0 sample.\n" );
@@ -379,7 +385,7 @@ index 9e49a2f..4ace6bb 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,9 +646,59 @@ int main( int argc, char *argv[] ) {
+@@ -508,9 +652,59 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -439,7 +445,7 @@ index 9e49a2f..4ace6bb 100644
              printf( "\nRead complete. Output: %s\n", emmc_filename );
              _ret_main = 0;
          }
-@@ -546,7 +734,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +740,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -448,7 +454,7 @@ index 9e49a2f..4ace6bb 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +851,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +857,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -464,7 +470,7 @@ index 9e49a2f..4ace6bb 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -690,4 +887,3 @@ exit:
+@@ -690,4 +893,3 @@ exit:
      return _ret_main;
  
  }
@@ -580,7 +586,7 @@ index 7c55998..329a042 100644
  #endif
 -
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
-index 41601b7..563b768 100644
+index 41601b7..1cc5ebb 100644
 --- a/payloads/emmc_server.c
 +++ b/payloads/emmc_server.c
 @@ -163,6 +163,7 @@ static int send_cmd(u32 cmd_val, u32 argument) {
@@ -591,7 +597,7 @@ index 41601b7..563b768 100644
  #define MMC_CMD7    0x071B  /* SELECT_CARD: R1b, CRC+index check */
  #define MMC_CMD8    0x083A  /* SEND_EXT_CSD: R1, 512-byte data, CRC+index check */
  #define MMC_CMD12   0x0C1B  /* STOP_TRANSMISSION: R1b, no data, CRC+index check */
-@@ -174,6 +175,40 @@ static int send_cmd(u32 cmd_val, u32 argument) {
+@@ -174,6 +175,42 @@ static int send_cmd(u32 cmd_val, u32 argument) {
  #define MMC_CMD36   0x243A  /* ERASE_GROUP_END: R1, CRC+index check */
  #define MMC_CMD38   0x263B  /* ERASE: R1b, CRC+index check */
  
@@ -615,9 +621,11 @@ index 41601b7..563b768 100644
 +#define EMMC_PREFLIGHT_BASE_EXT_CSD  3
 +#define EMMC_PREFLIGHT_SWITCH_CMD    4
 +#define EMMC_PREFLIGHT_SWITCH_STATUS 5
-+#define EMMC_PREFLIGHT_8BIT_EXT_CSD  6
 +#define EMMC_PREFLIGHT_DATA_MISMATCH 7
 +#define EMMC_PREFLIGHT_RESTORE       8
++#define EMMC_PREFLIGHT_8BIT_READ     9
++#define EMMC_PREFLIGHT_8BIT_WIDTH    10
++#define EMMC_PREFLIGHT_8BIT_FIELDS   11
 +
 +struct emmc_ext_csd_stable_s {
 +    u8 hs_timing;
@@ -632,7 +640,7 @@ index 41601b7..563b768 100644
  static u32 sdmmc4_initialized = 0;
  static u32 init_error = 0;
  
-@@ -663,6 +698,199 @@ static int read_ext_csd(u32 *buffer) {
+@@ -663,6 +700,203 @@ static int read_ext_csd(u32 *buffer) {
      return 0;
  }
  
@@ -809,13 +817,17 @@ index 41601b7..563b768 100644
 +        return EMMC_PREFLIGHT_SWITCH_STATUS;
 +    }
 +
-+    if (read_ext_csd(ext_csd_after_words) < 0 ||
++    result = read_ext_csd(ext_csd_after_words);
++    if (result < 0 ||
 +        !verify_ext_csd_bus_width(ext_csd_after, MMC_BUS_WIDTH_8BIT) ||
 +        !ext_csd_stable_fields_match(ext_csd_before, ext_csd_after)) {
++        u32 failure = result < 0 ? EMMC_PREFLIGHT_8BIT_READ :
++            (!verify_ext_csd_bus_width(ext_csd_after, MMC_BUS_WIDTH_8BIT) ?
++             EMMC_PREFLIGHT_8BIT_WIDTH : EMMC_PREFLIGHT_8BIT_FIELDS);
 +        if (restore_one_bit_and_verify(buffer, &emmc_8bit_baseline,
 +                                       MMC_BUS_WIDTH_8BIT) < 0)
 +            return EMMC_PREFLIGHT_RESTORE;
-+        return EMMC_PREFLIGHT_8BIT_EXT_CSD;
++        return failure;
 +    }
 +
 +    if (read_emmc_sector(0, sector_after) < 0 ||
@@ -832,7 +844,7 @@ index 41601b7..563b768 100644
  /* Erase a range of sectors - tells eMMC controller data can be discarded/reallocated */
  static int erase_emmc_sectors(u32 start_sector, u32 end_sector) {
      u32 status;
-@@ -774,13 +1002,21 @@ void entry() {
+@@ -774,13 +1008,21 @@ void entry() {
              continue;
          }
  
@@ -856,7 +868,7 @@ index 41601b7..563b768 100644
                  u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int result = read_emmc_sectors(sector, batch, (u32*)buffer);
-@@ -790,11 +1026,20 @@ void entry() {
+@@ -790,11 +1032,20 @@ void entry() {
                      for (u32 j = 1; j < batch * 128; j++) err[j] = 0xDEADDEAD;
                  }
  
@@ -877,7 +889,7 @@ index 41601b7..563b768 100644
              continue;
          }
  
-@@ -805,7 +1050,7 @@ void entry() {
+@@ -805,7 +1056,7 @@ void entry() {
              u32 write_result = 0;
  
              while (remaining > 0) {
