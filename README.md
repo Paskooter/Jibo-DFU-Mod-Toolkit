@@ -63,7 +63,7 @@ For the ShofEL transport, place the built `shofel2_t124`, `intermezzo.bin`, and 
 git clone --branch improvements/IncreasedUSBReadWriteSpeed https://github.com/devsparx/ShofEL2-for-T124.git ../ShofEL2-for-T124
 cd ../ShofEL2-for-T124
 git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-rcm-backup.patch
-make shofel2_t124 intermezzo.bin emmc_server.bin dram_probe.bin dram_trace.bin
+make shofel2_t124 intermezzo.bin emmc_server.bin dram_probe.bin dram_trace.bin dfu_stage2.bin
 cd ../Jibo-DFU-Mod-Toolkit
 ```
 
@@ -75,15 +75,24 @@ sudo python3 jibo_dfu.py benchmark-rcm --shofel ../ShofEL2-for-T124/shofel2_t124
 sudo python3 jibo_dfu.py backup-var --transport shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 sudo python3 jibo_dfu.py probe-rcm-dram --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
 sudo python3 jibo_dfu.py trace-rcm-dram --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1
+sudo python3 jibo_dfu.py read-rcm-boot0-bct --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1 --out ~/Jibo-Backups/robot-boot0-prefix.bin
 ```
 
 The DRAM probe is a separate diagnostic for a future ShofEL-to-DFU loader path. Build `dram_probe.bin` beside the ShofEL executable before running it. It reports the memory-controller state without reading eMMC; only after its register checks pass does it test and restore 16 bytes at the future loader address. It does not launch DFU.
 
-On Moth, the phased trace read zero for both the BootROM BCT pointer and size, then timed out when it tried to read the memory controller. The trace now stops at the absent-BCT check instead of touching that gated controller. This is a RAM-initialization obstacle, not a DFU or eMMC read failure. A ShofEL-loaded DFU program needs a matching DRAM configuration and a successful RAM check before its larger loader can be transferred; the diagnostic commands above do not perform that initialization.
+On Moth, the phased trace read zero for both the BootROM BCT pointer and size, then timed out when it tried to read the memory controller. The trace now stops at the absent-BCT check instead of touching that gated controller. This is a RAM-initialization obstacle, not a DFU or eMMC read failure. The Boot0 command reads only the first 16 KiB of the eMMC boot partition, saves it privately, and reports its CSD page-size exponent. It restores the original eMMC partition-access setting before accepting the result. It does not write sectors. A ShofEL-loaded DFU program needs a matching DRAM configuration and a successful RAM check before its larger loader can be transferred.
+
+For board-profile research, `../ShofEL2-for-T124/scripts/verify_boot0_bct.py` compares every SDRAM[2] parameter in the Boot0 prefix with the pinned official Meerkat Rev02 profile. Supply the reported CSD exponent and the `bct_dump` executable from an official Jibo host-tools package:
+
+```sh
+python3 ../ShofEL2-for-T124/scripts/verify_boot0_bct.py ~/Jibo-Backups/robot-boot0-prefix.bin --read-bl-len-exp 9 --bct-dump /path/to/bct_dump
+```
+
+Replace `9` with the exponent actually reported by the read command. A profile match makes a gated RAM initialization trial possible; it does not establish BootROM signature validity or identify every later BCT copy. The ShofEL DFU stage currently only prepares RAM and transfers the pinned loader for inspection; launching it remains disabled in the default build. Do not infer that DFU has started from a successful stage report.
 
 The benchmarks read and discard an 8 MiB sample so you can check the USB transfer rate before a full backup. The optional 8-bit test first compares sector 0 and eMMC card information across the bus switch, then returns the bus to 1-bit mode and verifies that restoration. It does not leave a sample image on disk. On Moth, the 8-bit EXT_CSD read failed its preflight (status 9) and the 1-bit interface was restored; this path still needs hardware work. The board's production device tree declares an 8-bit eMMC bus, so this result does not establish that the wiring is limited to 1 bit. After a successful 8-bit benchmark on a robot, add `--bus-width 8` to the `backup-var --transport shofel` command to use the same verified read path for the full partition; the default remains 1-bit.
 
-The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; add `--dram-probe /path/to/dram_probe.bin` and `--dram-trace /path/to/dram_trace.bin` for the RAM diagnostics. The trace reports its last completed register read if the next step stalls. The files are stored under `tools/` and discovered there.
+The same command works with a generated `.pyz` by replacing `python3 jibo_dfu.py` with the `.pyz` path; keep `--shofel` pointed at the external ShofEL executable. The toolkit runs it from the executable's directory so adjacent payloads resolve correctly. To bundle ShofEL for the `.pyz` menu, pass `--shofel2 /path/to/shofel2_t124`, `--intermezzo /path/to/intermezzo.bin`, and `--emmc-server /path/to/emmc_server.bin` to `scripts/package.py`; add `--dram-probe /path/to/dram_probe.bin`, `--dram-trace /path/to/dram_trace.bin`, and `--dfu-stage /path/to/dfu_stage2.bin` for the RAM diagnostics and stage. The trace reports its last completed register read if the next step stalls. The files are stored under `tools/` and discovered there.
 
 The selected RCM/APX USB port is passed to ShofEL explicitly. The toolkit validates the primary GPT CRC and Jibo partition layout before reading the 500 MiB `var` range. It stores the image and manifest under the same private backup root used by the DFU workflow. ShofEL backups use a hashed Tegra chip ID for reuse; raw chip IDs are not stored. The patched payload sends safe 4 KiB USB frames; the host collects up to 64 KiB per read and handles short USB transfers without losing byte order. The actual transfer rate depends on the robot and USB connection. Read operations show a byte-count progress bar. Generated `.pyz` packages include ShofEL only when all three optional build inputs are supplied; otherwise pass `--shofel` to the backup command.
 
@@ -125,6 +134,6 @@ RCM-to-DFU entry, a `var` read, and a mode change to `int-developer` were tested
 
 Available now: USB detection, recovery-bundle integrity checks, DFU entry for the tested profile, `var` backup and inspection over DFU or read-only ShofEL, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
 
-Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. The ShofEL backup path and the update workflow still need hardware validation; SSH is not enabled by this tool.
+Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. The ShofEL read-only backup worked on Moth; its DFU loader route and the update workflow still need hardware validation. SSH is not enabled by this tool.
 
 For the guided workflow, use `python3 jibo_dfu.py` and follow the terminal screen. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.
