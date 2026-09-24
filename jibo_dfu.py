@@ -143,7 +143,27 @@ def _transfer_output_size(path):
         return 0
 
 
-def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None):
+def _byte_progress_from_log(log):
+    """Read the latest `Staged N / M bytes` status without moving the writer offset."""
+    try:
+        size = os.fstat(log.fileno()).st_size
+        if size <= 0:
+            return None
+        start = max(0, size - 512)
+        tail = os.pread(log.fileno(), size - start, start)
+    except (AttributeError, OSError, ValueError):
+        return None
+    matches = re.findall(rb"Staged\s+(\d+)\s*/\s*(\d+)\s+bytes", tail)
+    if not matches:
+        return None
+    transferred, total = (int(value) for value in matches[-1])
+    if total <= 0:
+        return None
+    return min(transferred, total), total
+
+
+def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None,
+                      byte_progress=False):
     """Run a quiet transfer with a terminal spinner and retain output for errors."""
     started = time.monotonic()
     terminal = sys.stderr
@@ -170,7 +190,15 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                         process.wait()
                         timed_out = True
                         break
-                    if progress_path is not None and progress_size:
+                    byte_transfer = _byte_progress_from_log(log) if byte_progress else None
+                    if byte_transfer is not None:
+                        transferred, total = byte_transfer
+                        filled = int(20 * transferred / total)
+                        status = "[{}{}] {:5.1f}% | {:,}/{:,} KiB | {:0.0f}s".format(
+                            "#" * filled, "-" * (20 - filled),
+                            100 * transferred / total,
+                            transferred // 1024, total // 1024, elapsed)
+                    elif progress_path is not None and progress_size:
                         transferred = min(_transfer_output_size(progress_path), progress_size)
                         mib = 1024 * 1024
                         filled = int(20 * transferred / progress_size)
@@ -186,7 +214,8 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                         terminal.flush()
                         last_status_length = len(status)
                         frames += 1
-                    elif progress_path is not None and elapsed - (last_report - started) >= 5:
+                    elif (progress_path is not None or byte_transfer is not None) and \
+                            elapsed - (last_report - started) >= 5:
                         print(status, file=terminal, flush=True)
                         last_report = time.monotonic()
                     time.sleep(0.15)
@@ -383,6 +412,44 @@ def read_rcm_boot0_bct(out, port=None, shofel=None):
     return {"status": "read complete", "port": selected["port"],
             "image": str(target), "size_bytes": 16_384, "sha256": digest,
             "read_bl_len_exp": int(geometry.group(1))}
+
+
+def stage_rcm_dfu(port=None, shofel=None, loader=None,
+                  confirm_meerkat_rev02=False):
+    """Stage the pinned RAM DFU loader without starting it or writing eMMC."""
+    if not confirm_meerkat_rev02:
+        raise DfuError("Confirm the Meerkat Rev02 SDRAM candidate before staging; "
+                       "the operation initializes DRAM.")
+
+    executable = _shofel_tool(shofel)
+    stage_payload = Path(executable).parent / "dfu_stage2.bin"
+    if not stage_payload.is_file() or stage_payload.stat().st_size == 0:
+        raise DfuError("Missing non-empty dfu_stage2.bin next to " + executable)
+
+    image = Path(loader) if loader is not None else ROOT / "bundles" / "default" / "loader.bin"
+    if image.is_symlink() or not image.is_file():
+        raise DfuError("Missing or symlinked RAM DFU loader image: " + str(image))
+    image = image.resolve()
+
+    selected = select_device(devices(), port)
+    if selected is None or selected["state"] != "rcm":
+        raise DfuError("Connect the robot in RCM/APX before staging the RAM DFU loader.")
+
+    # Do not add --launch here. ShofEL enforces the pinned loader hash and the
+    # separate launch option is intentionally absent from this first-stage CLI.
+    output = run_with_progress(
+        [executable, "--usb-port-path", selected["port"], "DFU_STAGE",
+         str(image), "--confirm-meerkat-rev02"],
+        timeout=180, label="Staging the RAM DFU loader", cwd=str(Path(executable).parent),
+        byte_progress=True)
+    success_marker = "The SPL was not started; the robot is returning to RCM."
+    if success_marker not in output:
+        raise DfuError("ShofEL did not confirm the RAM loader was staged without starting it.")
+
+    return {"status": "loader staged in RAM; not started", "port": selected["port"],
+            "image": str(image), "size_bytes": image.stat().st_size,
+            "sha256": _sha256_file(image), "emmc_writes": False,
+            "started": False}
 
 
 def dfu_alternatives(executable, port):
@@ -1582,6 +1649,14 @@ def main(argv=None):
     boot0_bct.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
     boot0_bct.add_argument("--out", type=Path, required=True,
                            help="New local output path; existing files are never replaced")
+    stage = sub.add_parser("stage-rcm-dfu",
+                           help="Initialize the confirmed SDRAM profile and stage the RAM DFU loader without launching it")
+    _add_device_arguments(stage)
+    stage.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
+    stage.add_argument("--loader", type=Path,
+                       help="RAM DFU image (defaults to the packaged loader; ShofEL verifies its pinned hash)")
+    stage.add_argument("--confirm-meerkat-rev02", action="store_true", required=True,
+                       help="Confirm the Meerkat Rev02 SDRAM candidate; this operation initializes DRAM")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1663,6 +1738,9 @@ def main(argv=None):
             result = trace_rcm_dram(args.port, args.shofel)
         elif args.command == "read-rcm-boot0-bct":
             result = read_rcm_boot0_bct(args.out, args.port, args.shofel)
+        elif args.command == "stage-rcm-dfu":
+            result = stage_rcm_dfu(args.port, args.shofel, args.loader,
+                                   args.confirm_meerkat_rev02)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":

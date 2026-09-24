@@ -140,6 +140,25 @@ class EntryTests(unittest.TestCase):
         backup.assert_not_called()
         self.assertIn("Use --shofel only with --transport shofel", errors.getvalue())
 
+    def test_stage_rcm_dfu_cli_requires_profile_confirmation(self):
+        errors = io.StringIO()
+        with patch.object(j, "stage_rcm_dfu") as stage, redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as caught:
+                j.main(["stage-rcm-dfu", "--port", "1-2"])
+        self.assertEqual(caught.exception.code, 2)
+        stage.assert_not_called()
+        self.assertIn("--confirm-meerkat-rev02", errors.getvalue())
+
+    def test_stage_rcm_dfu_cli_dispatches_loader_and_explicit_candidate(self):
+        result = {"status": "loader staged in RAM; not started"}
+        stdout = io.StringIO()
+        with patch.object(j, "stage_rcm_dfu", return_value=result) as stage, \
+                redirect_stdout(stdout):
+            self.assertEqual(j.main(["stage-rcm-dfu", "--port", "1-2", "--loader",
+                                     "/tmp/loader.bin", "--confirm-meerkat-rev02"]), 0)
+        stage.assert_called_once_with("1-2", None, Path("/tmp/loader.bin"), True)
+        self.assertIn("loader staged in RAM", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -139,6 +139,100 @@ class ShofelTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(toolkit.DfuError, "page geometry"):
                 toolkit.read_rcm_boot0_bct(output, port="1-2")
 
+    def test_stage_rcm_dfu_requires_explicit_profile_confirmation_before_usb_access(self):
+        with patch.object(toolkit, "_shofel_tool") as locate, \
+                patch.object(toolkit, "devices") as connected, \
+                patch.object(toolkit, "run_with_progress") as run:
+            with self.assertRaisesRegex(toolkit.DfuError, "Confirm the Meerkat Rev02"):
+                toolkit.stage_rcm_dfu(port="1-2")
+        locate.assert_not_called()
+        connected.assert_not_called()
+        run.assert_not_called()
+
+    def test_stage_progress_parser_reads_host_byte_count_without_changing_writer_offset(self):
+        with tempfile.TemporaryFile() as log:
+            log.write(b"Chip ID: [redacted]\rStaged 8192 / 16384 bytes")
+            log.flush()
+            writer_offset = log.tell()
+            self.assertEqual(toolkit._byte_progress_from_log(log), (8192, 16384))
+            self.assertEqual(log.tell(), writer_offset)
+
+    def test_stage_rcm_dfu_uses_pinned_default_loader_and_never_launches(self):
+        directory = self.root / "shofel-stage"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        (directory / "dfu_stage2.bin").write_bytes(b"stage payload")
+        loader = self.root / "signed-loader.bin"
+        loader.write_bytes(b"pinned signed loader")
+        output = "The SPL was not started; the robot is returning to RCM.\n"
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", return_value=output) as run:
+            result = toolkit.stage_rcm_dfu(port="1-2", loader=loader,
+                                          confirm_meerkat_rev02=True)
+
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], [str(executable), "--usb-port-path", "1-2", "DFU_STAGE",
+                                   str(loader.resolve()), "--confirm-meerkat-rev02"])
+        self.assertNotIn("--launch", args[0])
+        self.assertEqual(kwargs["timeout"], 180)
+        self.assertEqual(kwargs["cwd"], str(directory))
+        self.assertTrue(kwargs["byte_progress"])
+        self.assertEqual(result["status"], "loader staged in RAM; not started")
+        self.assertEqual(result["port"], "1-2")
+        self.assertEqual(result["size_bytes"], len(b"pinned signed loader"))
+        self.assertEqual(result["sha256"], hashlib.sha256(b"pinned signed loader").hexdigest())
+        self.assertFalse(result["emmc_writes"])
+        self.assertFalse(result["started"])
+
+    def test_stage_rcm_dfu_defaults_to_packaged_loader(self):
+        directory = self.root / "shofel-stage-default"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        (directory / "dfu_stage2.bin").write_bytes(b"stage payload")
+        packaged_loader = toolkit.ROOT / "bundles" / "default" / "loader.bin"
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress",
+                             return_value="The SPL was not started; the robot is returning to RCM.") as run:
+            toolkit.stage_rcm_dfu(port="1-2", confirm_meerkat_rev02=True)
+        self.assertEqual(run.call_args.args[0][4], str(packaged_loader.resolve()))
+
+    def test_stage_rcm_dfu_rejects_missing_stage_payload_and_non_rcm_device(self):
+        directory = self.root / "shofel-stage-incomplete"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress") as run:
+            with self.assertRaisesRegex(toolkit.DfuError, "dfu_stage2.bin"):
+                toolkit.stage_rcm_dfu(port="1-2", confirm_meerkat_rev02=True)
+        run.assert_not_called()
+
+        (directory / "dfu_stage2.bin").write_bytes(b"stage payload")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "dfu"}]), \
+                patch.object(toolkit, "run_with_progress") as run:
+            with self.assertRaisesRegex(toolkit.DfuError, "RCM/APX"):
+                toolkit.stage_rcm_dfu(port="1-2", confirm_meerkat_rev02=True)
+        run.assert_not_called()
+
+    def test_stage_rcm_dfu_requires_host_success_report(self):
+        directory = self.root / "shofel-stage-no-confirm"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        (directory / "dfu_stage2.bin").write_bytes(b"stage payload")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
+                patch.object(toolkit, "run_with_progress", return_value="Transfer completed"):
+            with self.assertRaisesRegex(toolkit.DfuError, "did not confirm"):
+                toolkit.stage_rcm_dfu(port="1-2", loader=toolkit.ROOT / "bundles/default/loader.bin",
+                                      confirm_meerkat_rev02=True)
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

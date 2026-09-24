@@ -88,7 +88,13 @@ For board-profile research, `../ShofEL2-for-T124/scripts/verify_boot0_bct.py` co
 python3 ../ShofEL2-for-T124/scripts/verify_boot0_bct.py ~/Jibo-Backups/robot-boot0-prefix.bin --read-bl-len-exp 9 --bct-dump /path/to/bct_dump
 ```
 
-Replace `9` with the exponent actually reported by the read command. A profile match makes a gated RAM initialization trial possible; it does not establish BootROM signature validity or identify every later BCT copy. The ShofEL DFU stage currently only prepares RAM and transfers the pinned loader for inspection; launching it remains disabled in the default build. Do not infer that DFU has started from a successful stage report.
+Replace `9` with the exponent actually reported by the read command. A profile match makes a gated RAM initialization trial possible; it does not establish BootROM signature validity or identify every later BCT copy. After confirming the robot's profile, the following command initializes RAM and stages the pinned loader with byte progress. It does **not** start the loader or enter DFU; the default ShofEL build disables launch.
+
+```sh
+sudo python3 jibo_dfu.py stage-rcm-dfu --shofel ../ShofEL2-for-T124/shofel2_t124 --port 1-1 --loader /path/to/loader.bin --confirm-meerkat-rev02
+```
+
+The generated `.pyz` uses its bundled loader by default, so `--loader` can be omitted there. Keep the profile confirmation tied to a matching Boot0 check for the specific robot.
 
 The benchmarks read and discard an 8 MiB sample so you can check the USB transfer rate before a full backup. The optional 8-bit test first compares sector 0 and eMMC card information across the bus switch, then returns the bus to 1-bit mode and verifies that restoration. It does not leave a sample image on disk. On Moth, the 8-bit EXT_CSD read failed its preflight (status 9) and the 1-bit interface was restored; this path still needs hardware work. The board's production device tree declares an 8-bit eMMC bus, so this result does not establish that the wiring is limited to 1 bit. After a successful 8-bit benchmark on a robot, add `--bus-width 8` to the `backup-var --transport shofel` command to use the same verified read path for the full partition; the default remains 1-bit.
 
