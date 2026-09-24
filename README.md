@@ -63,7 +63,7 @@ For the ShofEL transport, place the built `shofel2_t124`, `intermezzo.bin`, and 
 git clone --branch improvements/IncreasedUSBReadWriteSpeed https://github.com/devsparx/ShofEL2-for-T124.git ../ShofEL2-for-T124
 cd ../ShofEL2-for-T124
 git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-rcm-backup.patch
-make shofel2_t124 intermezzo.bin emmc_server.bin dram_probe.bin
+make shofel2_t124 intermezzo.bin emmc_server.bin dram_probe.bin dram_trace.bin
 cd ../Jibo-DFU-Mod-Toolkit
 ```
 
