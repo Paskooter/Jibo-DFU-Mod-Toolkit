@@ -130,20 +130,37 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..56ecab7 100644
+index 9e49a2f..4ace6bb 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
-@@ -28,7 +28,8 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -2,6 +2,7 @@
+ #include <stdlib.h>
+ #include <stdint.h>
+ #include <string.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+ 
+@@ -28,7 +29,9 @@ void print_hex_memory( void *mem, size_t size ) {
  
  void print_help() {
  
 -    fprintf( stderr, "shofel2_t124 ( MEM_DUMP | READ_FUSES | BOOT_BCT | PAYLOAD | DUMP_STACK | EMMC_STATUS | EMMC_READ | EMMC_WRITE | EMMC_READ_EXT_CSD | EMMC_ERASE ) [options]\n"
-+    fprintf( stderr, "shofel2_t124 [--usb-port-path PORT] COMMAND [ARGUMENTS]\n"
++    fprintf( stderr, "shofel2_t124 [--usb-port-path PORT] [--bus-width 8] COMMAND [ARGUMENTS]\n"
 +                "\t* --usb-port-path PORT -> Select the exact USB sysfs topology path (for example, 1-2.3).\n"
++                "\t* --bus-width 8 -> Opt in to a verified 8-bit bus for EMMC_READ only (default: 1-bit).\n"
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -65,10 +66,22 @@ int main( int argc, char *argv[] ) {
+@@ -60,15 +63,58 @@ int main( int argc, char *argv[] ) {
+     char *dump_filename;
+     int dump_fd = -1;
+     uint8_t do_print_fuse = 0;
++    int emmc_bus_width = 1;
++    int bus_width_option_seen = 0;
++    char *emmc_temp_filename = NULL;
+ 
+     int emmc_mode = 0; /* 0=none, 1=status, 2=read, 3=write, 4=read_ext_csd, 5=erase */
      uint32_t emmc_start_sector = 0;
      uint32_t emmc_num_sectors = 0;
      char *emmc_filename = NULL;
@@ -152,21 +169,61 @@ index 9e49a2f..56ecab7 100644
  
    // ---- PARSE ARGS ----
  
-+    if ( argc >= 2 && !strcmp( argv[1], "--usb-port-path" ) ) {
-+        if ( argc < 4 || !argv[2][0] ) {
-+            fprintf( stderr, "Error: --usb-port-path requires a USB topology path and a command.\n\n" );
++    int option_index = 1;
++    while ( option_index < argc && argv[option_index][0] == '-' ) {
++        if ( !strcmp( argv[option_index], "--usb-port-path" ) ) {
++            if ( option_index + 1 >= argc || !argv[option_index + 1][0] ) {
++                fprintf( stderr, "Error: --usb-port-path requires a USB topology path.\n\n" );
++                print_help();
++                goto exit;
++            }
++            usb_port_path = argv[option_index + 1];
++            option_index += 2;
++        } else if ( !strcmp( argv[option_index], "--bus-width" ) ) {
++            if ( option_index + 1 >= argc ) {
++                fprintf( stderr, "Error: --bus-width requires 1 or 8.\n\n" );
++                print_help();
++                goto exit;
++            }
++            if ( !strcmp( argv[option_index + 1], "8" ) ) {
++                emmc_bus_width = 8;
++            } else if ( !strcmp( argv[option_index + 1], "1" ) ) {
++                emmc_bus_width = 1;
++            } else {
++                fprintf( stderr, "Error: --bus-width must be 1 or 8.\n\n" );
++                print_help();
++                goto exit;
++            }
++            bus_width_option_seen = 1;
++            option_index += 2;
++        } else {
++            fprintf( stderr, "Error: unknown option: %s\n\n", argv[option_index] );
 +            print_help();
 +            goto exit;
 +        }
-+        usb_port_path = argv[2];
-+        argc -= 2;
-+        argv += 2;
++    }
++
++    if ( option_index > 1 ) {
++        argc -= option_index - 1;
++        argv += option_index - 1;
 +    }
 +
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -195,11 +208,11 @@ int main( int argc, char *argv[] ) {
+@@ -188,6 +234,11 @@ int main( int argc, char *argv[] ) {
+ 
+     }
+ 
++    if ( bus_width_option_seen && emmc_mode != 2 ) {
++        fprintf( stderr, "Error: --bus-width is supported only with EMMC_READ.\n" );
++        goto exit;
++    }
++
+   // --------------------
+   
+ 
+@@ -195,11 +246,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -181,11 +238,72 @@ index 9e49a2f..56ecab7 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -482,25 +495,64 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +515,24 @@ int main( int argc, char *argv[] ) {
  
+         if ( emmc_mode == 2 ) { /* EMMC_READ */
+ 
+-            dump_fd = open( emmc_filename, O_WRONLY | O_TRUNC | O_CREAT, 0644 );
+-            if ( dump_fd < 0 ) { printf( "Error: Failed to open output file: %s\n", emmc_filename ); goto emmc_exit; }
++            if ( emmc_bus_width == 8 ) {
++                size_t temp_len = strlen(emmc_filename) + sizeof(".tmp.XXXXXX");
++                emmc_temp_filename = malloc(temp_len);
++                if ( !emmc_temp_filename ) {
++                    printf( "Error: Failed to allocate temporary output path.\n" );
++                    goto emmc_exit;
++                }
++                snprintf(emmc_temp_filename, temp_len, "%s.tmp.XXXXXX", emmc_filename);
++                dump_fd = mkstemp(emmc_temp_filename);
++                if ( dump_fd < 0 ) {
++                    printf( "Error: Failed to create temporary output for %s: %s\n",
++                            emmc_filename, strerror(errno) );
++                    goto emmc_exit;
++                }
++            } else {
++                dump_fd = open( emmc_filename, O_WRONLY | O_TRUNC | O_CREAT, 0644 );
++                if ( dump_fd < 0 ) { printf( "Error: Failed to open output file: %s\n", emmc_filename ); goto emmc_exit; }
++            }
+ 
+             printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
+                     emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
+@@ -473,34 +540,105 @@ int main( int argc, char *argv[] ) {
+                     (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
+                     (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
+ 
+-            emmc_cmd.op = EMMC_CMD_READ;
++            emmc_cmd.op = emmc_bus_width == 8 ? EMMC_CMD_READ_8BIT : EMMC_CMD_READ;
+             emmc_cmd.start_sector = emmc_start_sector;
+             emmc_cmd.num_sectors = emmc_num_sectors;
+ 
+             ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_OUT, sizeof(emmc_cmd), &emmc_cmd );
+             if ( ret < 0 ) { printf( "Error: Failed to send READ command.\n" ); goto emmc_exit; }
+ 
++            if ( emmc_bus_width == 8 ) {
++                uint32_t preflight_result = 0;
++                ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_IN,
++                                         sizeof(preflight_result), &preflight_result );
++                if ( ret < 0 ) {
++                    printf( "Error: Failed to receive 8-bit read preflight status.\n" );
++                    goto emmc_exit;
++                }
++                if ( preflight_result != 0 ) {
++                    printf( "Error: 8-bit read preflight failed (payload status %u).\n",
++                            preflight_result );
++                    if ( preflight_result == 7 )
++                        printf( "The 1-bit and 8-bit sector 0 samples differ; no dump was saved.\n" );
++                    if ( preflight_result == 8 )
++                        printf( "The payload could not verify restoration to 1-bit mode.\n" );
++                    goto emmc_exit;
++                }
++                printf( "8-bit eMMC mode verified against the 1-bit sector 0 sample.\n" );
++            }
++
++            struct timespec read_started;
++            int have_read_start_time = (clock_gettime(CLOCK_MONOTONIC, &read_started) == 0);
              uint32_t remaining = emmc_num_sectors;
              uint32_t sectors_done = 0;
 +            uint32_t next_progress_sector = 8000;
++            int emmc_read_error = 0;
++            int emmc_output_error = 0;
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -222,38 +340,46 @@ index 9e49a2f..56ecab7 100644
 +                        printf( "\nError: eMMC read failed at sector %u (payload code 0x%04x).\n",
 +                                emmc_start_sector + sectors_done + transfer_sectors - frame_remaining,
 +                                marker & 0xffffU );
-+                        goto emmc_exit;
++                        if ( emmc_bus_width != 8 )
++                            goto emmc_exit;
++                        emmc_read_error = 1;
++                        break;
 +                    }
 +                    frame_offset_bytes += frame_sectors * EMMC_SECTOR_SIZE;
 +                    frame_remaining -= frame_sectors;
 +                }
-+
-+                size_t bytes_written = 0;
-+                while ( bytes_written < transfer_bytes ) {
-+                    ssize_t written = write( dump_fd, chunk_buf + bytes_written,
-+                                             transfer_bytes - bytes_written );
-+                    if ( written < 0 && errno == EINTR )
-+                        continue;
-+                    if ( written <= 0 ) {
-+                        printf( "\nError: Failed writing dump at sector %u: %s.\n",
-+                                emmc_start_sector + sectors_done,
-+                                written < 0 ? strerror(errno) : "no progress" );
-+                        goto emmc_exit;
-+                    }
-+                    bytes_written += (size_t)written;
-+                }
  
 -                sectors_done += batch;
 -                remaining -= batch;
-+                sectors_done += transfer_sectors;
-+                remaining -= transfer_sectors;
++                if ( !emmc_read_error && !emmc_output_error ) {
++                    size_t bytes_written = 0;
++                    while ( bytes_written < transfer_bytes ) {
++                        ssize_t written = write( dump_fd, chunk_buf + bytes_written,
++                                                 transfer_bytes - bytes_written );
++                        if ( written < 0 && errno == EINTR )
++                            continue;
++                        if ( written <= 0 ) {
++                            printf( "\nError: Failed writing dump at sector %u: %s.\n",
++                                    emmc_start_sector + sectors_done,
++                                    written < 0 ? strerror(errno) : "no progress" );
++                            if ( emmc_bus_width != 8 )
++                                goto emmc_exit;
++                            emmc_output_error = 1;
++                            break;
++                        }
++                        bytes_written += (size_t)written;
++                    }
++                }
  
 -                if ( (sectors_done % 8000) == 0 || remaining == 0 ) {
++                sectors_done += transfer_sectors;
++                remaining -= transfer_sectors;
++
 +                if ( sectors_done >= next_progress_sector || remaining == 0 ) {
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,6 +560,7 @@ int main( int argc, char *argv[] ) {
+@@ -508,9 +646,59 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -261,7 +387,59 @@ index 9e49a2f..56ecab7 100644
                  }
              }
  
-@@ -546,7 +599,7 @@ int main( int argc, char *argv[] ) {
++            struct timespec read_finished;
++            if ( have_read_start_time && clock_gettime(CLOCK_MONOTONIC, &read_finished) == 0 ) {
++                double transfer_seconds = (double)(read_finished.tv_sec - read_started.tv_sec) +
++                    (double)(read_finished.tv_nsec - read_started.tv_nsec) / 1000000000.0;
++                unsigned long long bytes_read =
++                    (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE;
++                printf( "\nREAD_STATS bytes=%llu transfer_seconds=%.6f\n",
++                        bytes_read, transfer_seconds );
++                fflush( stdout );
++            }
++
++            if ( emmc_bus_width == 8 ) {
++                uint32_t restore_status = 0;
++                ret = usb_send_bulk_txn( rcm_usb, RCM_EP1_IN,
++                                         sizeof(restore_status), &restore_status );
++                if ( ret < 0 ) {
++                    printf( "Error: Failed to receive 1-bit restore status.\n" );
++                    goto emmc_exit;
++                }
++                if ( restore_status != 0 ) {
++                    printf( "Error: Payload could not verify restoration to 1-bit mode "
++                            "(status %u). Discarding dump.\n", restore_status );
++                    goto emmc_exit;
++                }
++                printf( "eMMC returned to verified 1-bit mode.\n" );
++                if ( emmc_read_error || emmc_output_error ) {
++                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
++                    goto emmc_exit;
++                }
++            }
++
++            if ( dump_fd >= 0 ) {
++                if ( close(dump_fd) < 0 ) {
++                    dump_fd = -1;
++                    printf( "Error: Failed closing output file: %s\n", strerror(errno) );
++                    goto emmc_exit;
++                }
++                dump_fd = -1;
++            }
++            if ( emmc_temp_filename ) {
++                if ( rename(emmc_temp_filename, emmc_filename) < 0 ) {
++                    printf( "Error: Failed to install verified dump at %s: %s\n",
++                            emmc_filename, strerror(errno) );
++                    goto emmc_exit;
++                }
++                free(emmc_temp_filename);
++                emmc_temp_filename = NULL;
++            }
++
+             printf( "\nRead complete. Output: %s\n", emmc_filename );
+             _ret_main = 0;
+         }
+@@ -546,7 +734,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -270,23 +448,47 @@ index 9e49a2f..56ecab7 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -690,4 +743,3 @@ exit:
+@@ -663,6 +851,15 @@ int main( int argc, char *argv[] ) {
+         }
+ 
+ emmc_exit:
++        if ( dump_fd >= 0 ) {
++            close(dump_fd);
++            dump_fd = -1;
++        }
++        if ( emmc_temp_filename ) {
++            unlink(emmc_temp_filename);
++            free(emmc_temp_filename);
++            emmc_temp_filename = NULL;
++        }
+         if ( chunk_buf ) {
+             free( chunk_buf );
+             chunk_buf = NULL;
+@@ -690,4 +887,3 @@ exit:
      return _ret_main;
  
  }
 -
 diff --git a/include/emmc_server.h b/include/emmc_server.h
-index 5229e2e..b3a853a 100644
+index 5229e2e..b525b10 100644
 --- a/include/emmc_server.h
 +++ b/include/emmc_server.h
-@@ -15,16 +15,63 @@
+@@ -13,18 +13,71 @@
+ #define EMMC_CMD_STATUS         0x03
+ #define EMMC_CMD_READ_EXT_CSD   0x04  /* Read 512-byte EXT_CSD register for chip health */
  #define EMMC_CMD_ERASE          0x05  /* Erase a range of sectors (forces reallocation) */
++#define EMMC_CMD_READ_8BIT      0x06  /* Opt-in read after verified 1-bit to 8-bit switch */
  #define EMMC_CMD_EXIT           0xFF
  
 -/* Transfer chunk sizes basically the amount much data is sent/received per USB transfer was not multiple of 0x1000
 - *
 - * Reads: 8 sectors (4KB) = 1.1 MB/s - OPTIMIZED
 - * Writes: 1 sector (512B) - ORIGINAL (safe)
++/* U-Boot mmc_switch() WRITE_BYTE format; low CMD_SET byte stays zero. */
++#define EMMC_CMD6_SWITCH_WRITE_BYTE_ARG(index, value) \
++    ((3U << 24) | (((uint32_t)(index) & 0xFFU) << 16) | \
++     (((uint32_t)(value) & 0xFFU) << 8))
++
 +/* Keep each BootROM EP1_IN payload frame at 4 KiB. The host can receive up to
 + * sixteen consecutive frames in one USBFS bulk request. Writes remain
 + * transport-batched, while the payload commits each sector with CMD24.
@@ -378,10 +580,274 @@ index 7c55998..329a042 100644
  #endif
 -
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
-index 41601b7..a43d09c 100644
+index 41601b7..563b768 100644
 --- a/payloads/emmc_server.c
 +++ b/payloads/emmc_server.c
-@@ -780,7 +780,7 @@ void entry() {
+@@ -163,6 +163,7 @@ static int send_cmd(u32 cmd_val, u32 argument) {
+ #define MMC_CMD1    0x0102  /* SEND_OP_COND: R3, no CRC/index check */
+ #define MMC_CMD2    0x0209  /* ALL_SEND_CID: R2 (136-bit), CRC check */
+ #define MMC_CMD3    0x031A  /* SET_RELATIVE_ADDR: R1, CRC+index check */
++#define MMC_CMD6    0x061B  /* SWITCH: R1b, CRC+index check */
+ #define MMC_CMD7    0x071B  /* SELECT_CARD: R1b, CRC+index check */
+ #define MMC_CMD8    0x083A  /* SEND_EXT_CSD: R1, 512-byte data, CRC+index check */
+ #define MMC_CMD12   0x0C1B  /* STOP_TRANSMISSION: R1b, no data, CRC+index check */
+@@ -174,6 +175,40 @@ static int send_cmd(u32 cmd_val, u32 argument) {
+ #define MMC_CMD36   0x243A  /* ERASE_GROUP_END: R1, CRC+index check */
+ #define MMC_CMD38   0x263B  /* ERASE: R1b, CRC+index check */
+ 
++#define MMC_EXT_CSD_BUS_WIDTH       183
++#define MMC_EXT_CSD_HS_TIMING        185
++#define MMC_EXT_CSD_REV              192
++#define MMC_EXT_CSD_STRUCTURE        194
++#define MMC_EXT_CSD_CARD_TYPE        196
++#define MMC_EXT_CSD_SEC_COUNT        212
++#define MMC_BUS_WIDTH_1BIT           0
++#define MMC_BUS_WIDTH_8BIT           2
++#define MMC_STATUS_SWITCH_ERROR      (1u << 7)
++#define MMC_STATUS_RDY_FOR_DATA      (1u << 8)
++#define MMC_STATUS_CURR_STATE        (0xFu << 9)
++#define MMC_STATUS_STATE_PRG         (7u << 9)
++/* Same error mask used by this checkout's U-Boot mmc_send_status(). */
++#define MMC_STATUS_ERROR_MASK        (~0x0206BF7Fu)
++#define EMMC_PREFLIGHT_OK            0
++#define EMMC_PREFLIGHT_INIT_FAILED   1
++#define EMMC_PREFLIGHT_BASE_READ     2
++#define EMMC_PREFLIGHT_BASE_EXT_CSD  3
++#define EMMC_PREFLIGHT_SWITCH_CMD    4
++#define EMMC_PREFLIGHT_SWITCH_STATUS 5
++#define EMMC_PREFLIGHT_8BIT_EXT_CSD  6
++#define EMMC_PREFLIGHT_DATA_MISMATCH 7
++#define EMMC_PREFLIGHT_RESTORE       8
++
++struct emmc_ext_csd_stable_s {
++    u8 hs_timing;
++    u8 revision;
++    u8 structure;
++    u8 card_type;
++    u8 sector_count[4];
++};
++
++static struct emmc_ext_csd_stable_s emmc_8bit_baseline;
++
+ static u32 sdmmc4_initialized = 0;
+ static u32 init_error = 0;
+ 
+@@ -663,6 +698,199 @@ static int read_ext_csd(u32 *buffer) {
+     return 0;
+ }
+ 
++/* CMD6 changes the card bus width after its R1b busy phase.  The caller must
++ * update the SDHCI Host Control byte immediately after this returns, before
++ * sending another command on the data/command lines. */
++static int switch_card_bus_width(u8 width) {
++    u32 argument = EMMC_CMD6_SWITCH_WRITE_BYTE_ARG(MMC_EXT_CSD_BUS_WIDTH, width);
++    int result = send_cmd(MMC_CMD6, argument);
++    if (result < 0) return result;
++
++    /* R1b's response remains in RESPONSE[0] after DAT busy is released. */
++    if (read32(SDMMC4_BASE + SDHCI_RESPONSE) & MMC_STATUS_SWITCH_ERROR)
++        return -100; /* Card explicitly rejected the switch; width is unchanged. */
++    return 0;
++}
++
++/* Poll CMD13 until the card is ready for data and has left programming state. */
++static int wait_card_ready_status(void) {
++    u32 timeout = 1000;
++
++    while (timeout--) {
++        u32 card_status;
++        int result = send_cmd(MMC_CMD13_STATUS, 0x00010000);
++        if (result < 0) return result;
++
++        card_status = read32(SDMMC4_BASE + SDHCI_RESPONSE);
++        if (card_status & MMC_STATUS_SWITCH_ERROR) return -5;
++        if (card_status & MMC_STATUS_ERROR_MASK) return -6;
++        if ((card_status & MMC_STATUS_RDY_FOR_DATA) &&
++            (card_status & MMC_STATUS_CURR_STATE) != MMC_STATUS_STATE_PRG)
++            return 0;
++
++        delay(5000);
++    }
++    return -7;
++}
++
++static void set_host_bus_width(u8 width) {
++    u8 host_control = read_hostctl();
++
++    host_control &= (u8)~0x22u; /* Clear SDHCI 4-bit and 8-bit selections. */
++    if (width == MMC_BUS_WIDTH_8BIT)
++        host_control |= 0x20;
++    write_hostctl(host_control);
++    (void)read_hostctl();
++}
++
++static int verify_ext_csd_bus_width(const u8 *ext_csd, u8 width) {
++    return ext_csd[MMC_EXT_CSD_BUS_WIDTH] == width;
++}
++
++static int ext_csd_stable_fields_match(const u8 *before, const u8 *after) {
++    if (before[MMC_EXT_CSD_HS_TIMING] != after[MMC_EXT_CSD_HS_TIMING] ||
++        before[MMC_EXT_CSD_REV] != after[MMC_EXT_CSD_REV] ||
++        before[MMC_EXT_CSD_STRUCTURE] != after[MMC_EXT_CSD_STRUCTURE] ||
++        before[MMC_EXT_CSD_CARD_TYPE] != after[MMC_EXT_CSD_CARD_TYPE])
++        return 0;
++
++    for (u32 i = 0; i < 4; i++) {
++        if (before[MMC_EXT_CSD_SEC_COUNT + i] !=
++            after[MMC_EXT_CSD_SEC_COUNT + i])
++            return 0;
++    }
++    return 1;
++}
++
++static void save_ext_csd_stable_fields(const u8 *ext_csd,
++                                       struct emmc_ext_csd_stable_s *saved) {
++    saved->hs_timing = ext_csd[MMC_EXT_CSD_HS_TIMING];
++    saved->revision = ext_csd[MMC_EXT_CSD_REV];
++    saved->structure = ext_csd[MMC_EXT_CSD_STRUCTURE];
++    saved->card_type = ext_csd[MMC_EXT_CSD_CARD_TYPE];
++    for (u32 i = 0; i < 4; i++)
++        saved->sector_count[i] = ext_csd[MMC_EXT_CSD_SEC_COUNT + i];
++}
++
++static int ext_csd_matches_saved_fields(
++        const u8 *ext_csd, const struct emmc_ext_csd_stable_s *saved) {
++    if (ext_csd[MMC_EXT_CSD_HS_TIMING] != saved->hs_timing ||
++        ext_csd[MMC_EXT_CSD_REV] != saved->revision ||
++        ext_csd[MMC_EXT_CSD_STRUCTURE] != saved->structure ||
++        ext_csd[MMC_EXT_CSD_CARD_TYPE] != saved->card_type)
++        return 0;
++
++    for (u32 i = 0; i < 4; i++) {
++        if (ext_csd[MMC_EXT_CSD_SEC_COUNT + i] != saved->sector_count[i])
++            return 0;
++    }
++    return 1;
++}
++
++static int sector_words_match(const u32 *before, const u32 *after) {
++    for (u32 i = 0; i < EMMC_SECTOR_SIZE / sizeof(u32); i++) {
++        if (before[i] != after[i]) return 0;
++    }
++    return 1;
++}
++
++/* Recover to one-bit mode after any failure once the card may have switched.
++ * The current Host Control setting is tried first, then the other width in
++ * case the CMD6 completion was lost at the controller boundary. */
++static int restore_one_bit_and_verify(u8 *scratch,
++                                      const struct emmc_ext_csd_stable_s *baseline,
++                                      u8 preferred_width) {
++    u8 widths[2];
++
++    widths[0] = preferred_width;
++    widths[1] = preferred_width == MMC_BUS_WIDTH_8BIT ?
++                MMC_BUS_WIDTH_1BIT : MMC_BUS_WIDTH_8BIT;
++
++    for (u32 attempt = 0; attempt < 2; attempt++) {
++        set_host_bus_width(widths[attempt]);
++        if (switch_card_bus_width(MMC_BUS_WIDTH_1BIT) < 0)
++            continue;
++
++        /* The eMMC has now returned to one-bit mode. */
++        set_host_bus_width(MMC_BUS_WIDTH_1BIT);
++        if (wait_card_ready_status() < 0)
++            continue;
++        if (read_ext_csd((u32 *)scratch) < 0)
++            continue;
++        if (verify_ext_csd_bus_width(scratch, MMC_BUS_WIDTH_1BIT) &&
++            ext_csd_matches_saved_fields(scratch, baseline))
++            return 0;
++    }
++
++    return -1;
++}
++
++/* Verify one known sector and immutable EXT_CSD fields across the bus switch.
++ * Scratch layout uses only 2 KiB of the existing 64 KiB payload buffer. */
++static u32 prepare_verified_8bit_read(u8 *buffer) {
++    u32 *sector_before = (u32 *)(buffer + 0);
++    u32 *ext_csd_before_words = (u32 *)(buffer + 512);
++    u32 *ext_csd_after_words = (u32 *)(buffer + 1024);
++    u32 *sector_after = (u32 *)(buffer + 1536);
++    const u8 *ext_csd_before = (const u8 *)ext_csd_before_words;
++    const u8 *ext_csd_after = (const u8 *)ext_csd_after_words;
++    u8 old_host_width = (read_hostctl() & 0x20) ?
++                        MMC_BUS_WIDTH_8BIT : MMC_BUS_WIDTH_1BIT;
++    int result;
++
++    if (!sdmmc4_initialized)
++        return EMMC_PREFLIGHT_INIT_FAILED;
++    if (old_host_width != MMC_BUS_WIDTH_1BIT)
++        return EMMC_PREFLIGHT_INIT_FAILED;
++
++    if (read_emmc_sector(0, sector_before) < 0)
++        return EMMC_PREFLIGHT_BASE_READ;
++    if (read_ext_csd(ext_csd_before_words) < 0 ||
++        !verify_ext_csd_bus_width(ext_csd_before, MMC_BUS_WIDTH_1BIT))
++        return EMMC_PREFLIGHT_BASE_EXT_CSD;
++    save_ext_csd_stable_fields(ext_csd_before, &emmc_8bit_baseline);
++
++    result = switch_card_bus_width(MMC_BUS_WIDTH_8BIT);
++    if (result == -100)
++        return EMMC_PREFLIGHT_SWITCH_CMD;
++    if (result < 0) {
++        /* A lost CMD6 completion leaves the card's active width ambiguous. */
++        if (restore_one_bit_and_verify((u8 *)ext_csd_after_words,
++                                       &emmc_8bit_baseline,
++                                       MMC_BUS_WIDTH_1BIT) < 0)
++            return EMMC_PREFLIGHT_RESTORE;
++        return EMMC_PREFLIGHT_SWITCH_CMD;
++    }
++
++    /* Card changes width after CMD6's busy phase; mirror that before CMD13. */
++    set_host_bus_width(MMC_BUS_WIDTH_8BIT);
++    if (wait_card_ready_status() < 0) {
++        if (restore_one_bit_and_verify(buffer, &emmc_8bit_baseline,
++                                       MMC_BUS_WIDTH_8BIT) < 0)
++            return EMMC_PREFLIGHT_RESTORE;
++        return EMMC_PREFLIGHT_SWITCH_STATUS;
++    }
++
++    if (read_ext_csd(ext_csd_after_words) < 0 ||
++        !verify_ext_csd_bus_width(ext_csd_after, MMC_BUS_WIDTH_8BIT) ||
++        !ext_csd_stable_fields_match(ext_csd_before, ext_csd_after)) {
++        if (restore_one_bit_and_verify(buffer, &emmc_8bit_baseline,
++                                       MMC_BUS_WIDTH_8BIT) < 0)
++            return EMMC_PREFLIGHT_RESTORE;
++        return EMMC_PREFLIGHT_8BIT_EXT_CSD;
++    }
++
++    if (read_emmc_sector(0, sector_after) < 0 ||
++        !sector_words_match(sector_before, sector_after)) {
++        if (restore_one_bit_and_verify(buffer, &emmc_8bit_baseline,
++                                       MMC_BUS_WIDTH_8BIT) < 0)
++            return EMMC_PREFLIGHT_RESTORE;
++        return EMMC_PREFLIGHT_DATA_MISMATCH;
++    }
++
++    return EMMC_PREFLIGHT_OK;
++}
++
+ /* Erase a range of sectors - tells eMMC controller data can be discarded/reallocated */
+ static int erase_emmc_sectors(u32 start_sector, u32 end_sector) {
+     u32 status;
+@@ -774,13 +1002,21 @@ void entry() {
+             continue;
+         }
+ 
+-        if (cmd.op == EMMC_CMD_READ) {
++        if (cmd.op == EMMC_CMD_READ || cmd.op == EMMC_CMD_READ_8BIT) {
+             init_sdmmc4();
++
++            if (cmd.op == EMMC_CMD_READ_8BIT) {
++                u32 preflight_result = prepare_verified_8bit_read(buffer);
++                ep1_in_write_imm(&preflight_result, sizeof(preflight_result), &num_xfer);
++                if (preflight_result != EMMC_PREFLIGHT_OK)
++                    continue;
++            }
++
+             u32 sector = cmd.start_sector;
              u32 remaining = cmd.num_sectors;
  
              while (remaining > 0) {
@@ -390,7 +856,7 @@ index 41601b7..a43d09c 100644
                  u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int result = read_emmc_sectors(sector, batch, (u32*)buffer);
-@@ -790,6 +790,7 @@ void entry() {
+@@ -790,11 +1026,20 @@ void entry() {
                      for (u32 j = 1; j < batch * 128; j++) err[j] = 0xDEADDEAD;
                  }
  
@@ -398,7 +864,20 @@ index 41601b7..a43d09c 100644
                  ep1_in_write_imm(buffer, batch_bytes, &num_xfer);
  
                  sector += batch;
-@@ -805,7 +806,7 @@ void entry() {
+                 remaining -= batch;
+             }
++
++            if (cmd.op == EMMC_CMD_READ_8BIT) {
++                u32 restore_status = EMMC_PREFLIGHT_OK;
++                if (restore_one_bit_and_verify(buffer, &emmc_8bit_baseline,
++                                               MMC_BUS_WIDTH_8BIT) < 0)
++                    restore_status = EMMC_PREFLIGHT_RESTORE;
++                ep1_in_write_imm(&restore_status, sizeof(restore_status), &num_xfer);
++            }
+             continue;
+         }
+ 
+@@ -805,7 +1050,7 @@ void entry() {
              u32 write_result = 0;
  
              while (remaining > 0) {
@@ -409,10 +888,10 @@ index 41601b7..a43d09c 100644
                  ep1_out_read_imm(buffer, batch_bytes, &num_xfer);
 diff --git a/tests/test_emmc_usb_framing.c b/tests/test_emmc_usb_framing.c
 new file mode 100644
-index 0000000..27315d2
+index 0000000..fcbf670
 --- /dev/null
 +++ b/tests/test_emmc_usb_framing.c
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,138 @@
 +#include <assert.h>
 +#include <stdint.h>
 +
@@ -492,6 +971,10 @@ index 0000000..27315d2
 +int main(void) {
 +    unsigned char marker_frame[EMMC_READ_FRAME_BYTES];
 +    uint32_t marker_tail = 0xdead0001U;
++
++    /* Keep CMD6's low CMD_SET byte zero, matching local U-Boot mmc_switch(). */
++    assert(EMMC_CMD6_SWITCH_WRITE_BYTE_ARG(183, 2) == 0x03B70200U);
++    assert(EMMC_CMD6_SWITCH_WRITE_BYTE_ARG(183, 0) == 0x03B70000U);
 +
 +    assert(EMMC_READ_FRAME_BYTES == 4 * 1024);
 +    assert(EMMC_READ_FRAME_BYTES == EMMC_READ_BATCH_SECTORS * EMMC_SECTOR_SIZE);
