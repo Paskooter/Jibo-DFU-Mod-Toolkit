@@ -69,10 +69,10 @@ index 2e4d38e..d67699f 100644
 -
 diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
 new file mode 100644
-index 0000000..136f4d8
+index 0000000..fdcd310
 --- /dev/null
 +++ b/STAGE2-PROBE.md
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,80 @@
 +# T124 DRAM probe and DFU-loader route
 +
 +`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
@@ -93,6 +93,12 @@ index 0000000..136f4d8
 +the operation that follows; it also identifies a failure before the
 +payload-entry marker. It performs the same gated 16-byte DRAM scratch test and
 +resets only after the host acknowledges the final phase.
++
++If the BCT pointer or size is invalid, both probe paths stop before reading
++MC/EMC. On T124 the MC can be clock gated in forced RCM, and an APB read may
++stall the AVP instead of returning zero. `DRAM_TRACE` reports
++`not initialized` followed by `complete` in this case; `DRAM_STATUS` returns
++an incomplete report marked with `DRAM_PROBE_REGS_SKIPPED`.
 +
 +The probe only touches SDRAM when all of these checks pass:
 +
@@ -420,7 +426,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..f017dd3 100644
+index 9e49a2f..25d4dc0 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -442,7 +448,7 @@ index 9e49a2f..f017dd3 100644
  
  #include <sys/stat.h>
  #include <time.h>
-@@ -26,9 +31,292 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -26,9 +31,299 @@ void print_hex_memory( void *mem, size_t size ) {
    printf( "\n" );
  }
  
@@ -551,7 +557,8 @@ index 9e49a2f..f017dd3 100644
 +        "MC_EMEM_ADR_CFG", "MC_EMEM_ARB_CFG", "EMC_CFG",
 +        "EMC_ADR_CFG", "EMC_REFCTRL", "EMC_PIN", "EMC_STATUS",
 +        "EMC_AUTO_CAL_STATUS", "register gate", "DRAM scratch round-trip",
-+        "PMC_SCRATCH0", "complete"
++        "PMC_SCRATCH0", "not initialized (BCT pointer/size invalid)",
++        "complete"
 +    };
 +
 +    if (phase >= sizeof(names) / sizeof(names[0]))
@@ -609,6 +616,12 @@ index 9e49a2f..f017dd3 100644
 +    printf("  BootInfoTable BCT pointer/size: 0x%08x / 0x%08x (%s)\n",
 +           report->bct_ptr, report->bct_size,
 +           (report->flags & DRAM_PROBE_BCT_VALID) ? "valid" : "invalid");
++    if (report->flags & DRAM_PROBE_REGS_SKIPPED) {
++        printf("  MC/EMC register reads: skipped because no valid BCT is present.\n");
++        printf("  Register preflight: not ready; SDRAM access is disabled.\n");
++        printf("  DRAM scratch round-trip: skipped.\n");
++        return;
++    }
 +    printf("  MC EMEM_CFG / ADR_CFG / ARB_CFG: 0x%08x / 0x%08x / 0x%08x\n",
 +           report->mc_emem_cfg, report->mc_emem_adr_cfg,
 +           report->mc_emem_arb_cfg);
@@ -736,7 +749,7 @@ index 9e49a2f..f017dd3 100644
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -53,6 +341,10 @@ int main( int argc, char *argv[] ) {
+@@ -53,6 +348,10 @@ int main( int argc, char *argv[] ) {
  
      char *payload_filename = NULL;
      uint32_t payload_thumb_mode = 1;
@@ -747,7 +760,7 @@ index 9e49a2f..f017dd3 100644
  
      uint8_t *dump = NULL;
      uint32_t dump_start = 0;
-@@ -60,15 +352,60 @@ int main( int argc, char *argv[] ) {
+@@ -60,15 +359,60 @@ int main( int argc, char *argv[] ) {
      char *dump_filename;
      int dump_fd = -1;
      uint8_t do_print_fuse = 0;
@@ -808,7 +821,7 @@ index 9e49a2f..f017dd3 100644
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -106,6 +443,46 @@ int main( int argc, char *argv[] ) {
+@@ -106,6 +450,46 @@ int main( int argc, char *argv[] ) {
          }
          payload_filename = "boot_bct.bin";
  
@@ -855,7 +868,7 @@ index 9e49a2f..f017dd3 100644
      } else if ( !strcmp( argv[1], "PAYLOAD" ) ) {
  
          if ( ( argc != 3 ) && ( argc != 4 ) ) {
-@@ -188,6 +565,37 @@ int main( int argc, char *argv[] ) {
+@@ -188,6 +572,37 @@ int main( int argc, char *argv[] ) {
  
      }
  
@@ -893,7 +906,7 @@ index 9e49a2f..f017dd3 100644
    // --------------------
    
  
-@@ -195,11 +603,11 @@ int main( int argc, char *argv[] ) {
+@@ -195,11 +610,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -908,7 +921,7 @@ index 9e49a2f..f017dd3 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -251,6 +659,60 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +666,60 @@ int main( int argc, char *argv[] ) {
  
    //----------------------
  
@@ -969,7 +982,7 @@ index 9e49a2f..f017dd3 100644
  
    // --- MEM DUMP CMD ----
  
-@@ -464,8 +926,24 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +933,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -996,7 +1009,7 @@ index 9e49a2f..f017dd3 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +951,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +958,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -1116,7 +1129,7 @@ index 9e49a2f..f017dd3 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,9 +1063,59 @@ int main( int argc, char *argv[] ) {
+@@ -508,9 +1070,59 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -1176,7 +1189,7 @@ index 9e49a2f..f017dd3 100644
              printf( "\nRead complete. Output: %s\n", emmc_filename );
              _ret_main = 0;
          }
-@@ -546,7 +1151,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +1158,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -1185,7 +1198,7 @@ index 9e49a2f..f017dd3 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +1268,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +1275,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -1201,7 +1214,7 @@ index 9e49a2f..f017dd3 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -686,8 +1300,8 @@ exit:
+@@ -686,8 +1307,8 @@ exit:
      if ( dump ) free( dump );
      if ( dump_fd > 0 ) close( dump_fd );
      if ( data ) free( data );
@@ -1288,10 +1301,10 @@ index 0000000..5cdd206
 +#endif
 diff --git a/include/dram_probe.h b/include/dram_probe.h
 new file mode 100644
-index 0000000..38be1c2
+index 0000000..bd2e7e5
 --- /dev/null
 +++ b/include/dram_probe.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,52 @@
 +#ifndef _DRAM_PROBE_H_
 +#define _DRAM_PROBE_H_
 +
@@ -1310,6 +1323,7 @@ index 0000000..38be1c2
 +#define DRAM_PROBE_PINS_ACTIVE     (1u << 3)
 +#define DRAM_PROBE_TIMING_READY    (1u << 4)
 +#define DRAM_PROBE_AUTOCAL_IDLE    (1u << 5)
++#define DRAM_PROBE_REGS_SKIPPED    (1u << 6)
 +#define DRAM_PROBE_REGS_READY      (1u << 31)
 +
 +enum dram_probe_test_result {
@@ -1362,10 +1376,10 @@ index 0000000..bfd4e8c
 +#endif
 diff --git a/include/dram_trace.h b/include/dram_trace.h
 new file mode 100644
-index 0000000..933878f
+index 0000000..009a96b
 --- /dev/null
 +++ b/include/dram_trace.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,48 @@
 +#ifndef _DRAM_TRACE_H_
 +#define _DRAM_TRACE_H_
 +
@@ -1393,6 +1407,7 @@ index 0000000..933878f
 +    DRAM_TRACE_REGISTER_GATE,
 +    DRAM_TRACE_SCRATCH,
 +    DRAM_TRACE_PMC_SCRATCH0,
++    DRAM_TRACE_NOT_INITIALIZED,
 +    DRAM_TRACE_DONE
 +};
 +
@@ -1876,10 +1891,10 @@ index 0000000..ffa2479
 +}
 diff --git a/payloads/dram_probe_common.c b/payloads/dram_probe_common.c
 new file mode 100644
-index 0000000..007debd
+index 0000000..6ac88f6
 --- /dev/null
 +++ b/payloads/dram_probe_common.c
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,147 @@
 +#include "types.h"
 +#include "t124.h"
 +#include "dram_probe.h"
@@ -1960,6 +1975,28 @@ index 0000000..007debd
 +    report->flags = 0;
 +    report->bct_ptr = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTPTR);
 +    report->bct_size = read32(NVBOOTINFOTABLE_BASE + NVBOOTINFOTABLE_BCTSIZE);
++    report->mc_emem_cfg = 0;
++    report->mc_emem_adr_cfg = 0;
++    report->mc_emem_arb_cfg = 0;
++    report->emc_cfg = 0;
++    report->emc_adr_cfg = 0;
++    report->emc_refctrl = 0;
++    report->emc_pin = 0;
++    report->emc_status = 0;
++    report->emc_auto_cal_status = 0;
++    report->scratch_addr = 0;
++    report->scratch_result = DRAM_PROBE_TEST_SKIPPED;
++    report->pmc_scratch0 = 0;
++
++    /* In forced RCM the BCT may be absent and MC can be clock gated.
++     * Reading MC_EMEM_CFG in that state stalls the AVP's APB transaction.
++     */
++    if (!bct_info_is_valid(report->bct_ptr, report->bct_size)) {
++        report->flags |= DRAM_PROBE_REGS_SKIPPED;
++        return 0;
++    }
++    report->flags |= DRAM_PROBE_BCT_VALID;
++
 +    report->mc_emem_cfg = read32(T124_MC_BASE + T124_MC_EMEM_CFG);
 +    report->mc_emem_adr_cfg = read32(T124_MC_BASE + T124_MC_EMEM_ADR_CFG);
 +    report->mc_emem_arb_cfg = read32(T124_MC_BASE + T124_MC_EMEM_ARB_CFG);
@@ -1973,14 +2010,7 @@ index 0000000..007debd
 +    report->emc_pin = emc_pin;
 +    report->emc_status = emc_status;
 +    report->emc_auto_cal_status = autocal_status;
-+    report->scratch_addr = 0;
-+    report->scratch_result = DRAM_PROBE_TEST_SKIPPED;
 +    report->pmc_scratch0 = read32(PMC_BASE + PMC_SCRATCH0);
-+
-+    if (bct_info_is_valid(report->bct_ptr, report->bct_size))
-+        report->flags |= DRAM_PROBE_BCT_VALID;
-+    else
-+        ready = 0;
 +
 +    if (report->mc_emem_cfg != 0 && report->mc_emem_arb_cfg != 0)
 +        report->flags |= DRAM_PROBE_MC_CONFIGURED;
@@ -2014,10 +2044,10 @@ index 0000000..007debd
 +}
 diff --git a/payloads/dram_trace.c b/payloads/dram_trace.c
 new file mode 100644
-index 0000000..f76452e
+index 0000000..8276ba1
 --- /dev/null
 +++ b/payloads/dram_trace.c
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,163 @@
 +#include "types.h"
 +#include "t124.h"
 +#include "dram_probe.h"
@@ -2101,8 +2131,13 @@ index 0000000..f76452e
 +                DRAM_TRACE_BCT_SIZE, bct_size);
 +    if (bct_info_is_valid(bct_ptr, bct_size))
 +        flags |= DRAM_PROBE_BCT_VALID;
-+    else
-+        gate = 0;
++    else {
++        trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                    DRAM_TRACE_NOT_INITIALIZED, 0);
++        trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
++                    DRAM_TRACE_DONE, 0);
++        t124_enter_rcm();
++    }
 +
 +    mc_cfg = read32(T124_MC_BASE + T124_MC_EMEM_CFG);
 +    trace_phase(ep1_in_write_imm, ep1_out_read_imm, &event,
