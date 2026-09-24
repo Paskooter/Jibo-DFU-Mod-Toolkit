@@ -200,9 +200,12 @@ class ShofelTransportTests(unittest.TestCase):
     def test_benchmark_reads_eight_mib_and_discards_sample(self):
         captured = []
 
-        def read_sample(executable, port, start, count, destination, timeout, label):
+        def read_sample(executable, port, start, count, destination, timeout, label,
+                        include_stats=False):
+            self.assertTrue(include_stats)
             captured.append((executable, port, start, count, destination, timeout, label))
             destination.write_bytes(b"x" * (8 * 1024 * 1024))
+            return CHIP_ID, 1.0
 
         with patch.object(toolkit, "_shofel_tool", return_value="/opt/shofel/shofel2_t124"), \
                 patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "rcm"}]), \
@@ -213,7 +216,27 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertEqual(captured[0][5], 45)
         self.assertFalse(captured[0][4].exists())
         self.assertEqual(result["mib_per_second"], 4.0)
+        self.assertEqual(result["transfer_mib_per_second"], 8.0)
         self.assertTrue(result["sample_removed"])
+
+    def test_read_stats_require_matching_byte_count(self):
+        destination = self.root / "gpt.img"
+        output = CHIP_ID_OUTPUT + "\nREAD_STATS bytes=32768 transfer_seconds=1.250000\n"
+        with patch.object(toolkit, "run_with_progress", side_effect=lambda *args, **kwargs:
+                          (destination.write_bytes(self.gpt), output)[1]):
+            chip_id, seconds = toolkit._read_shofel_range(
+                "/opt/shofel/shofel2_t124", "1-2", 0, 64, destination,
+                45, "Reading GPT", include_stats=True)
+        self.assertEqual(chip_id, CHIP_ID)
+        self.assertEqual(seconds, 1.25)
+
+        wrong = CHIP_ID_OUTPUT + "\nREAD_STATS bytes=512 transfer_seconds=1.250000\n"
+        with patch.object(toolkit, "run_with_progress", side_effect=lambda *args, **kwargs:
+                          (destination.write_bytes(self.gpt), wrong)[1]):
+            with self.assertRaisesRegex(toolkit.DfuError, "valid transfer timing"):
+                toolkit._read_shofel_range("/opt/shofel/shofel2_t124", "1-2", 0, 64,
+                                           destination, 45, "Reading GPT", include_stats=True)
+        self.assertFalse(destination.exists())
 
     def test_usb_failure_removes_partial_read_and_requests_rcm_reset(self):
         destination = self.root / "partial.img"

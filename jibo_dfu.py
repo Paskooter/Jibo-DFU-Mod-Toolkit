@@ -931,7 +931,7 @@ def _reject_shofel_read_errors(path, start_sector):
 
 
 def _read_shofel_range(executable, port, start_sector, sector_count, destination,
-                       timeout, label):
+                       timeout, label, include_stats=False):
     """Read an exact sector range using only ShofEL's EMMC_READ command."""
     try:
         start_sector = int(start_sector)
@@ -956,7 +956,14 @@ def _read_shofel_range(executable, port, start_sector, sector_count, destination
         _reject_shofel_read_errors(destination, start_sector)
         destination.chmod(0o600)
         _chown_to_invoking_user(destination)
-        return _parse_shofel_chip_id(output)
+        chip_id = _parse_shofel_chip_id(output)
+        if include_stats:
+            match = re.search(r"^READ_STATS bytes=(\d+) transfer_seconds=([0-9]+(?:\.[0-9]+)?)$",
+                              output, re.MULTILINE)
+            if not match or int(match.group(1)) != expected or float(match.group(2)) <= 0:
+                raise DfuError("ShofEL did not report valid transfer timing for the completed read.")
+            return chip_id, float(match.group(2))
+        return chip_id
     except DfuError as exc:
         destination.unlink(missing_ok=True)
         if "Couldn't read Chip ID" in str(exc) or "USB receive failed" in str(exc):
@@ -1056,11 +1063,14 @@ def benchmark_rcm_read(port=None, shofel=None):
     with tempfile.TemporaryDirectory(prefix="jibo-rcm-read-") as directory:
         destination = Path(directory) / "sample.img"
         started = time.monotonic()
-        _read_shofel_range(executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
-                           destination, 45, "Reading an 8 MiB RCM sample")
+        _, transfer_seconds = _read_shofel_range(
+            executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
+            destination, 45, "Reading an 8 MiB RCM sample", include_stats=True)
         elapsed = time.monotonic() - started
     return {"status": "read complete", "size_bytes": size,
             "seconds": round(elapsed, 1), "mib_per_second": round(8 / max(elapsed, 0.001), 2),
+            "transfer_seconds": round(transfer_seconds, 1),
+            "transfer_mib_per_second": round(8 / transfer_seconds, 2),
             "sample_removed": True}
 
 
