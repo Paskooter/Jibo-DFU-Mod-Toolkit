@@ -373,6 +373,7 @@ def read_rcm_boot0_bct(out, port=None, shofel=None):
         if target.stat().st_size != 16_384:
             raise DfuError("Boot0 read returned the wrong size; discard " + str(target))
         digest = _sha256_file(target)
+        target.chmod(0o600)
         _chown_to_invoking_user(target)
     except OSError as exc:
         raise DfuError("Boot0 read did not produce a valid output: " + str(exc)) from exc

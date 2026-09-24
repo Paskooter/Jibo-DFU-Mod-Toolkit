@@ -35,6 +35,8 @@ def main():
                         help="Optional ShofEL dram_probe.bin diagnostic payload")
     parser.add_argument("--dram-trace", type=Path,
                         help="Optional ShofEL dram_trace.bin phased diagnostic payload")
+    parser.add_argument("--dfu-stage", type=Path,
+                        help="Optional ShofEL dfu_stage2.bin RAM loader payload")
     args = parser.parse_args()
     if any((args.shofel2, args.emmc_server, args.intermezzo)) and not all(
             (args.shofel2, args.emmc_server, args.intermezzo)):
@@ -43,6 +45,8 @@ def main():
         parser.error("--dram-probe requires the ShofEL host and payloads")
     if args.dram_trace and not args.shofel2:
         parser.error("--dram-trace requires the ShofEL host and payloads")
+    if args.dfu_stage and not args.shofel2:
+        parser.error("--dfu-stage requires the ShofEL host and payloads")
     load_bundle(args.bundle)
     selected = {"jibo_dfu.py": ROOT / "jibo_dfu.py", "jibo_images.py": ROOT / "jibo_images.py",
                 "jibo_updates.py": ROOT / "jibo_updates.py", "jibo_tui.py": ROOT / "jibo_tui.py",
@@ -57,6 +61,8 @@ def main():
             selected["tools/dram_probe.bin"] = args.dram_probe
         if args.dram_trace:
             selected["tools/dram_trace.bin"] = args.dram_trace
+        if args.dfu_stage:
+            selected["tools/dfu_stage2.bin"] = args.dfu_stage
     selected.update({"bundles/default/" + name: args.bundle / name for name in (*FILES, "manifest.json")})
     data = {name: path.read_bytes() for name, path in selected.items()}
     for name, content in data.items():
