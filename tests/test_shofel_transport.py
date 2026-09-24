@@ -215,6 +215,19 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertEqual(result["mib_per_second"], 4.0)
         self.assertTrue(result["sample_removed"])
 
+    def test_usb_failure_removes_partial_read_and_requests_rcm_reset(self):
+        destination = self.root / "partial.img"
+
+        def fail_transfer(*args, **kwargs):
+            destination.write_bytes(b"partial")
+            raise toolkit.DfuError("USB receive failed at sector 0")
+
+        with patch.object(toolkit, "run_with_progress", side_effect=fail_transfer):
+            with self.assertRaisesRegex(toolkit.DfuError, "Reset the robot into RCM/APX"):
+                toolkit._read_shofel_range("/opt/shofel/shofel2_t124", "1-2", 0, 8,
+                                           destination, 45, "Reading sample")
+        self.assertFalse(destination.exists())
+
     def test_shofel_errors_redact_the_raw_chip_id(self):
         detail = toolkit._transfer_error_detail("Chip ID: " + " ".join(
             "0x{:02x}".format(value) for value in CHIP_ID) + "\nUSB transfer failed")

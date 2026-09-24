@@ -957,7 +957,12 @@ def _read_shofel_range(executable, port, start_sector, sector_count, destination
         destination.chmod(0o600)
         _chown_to_invoking_user(destination)
         return _parse_shofel_chip_id(output)
-    except (DfuError, OSError):
+    except DfuError as exc:
+        destination.unlink(missing_ok=True)
+        if "Couldn't read Chip ID" in str(exc) or "USB receive failed" in str(exc):
+            raise DfuError(str(exc) + "\nReset the robot into RCM/APX before retrying.") from exc
+        raise
+    except OSError:
         destination.unlink(missing_ok=True)
         raise
 
