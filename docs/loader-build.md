@@ -35,3 +35,11 @@ PY
 ```
 
 To compile the opt-in file-level DFU candidate from the same source and toolchain, use a different output directory and add `--file-level-candidate` to the build command. The script enables the file RPC and eMMC-CID USB serial only in that candidate, then checks that the file RPC object was compiled. Its protocol and supported ext4 layouts are described in [the file-level protocol](../firmware/file-level-protocol.md). The resulting image is separate from `assets/loader.bin` and is not included in the normal toolkit package.
+
+The ShofEL entry helper checks the loader's exact size and SHA-256 before transferring it. The helper packaged with the toolkit accepts only the pinned v1 loader. After producing the padded experimental candidate and its `manifest.json`, build a separate matching helper with:
+
+```sh
+python3 scripts/build_file_level_entry.py --source /path/to/ShofEL2-for-T124
+```
+
+The builder checks the candidate against its manifest, starts from the pinned ShofEL source commit, applies this toolkit's stage-2 patch, replaces the stage-2 size and hash in the isolated build, and runs the ShofEL tests. It writes `.build/file-level-candidate/shofel-entry` without changing the packaged helper. The normal toolkit package can then use this helper with `enter-dfu-shofel --shofel /absolute/path/to/shofel-entry/shofel2_t124 --loader /absolute/path/to/experimental-file-rpc-loader.bin`. This experimental route has not yet been tested on hardware.
