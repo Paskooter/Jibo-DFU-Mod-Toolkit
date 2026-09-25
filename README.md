@@ -48,7 +48,7 @@ The screen refreshes USB state each time it returns from an action. The first ac
 | --- | --- |
 | **Enter DFU with ShofEL (RAM loader)** | Initializes the confirmed RAM profile, loads the pinned recovery program, and checks for DFU on the same USB port. Available in RCM/APX with the launch-enabled ShofEL pair. |
 | **Enter DFU with signed recovery** | Uses a matching signed recovery bundle to load the program into RAM from RCM/APX. |
-| **Check partition layout (read-only)** | Reads 32 KiB through DFU, checks the GPT and expected Jibo partition sizes, and removes the temporary data. |
+| **Check partition layout (read-only)** | Reads 32 KiB through DFU and checks the GPT and expected Jibo partition sizes; no backup is created. |
 | **Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
 | **Back up var with ShofEL (read-only)** | Available in RCM/APX when ShofEL is installed; validates the GPT and reads the exact `var` extent over USB without writing eMMC. |
 | **Set robot mode** | Prepares a mode change, displays the write plan, asks for confirmation on the terminal screen, then reads the partition back to verify it. |
@@ -106,7 +106,7 @@ For the ShofEL DFU entry action, build the ShofEL host and stage payload togethe
 sudo python3 jibo_dfu.py enter-dfu-shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --loader /path/to/loader.bin --port 1-1 --confirm-meerkat-rev02
 ```
 
-The locally generated `.pyz` can bundle the matched ShofEL pair and loader, in which case `--shofel` and `--loader` are omitted. The command launches the loader only after its transfer and DRAM readback checks pass, then requires DFU enumeration with the Jibo marker and `var` alternative on the same USB port. Moth entered DFU this way and exposed the marker, `var`, `skills-000` through `skills-010`, and other named partitions. A partition-data read through this new entry route is the next hardware check.
+The locally generated `.pyz` can bundle the matched ShofEL pair and loader, in which case `--shofel` and `--loader` are omitted. The command launches the loader only after its transfer and DRAM readback checks pass, then requires DFU enumeration with the Jibo marker and `var` alternative on the same USB port. Moth entered DFU this way and exposed the marker, `var`, `skills-000` through `skills-010`, and other named partitions. A subsequent bounded 32 KiB DFU read validated Moth's live GPT: `rootfsA` and `rootfsB` are 1,048,576,000 bytes each, `services` is 2,097,152,000 bytes, `skills` is 10,986,945,024 bytes, and `var` is 524,288,000 bytes. That check created no backup or eMMC write.
 
 After DFU appears, **Check partition layout (read-only)** in the menu or `sudo python3 jibo_dfu.py probe-dfu-gpt --port 1-1` reads and validates only the first 32 KiB of eMMC. It uses libusb to request eight bounded DFU upload blocks and then sends DFU_ABORT; the bytes stay in memory, so the check creates no backup. The system's `libusb-1.0` runtime is required. The current loader leaves the `emmc-000` upload cursor advanced after DFU_ABORT, so reset the robot into RCM and re-enter DFU before running this check a second time in the same session. `dfu-util -Z` only scales its progress bar and does not limit an upload, so the toolkit does not use it for this check.
 
@@ -154,6 +154,6 @@ RCM-to-DFU entry, a `var` read, and a mode change to `int-developer` were tested
 
 Available now: USB detection, recovery-bundle integrity checks, signed DFU entry for the tested profile, ShofEL DFU entry tested on Moth, `var` backup and inspection over DFU or read-only ShofEL, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
 
-Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. ShofEL read-only backup and DFU entry worked on Moth; DFU partition-data readback through that route and the update workflow still need hardware validation. SSH is not enabled by this tool.
+Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. ShofEL read-only backup, DFU entry, and a bounded live GPT read worked on Moth; a full partition read and the update workflow still need hardware validation. SSH is not enabled by this tool.
 
 For the guided workflow, use `python3 jibo_dfu.py` and follow the terminal screen. Advanced command-line subcommands are available with `python3 jibo_dfu.py --help`, but are not needed for normal use.

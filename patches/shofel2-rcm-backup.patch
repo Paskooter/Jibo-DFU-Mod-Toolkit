@@ -210,10 +210,10 @@ index 64a09fe..3bb1222 100644
 -
 diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
 new file mode 100644
-index 0000000..5e1e84e
+index 0000000..ed306ca
 --- /dev/null
 +++ b/STAGE2-PROBE.md
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,135 @@
 +# T124 DRAM probe and DFU-loader route
 +
 +`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
@@ -294,8 +294,9 @@ index 0000000..5e1e84e
 +payload, and the host's explicit `--launch`; it repeats reversible memory
 +checks at the SPL stack and malloc ranges before accepting the final `JGO1`
 +command. Moth completed that launch and re-enumerated in DFU on the same USB
-+port, exposing the expected loader marker and named alternatives. A live
-+partition-data read through this entry route remains to be checked.
++port, exposing the expected loader marker and named alternatives. A bounded
++32 KiB DFU read subsequently validated Moth's live GPT, including the 500 MiB
++`var` partition, without creating a backup or writing eMMC.
 +`shofel2_t124 --dfu-stage-capability` reports whether the host was built with
 +the launch gate enabled without accessing USB.
 +
@@ -336,8 +337,8 @@ index 0000000..5e1e84e
 +write the exposed partition entities, subject to the local backend's bounds.
 +Those later user-triggered writes are distinct from stage-2, which only writes
 +the verified loader into DRAM. The stage-only transfer has passed on Moth;
-+the launch handoff has also entered DFU on Moth. A DFU partition-data read
-+through this route is the next check.
++the launch handoff has also entered DFU on Moth, and a bounded read validated
++the live GPT. A full partition read through this route is the next check.
 +
 +## Source references
 +
