@@ -135,7 +135,7 @@ function Get-JiboUsbDevices {
         if (-not $entry.BusId -or -not $entry.InstanceId) {
             continue
         }
-        if ($entry.InstanceId -match '(?i)VID_0955&PID_([0-9a-f]{4})') {
+        if ($entry.InstanceId -match '(?i)VID_0955&PID_([0-9a-f]{4})(?=&|\\|$)') {
             $productId = $Matches[1].ToLowerInvariant()
             if ($script:JiboProductIds -contains $productId) {
                 $devices += [pscustomobject]@{
