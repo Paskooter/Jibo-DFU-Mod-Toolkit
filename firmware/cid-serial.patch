@@ -1,0 +1,25 @@
+diff --git a/drivers/usb/gadget/g_dnl.c b/drivers/usb/gadget/g_dnl.c
+index 45a484c..4129fd9 100644
+--- a/drivers/usb/gadget/g_dnl.c
++++ b/drivers/usb/gadget/g_dnl.c
+@@ -36,7 +36,7 @@
+ #define STRING_USBDOWN 2
+ /* Index of String serial */
+ #define STRING_SERIAL  3
+-#define MAX_STRING_SERIAL	32
++#define MAX_STRING_SERIAL	40
+ /* Number of supported configurations */
+ #define CONFIGURATION_NUMBER 1
+ 
+diff --git a/include/configs/kein-baseboard.h b/include/configs/kein-baseboard.h
+index 3c0c99c..33841b2 100644
+--- a/include/configs/kein-baseboard.h
++++ b/include/configs/kein-baseboard.h
+@@ -97,6 +97,7 @@
+ #define CONFIG_JIBO_DFU_ENTRY
+ #undef CONFIG_ENV_IS_IN_MMC
+ #define CONFIG_ENV_IS_NOWHERE
++#define CONFIG_JIBO_DFU_CID_SERIAL
+ #undef CONFIG_BOOTCOUNT_LIMIT
+ #undef CONFIG_BOOTCOUNT_ENV
+ 

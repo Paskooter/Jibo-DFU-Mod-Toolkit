@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--host", required=True, type=Path, help="Buildroot output/host directory")
     parser.add_argument("--out", required=True, type=Path, help="New build directory")
+    parser.add_argument("--cid-serial-candidate", action="store_true",
+                        help="include experimental eMMC-CID USB serial identity support")
     args = parser.parse_args()
     if args.out.exists():
         parser.error("Build directory already exists")
@@ -48,6 +50,9 @@ def main():
         end = value.index("#endif", start) + len("#endif\n")
         board.write_text(value[:start] + value[end:])
     subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(ROOT / "firmware/entry.patch")], cwd=out, check=True)
+    if args.cid_serial_candidate:
+        subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i",
+                        str(ROOT / "firmware/cid-serial.patch")], cwd=out, check=True)
     shutil.copyfile(ROOT / "firmware/jibo_dfu_entry.h", out / "common/jibo_dfu_entry.h")
     env = os.environ.copy()
     env.update(PATH=str(host / "usr/bin") + os.pathsep + env["PATH"],

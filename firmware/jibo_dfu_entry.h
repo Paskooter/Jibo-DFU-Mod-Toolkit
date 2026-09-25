@@ -4,9 +4,29 @@
 #include <part.h>
 #include <watchdog.h>
 
+#ifdef CONFIG_JIBO_DFU_CID_SERIAL
+#include <g_dnl.h>
+#endif
+
 /* dfu_mmc stores raw-area lengths as signed 32-bit byte counts. */
 #define JIBO_DFU_MAX_CHUNK_BLOCKS 0x200000ULL /* 1 GiB at 512 bytes/LBA */
 #define JIBO_DFU_MAX_SKILLS_CHUNKS 1000
+
+#ifdef CONFIG_JIBO_DFU_CID_SERIAL
+/* Make the USB serial stable across file edits so backups bind to this eMMC. */
+static int jibo_dfu_set_cid_serial(struct mmc *mmc)
+{
+	char serial[40];
+
+	if (!(mmc->cid[0] | mmc->cid[1] | mmc->cid[2] | mmc->cid[3]))
+		return -1;
+	if (snprintf(serial, sizeof(serial), "%08x%08x%08x%08x",
+		     mmc->cid[0], mmc->cid[1], mmc->cid[2], mmc->cid[3]) != 32)
+		return -1;
+	g_dnl_set_serialnumber(serial);
+	return 0;
+}
+#endif
 
 static int jibo_dfu_name_ok(const unsigned char *name)
 {
@@ -35,6 +55,10 @@ static void jibo_dfu_entry(void)
 	if (!mmc || mmc_init(mmc) ||
 	    blk_select_hwpart_devnum(IF_TYPE_MMC, 0, 0))
 		goto failed;
+#ifdef CONFIG_JIBO_DFU_CID_SERIAL
+	if (jibo_dfu_set_cid_serial(mmc))
+		goto failed;
+#endif
 	if (mmc->block_dev.blksz != 512 || mmc->block_dev.lba < 34 ||
 	    (unsigned long long)mmc->block_dev.lba > 0xffffffffULL)
 		goto failed;
