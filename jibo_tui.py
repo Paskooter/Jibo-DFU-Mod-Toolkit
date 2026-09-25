@@ -32,6 +32,15 @@ class MenuItem:
     reason: str = ""
 
 
+FILE_LEVEL_VAR_ALTS = frozenset(("jibo-file-v1", "jibo-file-var-in",
+                                 "jibo-file-var-out"))
+
+
+def _can_edit_var_files(readiness):
+    return (readiness.state == "dfu-ready" and
+            FILE_LEVEL_VAR_ALTS.issubset(readiness.alt_names))
+
+
 def inspect_readiness(api, found=None):
     """Read USB state and, for DFU, check for the toolkit's loader marker."""
     found = tuple(api.devices()) if found is None else tuple(found)
@@ -640,6 +649,13 @@ def _confirmation_details(plan, introduction):
                 lines.append("  {}{}".format(name, " ({} bytes)".format(size) if size is not None else ""))
             else:
                 lines.append("  " + str(partition))
+    changes = plan.get("changes")
+    if changes:
+        lines.append("Files to change:")
+        for change in changes:
+            lines.append("  {}:{} ({} → {} bytes)".format(
+                change["partition"], change["path"],
+                change["before_size_bytes"], change["candidate_size_bytes"]))
     if len(lines) == 1:
         lines.append(json.dumps(plan, sort_keys=True, default=str))
     return "\n".join(lines)
@@ -715,10 +731,17 @@ def execute_action(api, key, readiness):
         mode = _select_mode()
         if mode is None:
             return {"status": "cancelled", "message": "No mode selected."}
+        direct_edit = _can_edit_var_files(readiness)
         confirmation = lambda plan: confirm_action(
             "Confirm mode change",
-            _confirmation_details(plan, "Review the var write plan before changing the robot mode."))
-        return api.set_mode_live(mode, port=readiness.port, confirmation=confirmation)
+            _confirmation_details(plan, "Review the file change before changing the robot mode."
+                                  if direct_edit else
+                                  "Review the var write plan before changing the robot mode."))
+        if direct_edit:
+            return api.set_mode_file_live(mode, port=readiness.port,
+                                          confirmation=confirmation)
+        return api.set_mode_live(mode, port=readiness.port,
+                                 confirmation=confirmation)
     if key == "configure-wifi":
         ssid = text_input("Configure Wi-Fi", "Wi-Fi network name (SSID):")
         if ssid is None:
@@ -736,10 +759,17 @@ def execute_action(api, key, readiness):
                                   detail="The password is hidden while you type.")
             if password is None:
                 return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
+        direct_edit = _can_edit_var_files(readiness)
         confirmation = lambda plan: confirm_action(
             "Confirm Wi-Fi change",
-            _confirmation_details(plan, "Review the var write plan before adding this network."))
+            _confirmation_details(plan, "Review the file change before adding this network."
+                                  if direct_edit else
+                                  "Review the var write plan before adding this network."))
         try:
+            if direct_edit:
+                return api.configure_wifi_file_live(
+                    ssid, password, open_network, port=readiness.port,
+                    confirmation=confirmation)
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
         finally:

@@ -409,6 +409,40 @@ class CursesPromptTests(unittest.TestCase):
         self.assertIn("Partition: var", confirmation_text)
         self.assertIn("USB port: 1-1", confirmation_text)
 
+    def test_mode_action_uses_file_edit_when_loader_exposes_it(self):
+        calls = {}
+        api = SimpleNamespace(
+            set_mode_file_live=lambda mode, port=None, confirmation=None:
+                calls.update(mode=mode, port=port, confirmation=confirmation))
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "confirm_action", return_value=True) as confirm:
+            jibo_tui.execute_action(api, "set-mode", readiness)
+            self.assertEqual((calls["mode"], calls["port"]), ("int-developer", "1-1"))
+            self.assertTrue(calls["confirmation"]({
+                "usb_port": "1-1", "changes": [{"partition": "var",
+                    "path": "/jibo/mode.json", "before_size_bytes": 17,
+                    "candidate_size_bytes": 26}]}))
+        self.assertIn("var:/jibo/mode.json (17 → 26 bytes)",
+                      confirm.call_args.args[1])
+
+    def test_wifi_action_uses_file_edit_when_loader_exposes_it(self):
+        calls = {}
+        api = SimpleNamespace(
+            configure_wifi_file_live=lambda ssid, password, open_network,
+                    port=None, confirmation=None: calls.update(
+                        ssid=ssid, password=password, open_network=open_network,
+                        port=port, confirmation=confirmation))
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "text_input", return_value="Test Wi-Fi"), \
+                patch.object(jibo_tui, "select_option", return_value="open"):
+            jibo_tui.execute_action(api, "configure-wifi", readiness)
+        self.assertEqual((calls["ssid"], calls["password"],
+                          calls["open_network"], calls["port"]),
+                         ("Test Wi-Fi", None, True, "1-1"))
+
 
 if __name__ == "__main__":
     unittest.main()
