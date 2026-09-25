@@ -62,6 +62,8 @@ class PackageTests(unittest.TestCase):
         with patch("sys.argv", args):
             package.main()
         with zipfile.ZipFile(self.output) as archive:
+            self.assertEqual(archive.read("jibo_dfu_bounded.py"),
+                             (package.ROOT / "jibo_dfu_bounded.py").read_bytes())
             self.assertEqual(archive.read("tools/shofel2_t124"), b"ShofEL executable")
             self.assertEqual(archive.read("tools/emmc_server.bin"), b"eMMC read payload")
             self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")

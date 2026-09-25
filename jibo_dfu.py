@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 
+import jibo_dfu_bounded as bounded
 import jibo_images as images
 import jibo_updates as updates
 
@@ -728,7 +729,10 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size):
 def _read_gpt_capacities(dfu_util, port, names):
     if "emmc-000" not in names:
         raise DfuError("This DFU loader does not expose emmc-000; the toolkit cannot verify the live GPT layout.")
-    raise DfuError("The installed dfu-util cannot limit an emmc-000 upload. GPT reads are disabled until a bounded DFU reader is available.")
+    try:
+        return updates.parse_gpt_prefix(bounded.read_dfu_alt_prefix(port))
+    except (bounded.BoundedDfuError, updates.UpdateError) as exc:
+        raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
 
 
 def probe_dfu_gpt(port=None, dfu_util=None):
@@ -744,7 +748,7 @@ def probe_dfu_gpt(port=None, dfu_util=None):
         raise DfuError("The live GPT reports an unexpected var size: " + str(capacities["var"]))
     return {"status": "partition table read and checked", "port": port,
             "partition_sizes_bytes": {name: capacities[name] for name in required},
-            "temporary_read_removed": True}
+            "bytes_read": 32_768, "backup_created": False}
 
 
 def _expected_skills_chunks(capacity):

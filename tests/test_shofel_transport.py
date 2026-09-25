@@ -291,13 +291,18 @@ class ShofelTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(toolkit.DfuError, "missing: jibo-dfu-v1"):
                 toolkit.enter_shofel_dfu(confirm_meerkat_rev02=True)
 
-    def test_dfu_gpt_probe_refuses_unbounded_dfu_util_upload(self):
+    def test_dfu_gpt_probe_uses_exactly_bounded_memory_read(self):
         with patch.object(toolkit, "_dfu_context",
                           return_value=("1-2", [toolkit.MARKER, "var", "emmc-000"], "device")), \
+                patch.object(toolkit.bounded, "read_dfu_alt_prefix",
+                             return_value=make_gpt_prefix(var_size=toolkit.EXPECTED_VAR_SIZE)) as bounded_read, \
                 patch.object(toolkit, "run_with_progress") as upload:
-            with self.assertRaisesRegex(toolkit.DfuError, "cannot limit"):
-                toolkit.probe_dfu_gpt(port="1-2", dfu_util="dfu-util")
+            result = toolkit.probe_dfu_gpt(port="1-2", dfu_util="dfu-util")
+        bounded_read.assert_called_once_with("1-2")
         upload.assert_not_called()
+        self.assertEqual(result["partition_sizes_bytes"]["var"], toolkit.EXPECTED_VAR_SIZE)
+        self.assertEqual(result["bytes_read"], 32768)
+        self.assertFalse(result["backup_created"])
 
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
