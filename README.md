@@ -17,7 +17,7 @@ cd Jibo-DFU-Mod-Toolkit
 ./run.sh
 ```
 
-The launcher uses `dist/jibo-dfu-linux-x86_64.pyz` if it exists. Otherwise, it asks for `sudo` authorization in the same terminal, installs missing build packages on supported distributions, builds the pinned ShofEL USB entry helper, creates the `.pyz`, and opens the menu. You can also start it with `sudo ./run.sh`. USB access requires administrator privileges. Backups are saved under the invoking owner's `~/Jibo-Backups`.
+The launcher checks the local `dist/jibo-dfu-linux-x86_64.pyz` before opening it. If it is missing, stale, or contains a ShofEL helper that cannot start DFU, the launcher asks for `sudo` authorization in the same terminal, installs missing build packages on supported distributions, builds the launch-enabled ShofEL helper, replaces the `.pyz`, and opens the menu. You do not need to install ShofEL separately. You can also start it with `sudo ./run.sh`. USB access requires administrator privileges. Backups are saved under the invoking owner's `~/Jibo-Backups`.
 
 When `./run.sh` is started inside WSL, it also tries to use Windows PowerShell and usbipd-win to attach a connected Jibo and reattach it when it changes from APX to DFU. If Windows interop or usbipd-win is unavailable, attach it manually. Use `JIBO_MANUAL_USB=1 ./run.sh` to skip automatic USB handoff.
 
@@ -45,11 +45,11 @@ git clone --branch improvements/IncreasedUSBReadWriteSpeed \
 cd ../ShofEL2-for-T124
 git checkout --detach 31ac3a260c8a1501869aff6690b3b9ad4904ef58
 git apply ../Jibo-DFU-Mod-Toolkit/patches/shofel2-dfu-entry.patch
-make DFU_STAGE2_ENABLE_LAUNCH=1 all test
+make -B DFU_STAGE2_ENABLE_LAUNCH=1 all test
 cd ../Jibo-DFU-Mod-Toolkit
 ```
 
-Package the included loader, ShofEL entry files, DFU tool, and Python UI. The packager checks the loader against its pinned size and SHA-256. It does not include signed RCM artifacts or a signing key.
+Package the included loader, ShofEL entry files, DFU tool, and Python UI. The packager checks the loader against its pinned size and SHA-256 and rejects a ShofEL host built without DFU launch support. It does not include signed RCM artifacts or a signing key.
 
 ```sh
 python3 scripts/package.py \
@@ -66,7 +66,7 @@ To rebuild the loader itself, extract `vendor/jibo-ram-dfu-v1-source.tar.gz` and
 
 ## Using the menu
 
-With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The current loader uses the Meerkat Rev02 RAM profile confirmed on Moth, so select it only for a robot whose hardware profile matches. Once DFU is active, the menu offers:
+With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refreshes the robot state and available actions automatically when USB changes; `r` also refreshes manually. The current loader uses the Meerkat Rev02 RAM profile confirmed on Moth, so select it only for a robot whose hardware profile matches. Once DFU is active, the menu offers:
 
 | Action | What it does |
 | --- | --- |

@@ -27,7 +27,8 @@ class PackageTests(unittest.TestCase):
         self.intermezzo = self.shofel_dir / "intermezzo.bin"
         self.dfu_stage = self.shofel_dir / "dfu_stage2.bin"
         self.dfu_util = self.root / "dfu-util"
-        self.shofel.write_bytes(b"ShofEL executable")
+        self.shofel.write_text("#!/bin/sh\nprintf 'dfu-stage-launch=1\\n'\n")
+        self.shofel.chmod(0o755)
         self.intermezzo.write_bytes(b"RCM intermezzo")
         self.dfu_stage.write_bytes(b"DFU stage payload")
         self.dfu_util.write_bytes(b"dfu-util executable")
@@ -60,7 +61,7 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(set(archive.namelist()), expected)
             self.assertEqual(archive.read("loader.bin"), self.padded_loader)
-            self.assertEqual(archive.read("tools/shofel2_t124"), b"ShofEL executable")
+            self.assertEqual(archive.read("tools/shofel2_t124"), self.shofel.read_bytes())
             self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")
             self.assertEqual(archive.read("tools/dfu_stage2.bin"), b"DFU stage payload")
             self.assertEqual(archive.read("tools/dfu-util"), b"dfu-util executable")
@@ -90,6 +91,14 @@ class PackageTests(unittest.TestCase):
         with redirect_stderr(errors), self.assertRaises(SystemExit):
             self.run_package()
         self.assertIn("Padded loader has", errors.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_launch_disabled_shofel_is_rejected(self):
+        self.shofel.write_text("#!/bin/sh\nprintf 'dfu-stage-launch=0\\n'\n")
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit):
+            self.run_package()
+        self.assertIn("without DFU launch support", errors.getvalue())
         self.assertFalse(self.output.exists())
 
     def test_each_cli_input_is_required(self):

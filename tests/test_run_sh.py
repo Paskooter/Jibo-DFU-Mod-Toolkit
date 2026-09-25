@@ -35,6 +35,7 @@ class RunLauncherTests(unittest.TestCase):
 
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts" / "package.py").write_text("# intercepted by python3 stub\n")
+        (self.repo / "scripts" / "check_package.py").write_text("# intercepted by python3 stub\n")
         (self.repo / "patches").mkdir()
         (self.repo / "patches" / "shofel2-dfu-entry.patch").write_text("fixture patch\n")
         (self.repo / "assets").mkdir()
@@ -92,6 +93,16 @@ case "$name" in
   python3)
     case "${1-}" in
       -c|--version|-V) exit 0 ;;
+      *check_package.py)
+        if [ "${FAIL_PACKAGE_CHECK_ONCE:-0}" = 1 ]; then
+          marker="$JIBO_TEST_BIN/package-check-failed"
+          if [ ! -e "$marker" ]; then
+            /usr/bin/touch "$marker"
+            exit 1
+          fi
+        fi
+        exit 0
+        ;;
       *package.py)
         [ "${FAIL_PACKAGE:-0}" = 1 ] && exit 31
         output=
@@ -208,11 +219,12 @@ exit 0
 
     def package_call_index(self, events):
         return next((i for i, event in enumerate(events)
-                     if event.startswith("python3 ") and "package.py" in event), None)
+                     if event.startswith("python3 ") and "/package.py " in event), None)
 
     def launch_index(self, events):
         return next((i for i, event in enumerate(events)
-                     if event.startswith("python3 ") and "package.py" not in event
+                     if event.startswith("python3 ") and "/package.py " not in event
+                     and "/check_package.py " not in event
                      and ".pyz" in event), None)
 
     def test_existing_pyz_launches_without_build_or_package_install(self):
@@ -246,6 +258,15 @@ exit 0
         self.assertTrue(events[package_index].endswith("/jibo-dfu.pyz"), events[package_index])
         self.assertIn("--launcher-test-arg", events[launch_index])
         self.assertTrue(self.pyz.is_file())
+
+    def test_stale_package_is_rebuilt_before_launch(self):
+        result = self.run_launcher(create_pyz=True,
+                                   extra_env={"FAIL_PACKAGE_CHECK_ONCE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events()
+        self.assertTrue(any(event.startswith("make ") for event in events), events)
+        self.assertIsNotNone(self.package_call_index(events), events)
+        self.assertLess(self.package_call_index(events), self.launch_index(events))
 
     def test_missing_dependency_is_installed_before_build(self):
         (self.bin / "gcc").unlink()

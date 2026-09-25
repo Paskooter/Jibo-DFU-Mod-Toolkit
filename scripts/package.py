@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import zipfile
 
@@ -38,6 +39,19 @@ def _read_file(parser, label, path):
     return content
 
 
+def _check_shofel_launch(parser, path):
+    if not os.access(path, os.X_OK):
+        parser.error("ShofEL host tool is not executable: " + str(path))
+    try:
+        result = subprocess.run([str(path), "--dfu-stage-capability"],
+                                capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        parser.error("Could not check the ShofEL DFU launch capability: " + str(exc))
+    if result.returncode != 0 or result.stdout.strip() != "dfu-stage-launch=1":
+        parser.error("ShofEL was built without DFU launch support. Rebuild with "
+                     "DFU_STAGE2_ENABLE_LAUNCH=1 before packaging.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", required=True, type=Path,
@@ -62,6 +76,7 @@ def main():
         "tools/dfu-util": args.dfu_util,
     }
     data = {name: _read_file(parser, name, path) for name, path in supplied.items()}
+    _check_shofel_launch(parser, args.shofel2)
 
     loader = data["loader.bin"]
     loader += bytes((-len(loader)) % 16)

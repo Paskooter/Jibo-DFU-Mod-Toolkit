@@ -78,12 +78,14 @@ launch() {
   as_root python3 "$package" "$@"
 }
 
-if [[ -f $package ]]; then
-  launch "$@"
-  exit $?
+if [[ -f $package && -f $repo_dir/scripts/check_package.py ]] && has python3; then
+  if python3 "$repo_dir/scripts/check_package.py" "$package"; then
+    launch "$@"
+    exit $?
+  fi
 fi
 
-say 'The local package is missing; checking build dependencies.'
+say 'Preparing the local package; checking build dependencies.'
 
 # Each distribution receives only packages needed by the missing commands.
 missing=()
@@ -185,7 +187,9 @@ else
 fi
 
 say 'Building the USB entry helper.'
-make -C "$shofel_src" DFU_STAGE2_ENABLE_LAUNCH=1 all test
+# A reused source tree may have host objects compiled with the default
+# launch-disabled flag. Force a rebuild so its capability matches the payload.
+make -B -C "$shofel_src" DFU_STAGE2_ENABLE_LAUNCH=1 all test
 for file in shofel2_t124 intermezzo.bin dfu_stage2.bin; do
   [[ -s $shofel_src/$file ]] || die "The ShofEL build did not create $file."
 done
@@ -202,6 +206,8 @@ python3 "$repo_dir/scripts/package.py" \
   --dfu-util "$dfu_util" \
   --out "$staged_package"
 [[ -s $staged_package ]] || die 'Packaging did not create the toolkit.'
-mv -n -- "$staged_package" "$package"
+python3 "$repo_dir/scripts/check_package.py" "$staged_package" ||
+  die 'The new package did not pass its DFU entry check.'
+mv -f -- "$staged_package" "$package"
 [[ -s $package ]] || die 'Packaging did not create the toolkit.'
 launch "$@"
