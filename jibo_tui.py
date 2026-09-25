@@ -185,6 +185,8 @@ def build_menu_items(readiness, update_packages=()):
                  is_rcm, enter_reason),
         MenuItem("backup-var-shofel", "Back up var with ShofEL (read-only)",
                  is_rcm and readiness.shofel_available, shofel_reason),
+        MenuItem("probe-dfu-gpt", "Check partition layout (read-only)",
+                 is_dfu, connection_reason),
         MenuItem("backup-var", "Back up var", is_dfu, connection_reason),
         MenuItem("set-mode", "Set robot mode", is_dfu, connection_reason),
         MenuItem("configure-wifi", "Configure Wi-Fi", is_dfu, connection_reason),
@@ -603,6 +605,7 @@ def _action_hint(key):
         "enter-dfu-shofel": "Initializes the selected SDRAM profile and starts the RAM recovery loader from RCM/APX.",
         "enter-dfu-signed": "Loads the signed recovery program into RAM while the robot is in RCM/APX.",
         "backup-var-shofel": "Reads the GPT and var partition over ShofEL USB. This action does not write eMMC.",
+        "probe-dfu-gpt": "Reads the partition layout over DFU. This action does not write eMMC.",
         "backup-var": "Read the robot's var partition and save one reusable local rollback image.",
         "set-mode": "Choose a mode; review the proposed change and confirm before writing.",
         "configure-wifi": "Enter a network; review the proposed change and confirm before writing.",
@@ -734,6 +737,10 @@ def execute_action(api, key, readiness):
         return api.backup_var()
     if key == "backup-var-shofel":
         return api.backup_var_shofel(port=readiness.port)
+    if key == "probe-dfu-gpt":
+        if readiness.state != "dfu-ready":
+            raise RuntimeError("The partition layout check is available only while the robot is in DFU.")
+        return api.probe_dfu_gpt(port=readiness.port)
     if key == "set-mode":
         mode = _select_mode()
         if mode is None:

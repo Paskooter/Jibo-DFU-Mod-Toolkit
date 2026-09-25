@@ -49,6 +49,7 @@ def fake_api(devices=(), marker=True, alts=None, shofel=False, shofel_dfu=False)
         shofel_dfu_available=lambda: shofel_dfu,
         enter_shofel_dfu=lambda **kwargs: {"action": "enter-dfu-shofel", **kwargs},
         backup_var_shofel=lambda **kwargs: {"action": "backup-var-shofel", **kwargs},
+        probe_dfu_gpt=lambda **kwargs: {"action": "probe-dfu-gpt", **kwargs},
         _update_candidates=lambda _folder: [],
     )
 
@@ -92,6 +93,7 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertFalse(items["enter-dfu-shofel"].enabled)
         self.assertTrue(items["enter-dfu-signed"].enabled)
         self.assertFalse(items["backup-var-shofel"].enabled)
+        self.assertFalse(items["probe-dfu-gpt"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertFalse(items["set-mode"].enabled)
         self.assertTrue(items["inspect-backup"].enabled)
@@ -102,6 +104,7 @@ class TuiReadinessTests(unittest.TestCase):
         items = {item.key: item for item in jibo_tui.build_menu_items(no_marker)}
         self.assertFalse(items["enter-dfu-shofel"].enabled)
         self.assertFalse(items["enter-dfu-signed"].enabled)
+        self.assertFalse(items["probe-dfu-gpt"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertIn("already in DFU", items["enter-dfu-signed"].reason)
 
@@ -109,8 +112,29 @@ class TuiReadinessTests(unittest.TestCase):
             [{"port": "1-1", "state": "dfu"}], alts=["jibo-dfu-v1", "rootfsA"]))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_var)}
         self.assertEqual(no_var.state, "dfu-profile-incomplete")
+        self.assertFalse(items["probe-dfu-gpt"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertIn("var", items["backup-var"].reason)
+
+    def test_dfu_gpt_probe_is_enabled_only_with_ready_loader(self):
+        ready = jibo_tui.inspect_readiness(fake_api(
+            [{"port": "1-3", "state": "dfu"}]))
+        item = {entry.key: entry for entry in
+                jibo_tui.build_menu_items(ready)}["probe-dfu-gpt"]
+        self.assertTrue(item.enabled)
+
+        rcm = jibo_tui.inspect_readiness(fake_api(
+            [{"port": "1-3", "state": "rcm"}]))
+        item = {entry.key: entry for entry in
+                jibo_tui.build_menu_items(rcm)}["probe-dfu-gpt"]
+        self.assertFalse(item.enabled)
+        self.assertIn("Enter DFU", item.reason)
+
+        no_marker = jibo_tui.inspect_readiness(fake_api(
+            [{"port": "1-3", "state": "dfu"}], marker=False))
+        item = {entry.key: entry for entry in
+                jibo_tui.build_menu_items(no_marker)}["probe-dfu-gpt"]
+        self.assertFalse(item.enabled)
 
     def test_dfu_usb_permission_error_is_not_reported_as_missing_loader(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
@@ -167,6 +191,7 @@ class TuiReadinessTests(unittest.TestCase):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
         app = jibo_tui.TerminalMenu(api)
         screen = FakeScreen([curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN,
+                             curses.KEY_DOWN,
                              curses.KEY_ENTER])
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
@@ -190,6 +215,20 @@ class TuiReadinessTests(unittest.TestCase):
         ready = jibo_tui.inspect_readiness(api)
         result = jibo_tui.execute_action(api, "backup-var-shofel", ready)
         self.assertEqual(result, {"action": "backup-var-shofel", "port": "1-2"})
+
+    def test_dfu_gpt_probe_passes_selected_port_without_confirmation(self):
+        api = fake_api([{"port": "1-3", "state": "dfu"}])
+        ready = jibo_tui.inspect_readiness(api)
+        with patch.object(jibo_tui, "confirm_action") as confirm:
+            result = jibo_tui.execute_action(api, "probe-dfu-gpt", ready)
+        self.assertEqual(result, {"action": "probe-dfu-gpt", "port": "1-3"})
+        confirm.assert_not_called()
+
+    def test_dfu_gpt_probe_dispatch_refuses_non_dfu_state(self):
+        api = fake_api([{"port": "1-3", "state": "rcm"}])
+        ready = jibo_tui.inspect_readiness(api)
+        with self.assertRaisesRegex(RuntimeError, "only while the robot is in DFU"):
+            jibo_tui.execute_action(api, "probe-dfu-gpt", ready)
 
     def test_shofel_dfu_action_confirms_profile_then_uses_selected_port(self):
         api = fake_api([{"port": "1-2", "state": "rcm"}], shofel_dfu=True)
