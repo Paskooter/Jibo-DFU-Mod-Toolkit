@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 import pwd
 import re
+import secrets
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -25,6 +27,17 @@ ROOT = Path(__file__).resolve().parent
 RCM = ("0955", "7740")
 DFU = ("0955", "701a")
 MARKER = "jibo-dfu-v1"
+FILE_LEVEL_MARKER = "jibo-file-v1"
+FILE_LEVEL_PARTITIONS = ("rootfsA", "rootfsB", "services", "skills", "var")
+FILE_LEVEL_MAX_BYTES = 4096
+FILE_RPC_MAGIC = b"JIBOFL1\0"
+FILE_RPC_RESPONSE_MAGIC = b"JIBOR1\0\0"
+FILE_RPC_HEADER = struct.Struct("<8sBHI16s")
+FILE_RPC_RESPONSE_HEADER = struct.Struct("<8s16sBI32s")
+FILE_RPC_READ = 1
+FILE_RPC_WRITE = 2
+FILE_RPC_STAT = 3
+FILE_STAT_STRUCT = struct.Struct("<QIIIIIII16s")
 EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
 UPDATE_CONFIRMATION = "FLASH UPDATE"
@@ -501,8 +514,11 @@ def _find_partition_backup(device_tag, partition, size):
             if path.is_symlink():
                 continue
             record = json.loads(path.read_text())
+            recorded_tags = set(record.get("device_tags", ()))
+            if record.get("device_tag"):
+                recorded_tags.add(record["device_tag"])
             if (record.get("kind") != "jibo-partition-backup" or
-                    record.get("device_tag") != device_tag or
+                    device_tag not in recorded_tags or
                     record.get("partition") != partition or record.get("size_bytes") != size):
                 continue
             image = path.parent / "partition.img"
@@ -517,21 +533,113 @@ def _find_partition_backup(device_tag, partition, size):
     return None
 
 
-def _backup_partition_once(dfu_util, port, device_tag, partition, size):
-    existing = _find_partition_backup(device_tag, partition, size)
-    if existing:
-        return existing
+def _ext4_uuid_from_image(image):
+    image = Path(image)
+    if image.is_symlink() or not image.is_file() or image.stat().st_size < 1080:
+        raise DfuError("The saved partition image is too short to contain an ext4 superblock.")
+    with image.open("rb") as source:
+        source.seek(1024)
+        superblock = source.read(1024)
+    if len(superblock) < 120 or superblock[56:58] != b"\x53\xef":
+        raise DfuError("The saved partition image does not contain a valid ext4 superblock.")
+    return superblock[104:120].hex()
+
+
+def _verify_or_bind_partition_identity(backup, identity):
+    if not identity:
+        return
+    if _ext4_uuid_from_image(backup["image"]) != identity.get("ext4_uuid"):
+        raise DfuError("The rollback image ext4 UUID does not match the connected partition.")
+    manifest = Path(backup["manifest"])
+    try:
+        record = json.loads(manifest.read_text())
+        if record.get("sha256") != backup["sha256"]:
+            raise DfuError("The saved partition manifest hash does not match its image.")
+        recorded = record.get("partition_identity")
+        if recorded is not None and recorded != identity:
+            raise DfuError("The saved rollback image belongs to a different partition layout or ext4 UUID.")
+        record["partition_identity"] = identity
+        _private_write(manifest, record)
+    except (OSError, ValueError, TypeError) as exc:
+        raise DfuError("Could not verify the rollback image's partition identity.") from exc
+
+
+def _find_partition_backup_by_hash(partition, size, digest):
+    if not BACKUP_ROOT.is_dir():
+        return None
+    for path in sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json")):
+        try:
+            if path.is_symlink():
+                continue
+            record = json.loads(path.read_text())
+            if (record.get("kind") != "jibo-partition-backup" or
+                    record.get("partition") != partition or
+                    record.get("size_bytes") != size or record.get("sha256") != digest):
+                continue
+            image = path.parent / "partition.img"
+            if image.is_symlink() or not image.is_file() or image.stat().st_size != size:
+                continue
+            if _sha256_file(image) == digest:
+                return {"image": str(image), "sha256": digest, "manifest": str(path),
+                        "status": "existing verified backup reused"}
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+def _bind_partition_backup_identity(backup, device_tag, digest, identity=None):
+    if not _has_unique_device_tag(device_tag) and not identity:
+        return
+    manifest = Path(backup["manifest"])
+    try:
+        record = json.loads(manifest.read_text())
+        if (record.get("kind") != "jibo-partition-backup" or
+                record.get("sha256") != digest or
+                _sha256_file(backup["image"]) != digest):
+            raise DfuError("The saved partition backup changed during identity verification.")
+        if _has_unique_device_tag(device_tag):
+            tags = list(dict.fromkeys([*record.get("device_tags", ()),
+                                       record.get("device_tag"), device_tag]))
+            record["device_tags"] = [tag for tag in tags if tag]
+        if identity:
+            if _ext4_uuid_from_image(backup["image"]) != identity.get("ext4_uuid"):
+                raise DfuError("The saved partition image ext4 UUID does not match the live partition.")
+            record["partition_identity"] = identity
+        _private_write(manifest, record)
+    except (OSError, ValueError, TypeError) as exc:
+        raise DfuError("Could not record the verified robot identity on its partition backup.") from exc
+
+
+def _backup_partition_once(dfu_util, port, device_tag, partition, size, identity=None):
+    if _has_unique_device_tag(device_tag):
+        existing = _find_partition_backup(device_tag, partition, size)
+        if existing:
+            try:
+                _verify_or_bind_partition_identity(existing, identity)
+                return existing
+            except DfuError:
+                # Do not reuse a same-size backup from another formatted extent.
+                pass
     if shutil.disk_usage(BACKUP_ROOT.parent).free < size + 1024 ** 3:
         raise DfuError("Not enough free space to save the original {} partition.".format(partition))
     directory = _new_operation_dir(prefix="partition-backup")
     image = directory / "partition.img"
     try:
         digest = _upload_partition(dfu_util, port, partition, size, image)
+        existing = _find_partition_backup_by_hash(partition, size, digest)
+        if existing:
+            image.unlink(missing_ok=True)
+            directory.rmdir()
+            _bind_partition_backup_identity(existing, device_tag, digest, identity)
+            existing["status"] = "existing verified backup reused"
+            return existing
         manifest = directory / "backup-manifest.json"
         _private_write(manifest, {"schema": 1, "kind": "jibo-partition-backup",
                                   "created_utc": _utc_now(), "device_tag": device_tag,
+                                  "device_tags": [device_tag] if _has_unique_device_tag(device_tag) else [],
                                   "usb_port": port, "partition": partition,
-                                  "size_bytes": size, "sha256": digest, "image": image.name})
+                                  "size_bytes": size, "sha256": digest, "image": image.name,
+                                  "partition_identity": identity})
         return {"image": str(image), "sha256": digest, "manifest": str(manifest),
                 "status": "backup complete"}
     except (DfuError, OSError):
@@ -543,13 +651,20 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size):
         raise
 
 
-def _read_gpt_capacities(dfu_util, port, names):
+def _read_gpt_layout(dfu_util, port, names):
     if MARKER not in names:
         raise DfuError("This DFU loader does not expose the read-only GPT marker.")
     try:
-        return updates.parse_gpt_prefix(bounded.read_dfu_alt_prefix(port))
+        raw = bounded.read_dfu_alt_prefix(port)
+        updates.parse_gpt_prefix(raw)
+        return updates.parse_gpt_layout_prefix(raw)
     except (bounded.BoundedDfuError, updates.UpdateError) as exc:
         raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
+
+
+def _read_gpt_capacities(dfu_util, port, names):
+    layout = _read_gpt_layout(dfu_util, port, names)
+    return {name: details["size_bytes"] for name, details in layout.items()}
 
 
 def probe_dfu_gpt(port=None, dfu_util=None):
@@ -718,10 +833,15 @@ class _NullWriter:
         return len(data)
 
 
-def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks):
-    existing = _find_partition_backup(device_tag, "skills", capacity)
+def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, identity=None):
+    existing = (_find_partition_backup(device_tag, "skills", capacity)
+                if _has_unique_device_tag(device_tag) else None)
     if existing:
-        return existing
+        try:
+            _verify_or_bind_partition_identity(existing, identity)
+            return existing
+        except DfuError:
+            existing = None
     if shutil.disk_usage(BACKUP_ROOT.parent).free < capacity + SKILLS_CHUNK_BYTES:
         raise DfuError("Not enough free space to save the original skills partition.")
     directory = _new_operation_dir(prefix="partition-backup")
@@ -729,12 +849,21 @@ def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks):
     try:
         uploaded = _upload_skills_partition(dfu_util, port, capacity, chunks,
                                             destination=image, workdir=directory)
+        same_bytes = _find_partition_backup_by_hash("skills", capacity, uploaded["sha256"])
+        if same_bytes:
+            image.unlink(missing_ok=True)
+            shutil.rmtree(directory, ignore_errors=True)
+            _bind_partition_backup_identity(same_bytes, device_tag, uploaded["sha256"], identity)
+            same_bytes["status"] = "existing verified backup reused"
+            return same_bytes
         manifest = directory / "backup-manifest.json"
         _private_write(manifest, {"schema": 1, "kind": "jibo-partition-backup",
                                   "created_utc": _utc_now(), "device_tag": device_tag,
+                                  "device_tags": [device_tag] if _has_unique_device_tag(device_tag) else [],
                                   "usb_port": port, "partition": "skills",
                                   "size_bytes": capacity, "sha256": uploaded["sha256"],
-                                  "image": image.name, "chunks": uploaded["chunks"]})
+                                  "image": image.name, "chunks": uploaded["chunks"],
+                                  "partition_identity": identity})
         return {"image": str(image), "sha256": uploaded["sha256"],
                 "manifest": str(manifest), "status": "backup complete"}
     except (DfuError, OSError):
@@ -818,7 +947,8 @@ def _backup_manifest(directory, port, image_path, digest, operations=None, devic
     record = {"schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
               "partition": "var", "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
               "profile": profile, "transport": transport, "usb_state": usb_state,
-              "usb_port": port, "device_tag": device_tag or "usb-port:" + port,
+              "usb_port": port, "device_tag": device_tag or "usb-identity-unavailable",
+              "device_tags": [device_tag] if device_tag else [],
               "image": Path(image_path).name,
               "operations": operations or ["read var partition"]}
     _private_write(Path(directory) / "backup-manifest.json", record)
@@ -845,7 +975,10 @@ def _find_verified_backup(device_tag=None, expected_sha256=None):
             record = json.loads(manifest_path.read_text())
             if record.get("kind") != "jibo-var-backup" or record.get("status") == "failed":
                 continue
-            if device_tag is not None and record.get("device_tag") != device_tag:
+            recorded_tags = set(record.get("device_tags", ()))
+            if record.get("device_tag"):
+                recorded_tags.add(record["device_tag"])
+            if device_tag is not None and device_tag not in recorded_tags:
                 continue
             if expected_sha256 is not None and record.get("sha256") != expected_sha256:
                 continue
@@ -862,6 +995,25 @@ def _find_verified_backup(device_tag=None, expected_sha256=None):
         except (OSError, ValueError, TypeError):
             continue
     return None
+
+
+def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
+    """Associate a stable loader identity only after a full-image hash match."""
+    if not _has_unique_device_tag(device_tag):
+        return
+    manifest = Path(backup["manifest"])
+    try:
+        record = json.loads(manifest.read_text())
+        if (record.get("kind") != "jibo-var-backup" or
+                record.get("sha256") != expected_sha256 or
+                _sha256_file(backup["image"]) != expected_sha256):
+            raise DfuError("The saved var backup changed during identity verification.")
+        tags = list(dict.fromkeys([*record.get("device_tags", ()),
+                                   record.get("device_tag"), device_tag]))
+        record["device_tags"] = [tag for tag in tags if tag]
+        _private_write(manifest, record)
+    except (OSError, ValueError, TypeError) as exc:
+        raise DfuError("Could not record the verified robot identity on its var backup.") from exc
 
 
 def _prepare_current_and_baseline(dfu_util, port, device_tag, directory):
@@ -953,6 +1105,7 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
             if existing and existing["sha256"] == digest:
                 image_path.unlink(missing_ok=True)
                 directory.rmdir()
+                _bind_verified_backup_identity(existing, device_tag, digest)
                 return {"status": "existing verified backup reused", "image": str(existing["image"]),
                         "sha256": digest, "manifest": str(existing["manifest"]),
                         "created_utc": existing["created_utc"]}
@@ -1245,6 +1398,397 @@ def verify_update_write(manifest, partition, port=None, dfu_util=None):
             "temporary_readback_removed": True}
 
 
+def _validate_file_path(path):
+    try:
+        encoded = path.encode("utf-8")
+    except (AttributeError, UnicodeEncodeError) as exc:
+        raise DfuError("File paths must be valid UTF-8.") from exc
+    if not encoded or len(encoded) > 255 or not path.startswith("/") or path == "/":
+        raise DfuError("A file path must be an absolute path of 1 to 255 bytes inside the selected partition.")
+    if any(byte < 0x20 or byte == 0x7f for byte in encoded):
+        raise DfuError("File paths cannot contain NUL or control bytes.")
+    components = encoded[1:].split(b"/")
+    if any(not part or part in (b".", b"..") for part in components):
+        raise DfuError("File paths cannot contain empty, '.' or '..' components.")
+    return encoded
+
+
+def _file_alt_name(partition):
+    if partition not in FILE_LEVEL_PARTITIONS:
+        raise DfuError("File operations support only: " + ", ".join(FILE_LEVEL_PARTITIONS))
+    return "jibo-file-" + partition
+
+
+def _file_loader_context(port, dfu_util, partitions, require_identity):
+    port, names, device_tag, listing = _dfu_context(port, dfu_util, include_output=True)
+    if FILE_LEVEL_MARKER not in names:
+        raise DfuError("The active loader does not advertise the experimental jibo-file-v1 protocol. "
+                       "The bundled pinned loader cannot perform file-level transfers; use the full-var workflow.")
+    missing = [name for name in (_file_alt_name(partition) for partition in partitions)
+               if name not in names]
+    if missing:
+        raise DfuError("The active loader does not expose file operations for: " + ", ".join(missing))
+    return port, names, device_tag, listing
+
+
+def _file_request(path, operation, content=b"", request_id=None):
+    path_bytes = _validate_file_path(path)
+    if operation not in (FILE_RPC_READ, FILE_RPC_WRITE, FILE_RPC_STAT):
+        raise DfuError("Unsupported file request operation.")
+    if operation in (FILE_RPC_READ, FILE_RPC_STAT) and content:
+        raise DfuError("A read or stat request cannot include file contents.")
+    if operation == FILE_RPC_WRITE and not (0 < len(content) <= FILE_LEVEL_MAX_BYTES):
+        raise DfuError("A replacement must contain 1 to {} bytes.".format(FILE_LEVEL_MAX_BYTES))
+    request_id = request_id or secrets.token_bytes(16)
+    if len(request_id) != 16:
+        raise DfuError("A file request ID must contain 16 bytes.")
+    return (FILE_RPC_HEADER.pack(FILE_RPC_MAGIC, operation, len(path_bytes), len(content), request_id) +
+            path_bytes + content), request_id
+
+
+def _decode_file_response(response, request_id):
+    if len(response) < FILE_RPC_RESPONSE_HEADER.size:
+        raise DfuError("The file mailbox returned a truncated response.")
+    magic, response_id, status, data_size, digest = FILE_RPC_RESPONSE_HEADER.unpack_from(response)
+    data = response[FILE_RPC_RESPONSE_HEADER.size:]
+    if magic != FILE_RPC_RESPONSE_MAGIC or response_id != request_id:
+        raise DfuError("The file mailbox response does not match the current request.")
+    if status != 0:
+        raise DfuError("The file mailbox rejected the request with status {}.".format(status))
+    if data_size != len(data) or data_size > FILE_LEVEL_MAX_BYTES:
+        raise DfuError("The file mailbox response has an invalid byte count.")
+    if hashlib.sha256(data).digest() != digest:
+        raise DfuError("The file mailbox response failed its SHA-256 check.")
+    return data
+
+
+def _file_request_transfer(dfu_util, port, partition, request, directory, label):
+    alt = _file_alt_name(partition)
+    request_path = Path(directory) / "file-request.bin"
+    request_path.write_bytes(request)
+    request_path.chmod(0o600)
+    _chown_to_invoking_user(request_path)
+    try:
+        run_with_progress([dfu_util, "-d", "0955:701a", "--path", port, "-a", alt,
+                           "-D", str(request_path)],
+                          timeout=120, label=label,
+                          download_size=len(request))
+    finally:
+        request_path.unlink(missing_ok=True)
+
+
+def _read_partition_file_rpc(dfu_util, port, partition, path, workdir):
+    """Ask the mailbox alt to select and upload one bounded existing file."""
+    workdir = Path(workdir)
+    request, request_id = _file_request(path, FILE_RPC_READ)
+    _file_request_transfer(dfu_util, port, partition,
+                          request, workdir,
+                          "Selecting {} for read".format(path))
+    return _upload_file_response(dfu_util, port, partition, request_id, workdir, path)
+
+
+def _stat_partition_file_rpc(dfu_util, port, partition, path, workdir):
+    request, request_id = _file_request(path, FILE_RPC_STAT)
+    _file_request_transfer(dfu_util, port, partition, request, workdir,
+                           "Selecting {} for stat".format(path))
+    response = _upload_file_response(dfu_util, port, partition, request_id, workdir,
+                                     "stat for {}".format(path))
+    if len(response) != FILE_STAT_STRUCT.size:
+        raise DfuError("The file mailbox returned invalid stat metadata.")
+    (inode, size, allocated_bytes, uid, gid, mode, nlink,
+     extent_count, ext4_uuid) = FILE_STAT_STRUCT.unpack(response)
+    if (not inode or size > FILE_LEVEL_MAX_BYTES or
+            allocated_bytes < size or not allocated_bytes or
+            nlink != 1 or extent_count != 1 or len(ext4_uuid) != 16):
+        raise DfuError("The target must be an existing bounded regular file with one allocated extent and no hard links.")
+    return {"inode": inode, "size_bytes": size, "allocated_bytes": allocated_bytes,
+            "uid": uid, "gid": gid, "mode": mode, "nlink": nlink,
+            "extent_count": extent_count, "ext4_uuid": ext4_uuid.hex()}
+
+
+def _upload_file_response(dfu_util, port, partition, request_id, workdir, label):
+    destination = Path(workdir) / "file-response.bin"
+    destination.unlink(missing_ok=True)
+    try:
+        run_with_progress([dfu_util, "-d", "0955:701a", "--path", port,
+                           "-a", _file_alt_name(partition), "-U", str(destination)],
+                          timeout=120, label="Reading {} from {}".format(label, partition))
+        if not destination.is_file() or destination.stat().st_size > (
+                FILE_LEVEL_MAX_BYTES + FILE_RPC_RESPONSE_HEADER.size):
+            raise DfuError("The file response is missing or exceeds the mailbox size limit.")
+        destination.chmod(0o600)
+        _chown_to_invoking_user(destination)
+        return _decode_file_response(destination.read_bytes(), request_id)
+    finally:
+        destination.unlink(missing_ok=True)
+
+
+def read_partition_file_live(path, partition="var", port=None, dfu_util=None):
+    """Read one existing, bounded file through the experimental DFU mailbox."""
+    _validate_file_path(path)
+    dfu_util = dfu_util or tool("dfu-util")
+    port, _, _, _ = _file_loader_context(port, dfu_util, (partition,), False)
+    with tempfile.TemporaryDirectory(prefix="jibo-file-read-", dir="/tmp") as temp:
+        return _read_partition_file_rpc(dfu_util, port, partition, path, temp)
+
+
+def _partition_file_backup(dfu_util, port, device_tag, partition, size, names,
+                           alt_output, identity):
+    if partition == "var":
+        # backup-var already enforces byte-identical matching for an UNKNOWN serial.
+        record = backup_var(port=port, dfu_util=dfu_util)
+        backup = {"image": record["image"], "sha256": record["sha256"],
+                  "manifest": record["manifest"], "status": record["status"]}
+        _verify_or_bind_partition_identity(backup, identity)
+        return backup
+    if partition == "skills":
+        if "skills" in names:
+            return _backup_partition_once(dfu_util, port, device_tag, partition, size, identity)
+        chunks = _validate_skills_chunk_alternatives(size, names, alt_output)
+        if not chunks:
+            raise DfuError("The loader cannot create a full skills rollback backup.")
+        return _backup_skills_partition_once(dfu_util, port, device_tag, size, chunks, identity)
+    if partition not in names:
+        raise DfuError("The loader cannot create a full {} rollback backup; no bounded partition read is exposed."
+                       .format(partition))
+    return _backup_partition_once(dfu_util, port, device_tag, partition, size, identity)
+
+
+class FileTransaction:
+    """A reviewed batch of existing-file replacements with one baseline per partition."""
+
+    def __init__(self, partitions, port=None, dfu_util=None, out=None):
+        requested = tuple(dict.fromkeys(partitions))
+        if not requested or any(partition not in FILE_LEVEL_PARTITIONS for partition in requested):
+            raise DfuError("Declare one or more supported ext4 partitions: " +
+                           ", ".join(FILE_LEVEL_PARTITIONS))
+        self.partitions = requested
+        self.port = port
+        self.dfu_util = dfu_util or tool("dfu-util")
+        self.out = out
+        self.edits = []
+        self._committed = False
+
+    def replace(self, partition, path, content):
+        if self._committed:
+            raise DfuError("This file transaction has already been committed.")
+        if partition not in self.partitions:
+            raise DfuError("Partition {} was not declared in this file transaction.".format(partition))
+        _validate_file_path(path)
+        if not isinstance(content, bytes) or not (0 < len(content) <= FILE_LEVEL_MAX_BYTES):
+            raise DfuError("A replacement must contain 1 to {} bytes.".format(FILE_LEVEL_MAX_BYTES))
+        self.edits.append({"partition": partition, "path": path, "content": content})
+
+    def commit(self, confirmation=None):
+        if self._committed:
+            raise DfuError("This file transaction has already been committed.")
+        self._committed = True
+        if not self.edits:
+            raise DfuError("The file transaction has no replacements.")
+        touched = tuple(dict.fromkeys(edit["partition"] for edit in self.edits))
+        edit_keys = [(edit["partition"], edit["path"]) for edit in self.edits]
+        if len(set(edit_keys)) != len(edit_keys):
+            raise DfuError("A file transaction can replace each partition path only once.")
+        port, names, device_tag, alt_output = _file_loader_context(
+            self.port, self.dfu_util, touched, True)
+        gpt_layout = _read_gpt_layout(self.dfu_util, port, names)
+        capacities = {name: details["size_bytes"] for name, details in gpt_layout.items()}
+        partition_identities = {}
+        backups = {}
+        directory = _new_operation_dir(self.out, "file-transaction")
+        record_path = directory / "file-transaction.json"
+        record = {"schema": 1, "kind": "jibo-file-transaction", "created_utc": _utc_now(),
+                  "usb_state": "DFU (0955:701a)", "usb_port": port,
+                  "device_tag": device_tag, "partitions": list(touched),
+                  "backups": {}, "writes": [], "status": "preparing baselines"}
+        _private_write(record_path, record)
+        request_dir = Path(tempfile.mkdtemp(prefix="jibo-file-rpc-", dir="/tmp"))
+        os.chmod(request_dir, 0o700)
+        try:
+            # Read the existing files and build the review plan before creating large
+            # rollback images. No device writes occur during this phase.
+            changes = []
+            for edit in self.edits:
+                before_stat = _stat_partition_file_rpc(self.dfu_util, port, edit["partition"],
+                                                       edit["path"], request_dir)
+                identity = partition_identities.get(edit["partition"])
+                if identity is None:
+                    extent = gpt_layout.get(edit["partition"])
+                    if extent is None:
+                        raise DfuError("The live GPT does not contain partition " + edit["partition"])
+                    identity = {"device_tag": device_tag if _has_unique_device_tag(device_tag) else None,
+                                "first_lba": extent["first_lba"],
+                                "last_lba": extent["last_lba"],
+                                "size_bytes": extent["size_bytes"],
+                                "ext4_uuid": before_stat["ext4_uuid"]}
+                    partition_identities[edit["partition"]] = identity
+                elif identity["ext4_uuid"] != before_stat["ext4_uuid"]:
+                    raise DfuError("The selected paths reported different ext4 UUIDs for {}."
+                                   .format(edit["partition"]))
+                if len(edit["content"]) > before_stat["allocated_bytes"]:
+                    raise DfuError("{} needs {} bytes but has only {} bytes allocated; this in-place writer cannot grow files."
+                                   .format(edit["path"], len(edit["content"]),
+                                           before_stat["allocated_bytes"]))
+                current = _read_partition_file_rpc(self.dfu_util, port, edit["partition"],
+                                                   edit["path"], request_dir)
+                if len(current) != before_stat["size_bytes"]:
+                    raise DfuError("{} changed size between stat and read; no write was attempted."
+                                   .format(edit["path"]))
+                change = {"partition": edit["partition"], "path": edit["path"],
+                          "before_size_bytes": len(current),
+                          "candidate_size_bytes": len(edit["content"]),
+                          "before_sha256": hashlib.sha256(current).hexdigest(),
+                          "candidate_sha256": hashlib.sha256(edit["content"]).hexdigest(),
+                          "before_metadata": before_stat}
+                changes.append(change)
+            plan = {"operation": "replace existing files through DFU",
+                    "usb_port": port, "device_tag": device_tag,
+                    "partitions": [{"name": name, **partition_identities[name]} for name in touched],
+                    "rollback_policy": "Create or reuse one verified full-partition baseline for each touched partition before any write.",
+                    "changes": changes,
+                    "status": "awaiting confirmation"}
+            print("\nFile write plan:")
+            print(json.dumps(plan, indent=2))
+            print("The loader updates only existing regular files in place. It does not create or delete files.")
+            if confirmation is None:
+                accepted = _confirm_file_write(None, plan)
+            elif callable(confirmation):
+                accepted = bool(confirmation(plan))
+            else:
+                accepted = _confirm_file_write(confirmation, plan)
+            if not accepted:
+                record.update(status="cancelled", changes=changes)
+                _private_write(record_path, record)
+                return {"status": "cancelled", "operation_directory": str(directory),
+                        "backup_partitions": []}
+
+            # Save exactly the touched partitions, and complete all backups before
+            # the first replacement starts.
+            for partition in touched:
+                size = capacities.get(partition)
+                if not size:
+                    raise DfuError("The live GPT does not contain partition " + partition)
+                backups[partition] = _partition_file_backup(
+                    self.dfu_util, port, device_tag, partition, size, names, alt_output,
+                    partition_identities[partition])
+            record["backups"] = {name: {"image": item["image"], "sha256": item["sha256"],
+                                        "manifest": item["manifest"], "status": item["status"]}
+                                 for name, item in backups.items()}
+            _private_write(record_path, record)
+
+            record.update(status="write started", changes=changes)
+            _private_write(record_path, record)
+            for edit, change in zip(self.edits, changes):
+                write_entry = {**change, "status": "write started"}
+                record["writes"].append(write_entry)
+                _private_write(record_path, record)
+                request, request_id = _file_request(edit["path"], FILE_RPC_WRITE,
+                                                    edit["content"])
+                _file_request_transfer(self.dfu_util, port, edit["partition"], request,
+                                       request_dir, "Writing {} in {}".format(
+                                           edit["path"], edit["partition"]))
+                ack = _upload_file_response(self.dfu_util, port, edit["partition"],
+                                            request_id, request_dir,
+                                            "write acknowledgement for {}".format(edit["path"]))
+                if ack:
+                    raise DfuError("The file mailbox returned data with a write acknowledgement.")
+                actual = _read_partition_file_rpc(self.dfu_util, port, edit["partition"],
+                                                  edit["path"], request_dir)
+                after_stat = _stat_partition_file_rpc(self.dfu_util, port, edit["partition"],
+                                                      edit["path"], request_dir)
+                actual_hash = hashlib.sha256(actual).hexdigest()
+                write_entry["readback_sha256"] = actual_hash
+                write_entry["after_metadata"] = after_stat
+                unchanged_metadata = all(
+                    after_stat[key] == change["before_metadata"][key]
+                    for key in ("inode", "allocated_bytes", "uid", "gid", "mode",
+                                "nlink", "extent_count", "ext4_uuid"))
+                if actual != edit["content"] or len(actual) != after_stat["size_bytes"] or not unchanged_metadata:
+                    write_entry["status"] = "verification failed"
+                    record["status"] = "verification failed"
+                    _private_write(record_path, record)
+                    raise DfuError("{} did not match its file-level readback. The robot remains in DFU; "
+                                   "no additional file write was attempted. Rollback backup: {}".format(
+                                       edit["path"], backups[edit["partition"]]["image"]))
+                write_entry["status"] = "verified"
+                _private_write(record_path, record)
+            record["status"] = "verified"
+            record["reset_after_write"] = False
+            _private_write(record_path, record)
+            return {"status": "verified", "operation_directory": str(directory),
+                    "backups": record["backups"], "writes": record["writes"],
+                    "robot_left_in_dfu": True, "reset_after_write": False}
+        except Exception as exc:
+            if record.get("status") not in ("cancelled", "verification failed", "verified"):
+                started = any(write.get("status") in ("write started", "verified",
+                                                        "verification failed")
+                              for write in record.get("writes", []))
+                record["status"] = "failed" if started else "failed before write"
+                record["error"] = str(exc)
+                _private_write(record_path, record)
+            if isinstance(exc, (DfuError, images.ImageError)):
+                raise
+            raise DfuError(str(exc)) from exc
+        finally:
+            shutil.rmtree(request_dir, ignore_errors=True)
+
+
+def _confirm_file_write(supplied=None, plan=None):
+    if callable(supplied):
+        try:
+            return bool(supplied(plan))
+        except Exception as exc:
+            raise DfuError("The file write confirmation could not be completed: " + str(exc)) from exc
+    if supplied is not None:
+        return bool(supplied)
+    try:
+        if sys.stdin.isatty():
+            response = input("Apply these file replacements? [y/N] ").strip().lower()
+        else:
+            with open("/dev/tty", "r+", encoding="utf-8") as terminal:
+                terminal.write("Apply these file replacements? [y/N] ")
+                terminal.flush()
+                response = terminal.readline().strip().lower()
+    except OSError as exc:
+        raise DfuError("Use --yes or an interactive terminal confirmation before writing files.") from exc
+    return response in ("y", "yes")
+
+
+def write_partition_file_live(partition, path, content, port=None, dfu_util=None,
+                              out=None, confirmation=None):
+    transaction = FileTransaction((partition,), port, dfu_util, out)
+    transaction.replace(partition, path, content)
+    return transaction.commit(confirmation)
+
+
+def set_mode_file_live(mode, partition="var", port=None, dfu_util=None,
+                       out=None, confirmation=None):
+    if mode not in images.MODE_VALUES:
+        raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
+    current = read_partition_file_live(images.VAR_MODE_PATH, partition, port, dfu_util)
+    data = images._json_mode(current)
+    previous = data["mode"]
+    data["mode"] = mode
+    replacement = (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+    result = write_partition_file_live(partition, images.VAR_MODE_PATH, replacement,
+                                       port, dfu_util, out, confirmation)
+    result.update(previous_mode=previous, mode=mode)
+    return result
+
+
+def configure_wifi_file_live(ssid, password=None, open_network=False, partition="var",
+                             port=None, dfu_util=None, out=None, confirmation=None):
+    try:
+        current = read_partition_file_live(images.VAR_WIFI_PATH, partition, port, dfu_util)
+        replacement, count = images.build_wifi_config(current, ssid, password, open_network)
+        result = write_partition_file_live(partition, images.VAR_WIFI_PATH, replacement,
+                                           port, dfu_util, out, confirmation)
+        result["wifi_network_count"] = count
+        return result
+    finally:
+        password = None
+
+
 def set_mode_live(mode, port=None, dfu_util=None, out=None, confirmation=None):
     if mode not in images.MODE_VALUES:
         raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
@@ -1412,6 +1956,41 @@ def main(argv=None):
     _add_dfu_argument(wifi_live)
     _add_operation_argument(wifi_live)
     _add_confirmation_argument(wifi_live)
+    read_file = sub.add_parser("read-partition-file",
+                               help="Read one bounded file through the experimental file mailbox")
+    read_file.add_argument("path", help="Absolute path inside the selected ext4 partition")
+    read_file.add_argument("--partition", required=True, choices=FILE_LEVEL_PARTITIONS)
+    read_file.add_argument("--out", type=Path, required=True, help="New private output file")
+    _add_device_arguments(read_file)
+    _add_dfu_argument(read_file)
+    write_file = sub.add_parser("write-partition-file",
+                                help="Replace one existing file through the experimental file mailbox")
+    write_file.add_argument("path", help="Absolute path inside the selected ext4 partition")
+    write_file.add_argument("image", type=Path, help="Local replacement file")
+    write_file.add_argument("--partition", required=True, choices=FILE_LEVEL_PARTITIONS)
+    _add_device_arguments(write_file)
+    _add_dfu_argument(write_file)
+    _add_operation_argument(write_file)
+    write_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
+    mode_file = sub.add_parser("set-mode-file",
+                               help="Set mode using the experimental file-level protocol")
+    mode_file.add_argument("--mode", required=True, choices=images.MODE_VALUES)
+    mode_file.add_argument("--partition", default="var", choices=FILE_LEVEL_PARTITIONS)
+    _add_device_arguments(mode_file)
+    _add_dfu_argument(mode_file)
+    _add_operation_argument(mode_file)
+    mode_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
+    wifi_file = sub.add_parser("configure-wifi-file",
+                               help="Add Wi-Fi using the experimental file-level protocol")
+    wifi_file.add_argument("--ssid", required=True)
+    wifi_file.add_argument("--partition", default="var", choices=FILE_LEVEL_PARTITIONS)
+    wifi_file.add_argument("--open-network", action="store_true")
+    wifi_file.add_argument("--password-stdin", action="store_true",
+                           help="Read the protected network password from stdin")
+    _add_device_arguments(wifi_file)
+    _add_dfu_argument(wifi_file)
+    _add_operation_argument(wifi_file)
+    wifi_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
     write = sub.add_parser("write-var", help="Back up var, write an edited image, and verify its readback")
     write.add_argument("image", type=Path)
     _add_device_arguments(write)
@@ -1470,6 +2049,39 @@ def main(argv=None):
             password = _password_from_args(args)
             result = configure_wifi_live(args.ssid, password, args.open_network, args.port,
                                          tool("dfu-util", args.dfu_util), args.operation_dir, args.confirm)
+            password = None
+        elif args.command == "read-partition-file":
+            payload = read_partition_file_live(args.path, args.partition, args.port,
+                                               tool("dfu-util", args.dfu_util))
+            output = args.out.expanduser().resolve()
+            if output.exists() or output.is_symlink():
+                raise DfuError("Output already exists; choose a new path: " + str(output))
+            output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            output.write_bytes(payload)
+            output.chmod(0o600)
+            _chown_to_invoking_user(output)
+            result = {"status": "read", "partition": args.partition, "path": args.path,
+                      "output": str(output), "size_bytes": len(payload),
+                      "sha256": hashlib.sha256(payload).hexdigest()}
+        elif args.command == "write-partition-file":
+            source = args.image.expanduser().resolve()
+            if source.is_symlink() or not source.is_file():
+                raise DfuError("Replacement file does not exist or is a symbolic link: " + str(source))
+            if not (0 < source.stat().st_size <= FILE_LEVEL_MAX_BYTES):
+                raise DfuError("Replacement files must contain 1 to {} bytes.".format(
+                    FILE_LEVEL_MAX_BYTES))
+            result = write_partition_file_live(
+                args.partition, args.path, source.read_bytes(), args.port,
+                tool("dfu-util", args.dfu_util), args.operation_dir, args.yes)
+        elif args.command == "set-mode-file":
+            result = set_mode_file_live(args.mode, args.partition, args.port,
+                                        tool("dfu-util", args.dfu_util),
+                                        args.operation_dir, args.yes)
+        elif args.command == "configure-wifi-file":
+            password = _password_from_args(args)
+            result = configure_wifi_file_live(
+                args.ssid, password, args.open_network, args.partition, args.port,
+                tool("dfu-util", args.dfu_util), args.operation_dir, args.yes)
             password = None
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
