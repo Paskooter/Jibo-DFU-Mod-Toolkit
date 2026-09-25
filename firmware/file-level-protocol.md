@@ -75,5 +75,10 @@ file's data block 494272 is offset 63 in that group; the mode and Wi-Fi extents
 are both allocated. These fixture facts are asserted without including the
 private backup image in the repository.
 
-This is a source/build candidate only. It is not enabled by the pinned loader
-and still requires hardware validation before operational use.
+On 2026-09-25, Moth entered DFU with this candidate and a read-only request for
+`/jibo/mode.json` returned `{"mode":"normal"}` (17 bytes, SHA-256
+`fa76e6a145e80d3ef8d955abd5a17426feba569df832d2cf6af7dbd5b86c5240`).
+The saved Moth var image from 2026-09-24 contained `{"mode":"int-developer"}`;
+because the files differ, that older image cannot serve as a same-state byte
+comparison for the live read. No direct file write has been tested on hardware.
+The candidate is not enabled by the pinned loader.
