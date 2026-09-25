@@ -91,9 +91,11 @@ class UpdatePackageTests(unittest.TestCase):
             capacities = {name: size for name, size in updates.KNOWN_CAPACITIES.items()}
             capacities["skills"] = 10_991_139_328
             transfers = []
+            download_sizes = {}
 
-            def transfer(argv, timeout, label):
+            def transfer(argv, timeout, label, download_size=None):
                 transfers.append(argv)
+                download_sizes[argv[argv.index("-a") + 1]] = download_size
 
             names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"]
             alt_output = '\n'.join('Found DFU: alt={}, name="{}"'.format(index, name)
@@ -114,6 +116,8 @@ class UpdatePackageTests(unittest.TestCase):
                                                   confirmation="FLASH UPDATE")
             written = [argv[argv.index("-a") + 1] for argv in transfers if "-D" in argv]
             self.assertEqual(written, ["rootfsA", "rootfsB", "services", "skills"])
+            self.assertEqual(download_sizes,
+                             {name: capacities[name] for name in written})
             var_backup.assert_called_once_with("1-1", "dfu-util")
             backup.assert_not_called()
             skills_backup.assert_not_called()
@@ -187,11 +191,13 @@ class UpdatePackageTests(unittest.TestCase):
             prepared = {"rootfsA": rootfs, "rootfsB": rootfs,
                         "services": services, "skills": skills}
             written = {}
+            download_sizes = {}
 
-            def transfer(argv, timeout, label):
+            def transfer(argv, timeout, label, download_size=None):
                 if "-D" in argv:
                     alternative = argv[argv.index("-a") + 1]
                     written[alternative] = Path(argv[argv.index("-D") + 1]).read_bytes()
+                    download_sizes[alternative] = download_size
 
             def upload(_dfu_util, _port, alternative, size, destination):
                 payload = written[alternative]
@@ -224,6 +230,7 @@ class UpdatePackageTests(unittest.TestCase):
             backup.assert_not_called()
             self.assertEqual([written[name] for name in chunk_names],
                              [skills_payload[:1024], skills_payload[1024:2048], skills_payload[2048:]])
+            self.assertEqual([download_sizes[name] for name in chunk_names], [1024, 1024, 512])
             self.assertEqual(result["status"], "verified; reset requested")
             manifest = json.loads((operation / "update-manifest.json").read_text())
             skills_write = next(item for item in manifest["writes"] if item["partition"] == "skills")

@@ -37,6 +37,20 @@ class SafeWorkflowTests(unittest.TestCase):
         self.assertIn("Reading sample partition...", progress.getvalue())
         self.assertIn("Read sample partition in", progress.getvalue())
 
+    def test_dfu_download_shows_byte_progress_in_terminal(self):
+        class TerminalOutput(io.StringIO):
+            def isatty(self):
+                return True
+
+        progress = TerminalOutput()
+        command = ("import sys,time; "
+                   "sys.stderr.write('Download [==========]  50%     52428800 bytes\\r'); "
+                   "sys.stderr.flush(); time.sleep(0.4)")
+        with patch.object(j.sys, "stderr", progress):
+            j.run_with_progress([sys.executable, "-c", command], timeout=5,
+                                label="Writing sample partition", download_size=104_857_600)
+        self.assertIn("50.0% | 50.0/100.0 MiB", progress.getvalue())
+
     def test_progress_tracks_private_temporary_output(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "var.img"

@@ -133,15 +133,29 @@ def _byte_progress_from_log(log):
     return min(transferred, total), total
 
 
+def _dfu_download_progress_from_log(log, expected_size):
+    """Read dfu-util's latest Download byte count from its carriage-return log."""
+    try:
+        size = os.fstat(log.fileno()).st_size
+        if size <= 0:
+            return None
+        start = max(0, size - 2048)
+        tail = os.pread(log.fileno(), size - start, start)
+    except (AttributeError, OSError, ValueError):
+        return None
+    matches = re.findall(rb"Download\s+\[[^\]\r\n]*\]\s+\d+%\s+(\d+)\s+bytes", tail)
+    return min(int(matches[-1]), expected_size) if matches else None
+
+
 def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None,
-                      byte_progress=False):
-    """Run a quiet transfer with a terminal spinner and retain output for errors."""
+                      byte_progress=False, download_size=None):
+    """Run a quiet transfer with progress when byte counts are available."""
     started = time.monotonic()
     terminal = sys.stderr
     interactive = terminal.isatty()
     if not interactive:
         print(label + "...", file=terminal, flush=True)
-    elif progress_path is not None and progress_size:
+    elif (progress_path is not None and progress_size) or download_size:
         print(label, file=terminal, flush=True)
 
     try:
@@ -162,6 +176,8 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                         timed_out = True
                         break
                     byte_transfer = _byte_progress_from_log(log) if byte_progress else None
+                    downloaded = (_dfu_download_progress_from_log(log, download_size)
+                                  if download_size else None)
                     if byte_transfer is not None:
                         transferred, total = byte_transfer
                         filled = int(20 * transferred / total)
@@ -169,14 +185,18 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                             "#" * filled, "-" * (20 - filled),
                             100 * transferred / total,
                             transferred // 1024, total // 1024, elapsed)
-                    elif progress_path is not None and progress_size:
-                        transferred = min(_transfer_output_size(progress_path), progress_size)
+                    elif download_size or (progress_path is not None and progress_size):
+                        total_size = download_size or progress_size
+                        if download_size:
+                            transferred = downloaded if downloaded is not None else 0
+                        else:
+                            transferred = min(_transfer_output_size(progress_path), total_size)
                         mib = 1024 * 1024
-                        filled = int(20 * transferred / progress_size)
+                        filled = int(20 * transferred / total_size)
                         status = "[{}{}] {:5.1f}% | {:.1f}/{:.1f} MiB | {:.2f} MiB/s | {:0.0f}s".format(
                             "#" * filled, "-" * (20 - filled),
-                            100 * transferred / progress_size,
-                            transferred / mib, progress_size / mib,
+                            100 * transferred / total_size,
+                            transferred / mib, total_size / mib,
                             transferred / mib / max(elapsed, 0.001), elapsed)
                     else:
                         status = "{} {} {:0.0f}s".format(label, spinner[frames % len(spinner)], elapsed)
@@ -185,7 +205,7 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
                         terminal.flush()
                         last_status_length = len(status)
                         frames += 1
-                    elif (progress_path is not None or byte_transfer is not None) and \
+                    elif (progress_path is not None or byte_transfer is not None or download_size) and \
                             elapsed - (last_report - started) >= 5:
                         print(status, file=terminal, flush=True)
                         last_report = time.monotonic()
@@ -751,6 +771,7 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                     [dfu_util, "-d", "0955:701a", "--path", port,
                      "-a", chunk["name"], "-D", str(candidate_piece)],
                     timeout=14400,
+                    download_size=chunk["size_bytes"],
                     label="Writing skills chunk {}/{} ({})".format(
                         index, len(chunks), chunk["name"]))
                 readback = temporary / "readback.img"
@@ -1013,7 +1034,8 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     try:
         run_with_progress(
             [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-D", str(candidate)],
-            timeout=900, label="Writing the edited 500 MiB var partition over USB")
+            timeout=900, label="Writing the edited 500 MiB var partition over USB",
+            download_size=EXPECTED_VAR_SIZE)
         readback = Path(directory) / "readback-var.img"
         readback_hash = _upload_var(dfu_util, port, readback)
         record["readback_sha256"] = readback_hash
@@ -1138,6 +1160,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     run_with_progress(
                         [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
                          "-D", str(candidate)], timeout=14400,
+                        download_size=capacities[name],
                         label="Writing {} ({} bytes)".format(name, capacities[name]))
                     with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
                         readback = Path(readback_dir) / "partition.img"
