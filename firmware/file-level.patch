@@ -789,7 +789,7 @@
 +#endif
 --- /dev/null
 +++ b/fs/ext4/jibo_file_rpc.c
-@@ -0,0 +1,1068 @@
+@@ -0,0 +1,1112 @@
 +/* SPDX-License-Identifier: GPL-2.0+ */
 +/*
 + * Bounded Jibo file mailbox.  This intentionally does not call ext4fs_init(),
@@ -1160,8 +1160,18 @@
 +	return 0;
 +}
 +
-+static int jibo_block_is_reserved(u64 block, const u8 *super,
-+				  u32 blocksize, u64 group_count)
++static int jibo_ranges_overlap(u64 start, u64 count,
++			       u64 other_start, u64 other_count)
++{
++	if (!count || !other_count || start > (~(u64)0) - count ||
++	    other_start > (~(u64)0) - other_count)
++		return 1;
++	return start < other_start + other_count &&
++		other_start < start + count;
++}
++
++static int jibo_range_is_reserved(u64 start, u64 count, const u8 *super,
++				 u32 blocksize, u64 group_count)
 +{
 +	u64 first = get_unaligned_le32(super + 20);
 +	u64 blocks_per_group = get_unaligned_le32(super + 32);
@@ -1173,13 +1183,16 @@
 +	int meta_bg = !!(incompat & 0x0010);
 +	u64 group;
 +
-+	if (!block || !blocks_per_group || !group_count)
++	if (!count || start > (~(u64)0) - count || !blocks_per_group ||
++	    !group_count || jibo_ranges_overlap(start, count, 0, 1))
 +		return 1;
 +	descriptor_blocks = (group_count * sizeof(struct ext2_block_group) +
 +			     blocksize - 1) / blocksize;
 +	descriptors_per_block = blocksize / sizeof(struct ext2_block_group);
 +	if (!descriptors_per_block || first_meta_bg > descriptor_blocks ||
-+	    (meta_bg && (compat & JIBO_EXT4_RESIZE_INODE)))
++	    (meta_bg && (compat & JIBO_EXT4_RESIZE_INODE)) ||
++	    (reserved_gdt &&
++	     (!(compat & JIBO_EXT4_RESIZE_INODE) || meta_bg)))
 +		return 1;
 +
 +	/* Protect primary classic descriptors and their backup copies. */
@@ -1188,12 +1201,13 @@
 +		u64 i;
 +
 +		for (i = 0; i < copy_count; ++i)
-+			if (block == first + 1 + i)
++			if (jibo_ranges_overlap(start, count, first + 1 + i, 1))
 +				return 1;
 +		if (reserved_gdt && !meta_bg &&
 +		    (compat & JIBO_EXT4_RESIZE_INODE) &&
-+		    block >= first + 1 + descriptor_blocks &&
-+		    block - (first + 1 + descriptor_blocks) < reserved_gdt)
++		    jibo_ranges_overlap(start, count,
++				       first + 1 + descriptor_blocks,
++				       reserved_gdt))
 +			return 1;
 +	}
 +
@@ -1203,18 +1217,21 @@
 +
 +		if (!jibo_group_has_super(group, super))
 +			continue;
-+		if (block == group_start)
++		if (jibo_ranges_overlap(start, count, group_start, 1))
 +			return 1;
 +		copy_count = meta_bg ? first_meta_bg : descriptor_blocks;
 +		/* Classic descriptor backups stop at the first meta-group. */
 +		if (meta_bg && group >= first_meta_bg * descriptors_per_block)
 +			copy_count = 0;
-+		if (block > group_start && block - group_start <= copy_count)
++		if (copy_count &&
++		    jibo_ranges_overlap(start, count, group_start + 1,
++					copy_count))
 +			return 1;
 +		if (!meta_bg && reserved_gdt &&
 +		    (compat & JIBO_EXT4_RESIZE_INODE) &&
-+		    block > group_start + descriptor_blocks &&
-+		    block - (group_start + descriptor_blocks + 1) < reserved_gdt)
++		    jibo_ranges_overlap(start, count,
++				       group_start + 1 + descriptor_blocks,
++				       reserved_gdt))
 +			return 1;
 +	}
 +
@@ -1238,12 +1255,18 @@
 +				location = first + replica * blocks_per_group;
 +				if (jibo_group_has_super(replica, super))
 +					location++;
-+				if (block == location)
++				if (jibo_ranges_overlap(start, count, location, 1))
 +					return 1;
 +			}
 +		}
 +	}
 +	return 0;
++}
++
++static int jibo_block_is_reserved(u64 block, const u8 *super,
++				  u32 blocksize, u64 group_count)
++{
++	return jibo_range_is_reserved(block, 1, super, blocksize, group_count);
 +}
 +
 +static int jibo_file_data_block_safe(u64 block, u32 blocksize, u8 *super)
@@ -1304,6 +1327,13 @@
 +		    (block_bitmap >= inode_table && block_bitmap < inode_table_end) ||
 +		    (inode_bitmap >= inode_table && inode_bitmap < inode_table_end))
 +			return -1;
++		if (jibo_block_is_reserved(block_bitmap, super, blocksize,
++					   group_count) ||
++		    jibo_block_is_reserved(inode_bitmap, super, blocksize,
++					   group_count) ||
++		    jibo_range_is_reserved(inode_table, inode_table_blocks,
++					   super, blocksize, group_count))
++			return -1;
 +		if (block == block_bitmap || block == inode_bitmap ||
 +		    (block >= inode_table && block < inode_table_end))
 +			return -1;
@@ -1338,7 +1368,7 @@
 +	u8 *bitmap = NULL;
 +	u32 total_inodes, inodes_per_group, blocks_per_group;
 +	u32 inode_size, index, group;
-+	u64 first, total_blocks, group_start, group_end;
++	u64 first, total_blocks, group_count, group_start, group_end;
 +	u64 block_bitmap, inode_bitmap, inode_table, inode_table_blocks;
 +	u64 sector;
 +	u16 flags;
@@ -1354,6 +1384,10 @@
 +	if (!ino || ino > total_inodes || !inodes_per_group || !blocks_per_group ||
 +	    inodes_per_group > blocksize * 8U || !fs->dev_desc ||
 +	    blocksize % fs->dev_desc->blksz || !inode_size)
++		return -1;
++	group_count = (total_blocks - first + blocks_per_group - 1) /
++		blocks_per_group;
++	if (!group_count || group_count > 4096)
 +		return -1;
 +	index = ino - 1;
 +	group = index / inodes_per_group;
@@ -1379,6 +1413,11 @@
 +	    inode_bitmap == inode_table ||
 +	    (block_bitmap >= inode_table && block_bitmap < inode_table + inode_table_blocks) ||
 +	    (inode_bitmap >= inode_table && inode_bitmap < inode_table + inode_table_blocks))
++		return -1;
++	if (jibo_block_is_reserved(block_bitmap, super, blocksize, group_count) ||
++	    jibo_block_is_reserved(inode_bitmap, super, blocksize, group_count) ||
++	    jibo_range_is_reserved(inode_table, inode_table_blocks, super,
++				   blocksize, group_count))
 +		return -1;
 +	if ((u64)(index % inodes_per_group) >= blocksize * 8U ||
 +	    inode_bitmap > (~(u64)0) / (blocksize / fs->dev_desc->blksz))
@@ -1449,6 +1488,11 @@
 +	    inode_bitmap == inode_table ||
 +	    (block_bitmap >= inode_table && block_bitmap < inode_table + table_blocks) ||
 +	    (inode_bitmap >= inode_table && inode_bitmap < inode_table + table_blocks))
++		return -1;
++	if (jibo_block_is_reserved(block_bitmap, super, blocksize, group_count) ||
++	    jibo_block_is_reserved(inode_bitmap, super, blocksize, group_count) ||
++	    jibo_range_is_reserved(inode_table, table_blocks, super, blocksize,
++				   group_count))
 +		return -1;
 +	inodes_per_block = blocksize / inode_size;
 +	expected = inode_table + (index % inodes_per_group) / inodes_per_block;

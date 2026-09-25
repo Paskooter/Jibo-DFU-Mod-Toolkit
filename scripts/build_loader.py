@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--cid-serial-candidate", action="store_true",
                         help="include experimental eMMC-CID USB serial identity support")
     parser.add_argument("--file-level-candidate", action="store_true",
-                        help="include the experimental ext4 file-RPC mailbox candidate")
+                        help="include the experimental file-RPC mailbox and stable CID serial")
     args = parser.parse_args()
     if args.out.exists():
         parser.error("Build directory already exists")

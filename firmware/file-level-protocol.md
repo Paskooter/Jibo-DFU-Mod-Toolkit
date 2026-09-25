@@ -50,11 +50,12 @@ partitions are exposed, and writes can replace existing regular files up to
 link. The inode, data block, block bitmap, inode bitmap, group descriptors,
 and journal are checked before a write; symlink traversal, unallocated inodes
 or blocks, uninitialized groups, and superblock/GDT/reserved-GDT blocks are
-rejected. META_BG descriptor locations and group descriptor checksums are
-validated. No create, delete, rename, symlink, hole, multi-extent, or
-allocation operation is provided. The ext4 volume must have supported feature
-bits and a clean superblock/journal. The writer bypasses ext4's journal
-entirely. It writes the existing data block and inode-size field directly
+rejected. Group bitmap and inode-table pointers are also rejected if they
+overlap those reserved ranges. META_BG descriptor locations and group
+descriptor checksums are validated. No create, delete, rename, symlink, hole,
+multi-extent, or allocation operation is provided. The ext4 volume must have
+supported feature bits and a clean superblock/journal. The writer bypasses
+ext4's journal entirely. It writes the existing data block and inode-size field directly
 with checked block I/O, preserving the rest of the inode; host readback
 checks content and metadata after each write. This has a power-loss window
 between the data and inode writes. Recover by restoring the transaction's
