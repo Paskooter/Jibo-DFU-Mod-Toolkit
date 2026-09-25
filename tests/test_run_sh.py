@@ -31,6 +31,7 @@ class RunLauncherTests(unittest.TestCase):
         self.repo.mkdir()
         shutil.copy2(RUN_SH, self.repo / "run.sh")
         (self.repo / "run.sh").chmod(0o755)
+        (self.repo / "run.ps1").write_text("# mocked Windows USB helper\n")
 
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts" / "package.py").write_text("# intercepted by python3 stub\n")
@@ -69,6 +70,23 @@ class RunLauncherTests(unittest.TestCase):
         # the final .pyz invocation without running application code.
         common = r'''#!/bin/sh
 name=${0##*/}
+if [ "$name" = python3 ] && [ "${WSL_TEST_WAIT_FOR_MONITOR:-0}" = 1 ]; then
+  case "${1-}" in
+    *.pyz)
+      seen=0
+      attempts=0
+      while [ "$attempts" -lt 200 ]; do
+        if /bin/grep -q -- '-MonitorUsb' "$JIBO_TEST_TRACE" 2>/dev/null; then
+          seen=1
+          break
+        fi
+        /bin/sleep 0.01
+        attempts=$((attempts + 1))
+      done
+      [ "$seen" = 1 ] || exit 71
+      ;;
+  esac
+fi
 printf '%s %s\n' "$name" "$*" >> "$JIBO_TEST_TRACE"
 case "$name" in
   python3)
@@ -131,6 +149,13 @@ case "$name" in
     esac
     exit 0
     ;;
+  wslpath)
+    printf '%s\n' 'C:\Temp\run.ps1'
+    exit 0
+    ;;
+  powershell.exe)
+    exit 0
+    ;;
   sudo)
     if [ "${1-}" = -v ]; then
       [ "${FAIL_SUDO_VALIDATE:-0}" = 1 ] && exit 61
@@ -154,6 +179,7 @@ exit 0
             "arm-none-eabi-as", "arm-none-eabi-nm", "arm-none-eabi-objcopy", "arm-none-eabi-objdump",
             "dfu-util", "apt-get", "sudo", "dpkg-query", "pkg-config", "patch",
             "dirname", "mkdir", "mktemp", "mv", "rm", "uname",
+            "wslpath", "powershell.exe",
         }
         for name in names:
             path = self.bin / name
@@ -278,6 +304,46 @@ exit 0
         events = self.events()
         self.assertIn("sudo -v", events)
         self.assertIsNone(self.launch_index(events), events)
+
+    def test_wsl_runs_one_shot_usb_attach_then_monitor_before_tool(self):
+        result = self.run_launcher(create_pyz=True, extra_env={
+            "WSL_DISTRO_NAME": "Ubuntu",
+            "JIBO_WINDOWS_POWERSHELL": str(self.bin / "powershell.exe"),
+            "WSL_TEST_WAIT_FOR_MONITOR": "1",
+        })
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events()
+        path_index = next((i for i, event in enumerate(events)
+                           if event.startswith("wslpath -w ")), None)
+        one_shot_index = next((i for i, event in enumerate(events)
+                               if event.startswith("powershell.exe ")
+                               and "-UsbOnly" in event and "-MonitorUsb" not in event), None)
+        monitor_index = next((i for i, event in enumerate(events)
+                             if event.startswith("powershell.exe ") and "-MonitorUsb" in event), None)
+        launch_index = self.launch_index(events)
+        self.assertIsNotNone(path_index, events)
+        self.assertIsNotNone(one_shot_index, events)
+        self.assertIsNotNone(monitor_index, events)
+        self.assertIsNotNone(launch_index, events)
+        self.assertLess(path_index, one_shot_index, events)
+        self.assertLess(one_shot_index, monitor_index, events)
+        self.assertLess(monitor_index, launch_index, events)
+        self.assertIn("-File C:\\Temp\\run.ps1", events[one_shot_index])
+        self.assertIn("-Distro Ubuntu", events[one_shot_index])
+        self.assertIn("-Distro Ubuntu", events[monitor_index])
+
+    def test_manual_usb_setting_skips_wsl_powershell_handoff(self):
+        result = self.run_launcher(create_pyz=True, extra_env={
+            "WSL_DISTRO_NAME": "Ubuntu",
+            "JIBO_MANUAL_USB": "1",
+            "JIBO_WINDOWS_POWERSHELL": str(self.bin / "powershell.exe"),
+        })
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events()
+        self.assertTrue(any(event.startswith("python3 ") and ".pyz" in event for event in events), events)
+        self.assertFalse(any(event.startswith(("wslpath ", "powershell.exe ")) for event in events), events)
 
 
 if __name__ == "__main__":
