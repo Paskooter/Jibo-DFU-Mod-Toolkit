@@ -161,6 +161,37 @@ class ShofelTransportTests(unittest.TestCase):
         self.assertTrue(manifest["device_tag"].startswith("serial-sha256:"))
         self.assertNotIn("synthetic-device", json.dumps(manifest))
 
+    def test_unknown_usb_serial_requires_current_var_before_backup_reuse(self):
+        old = self.backups / "old-robot"
+        old.mkdir(parents=True)
+        (old / "var.img").write_bytes(b"M" * len(self.var))
+        old_hash = hashlib.sha256((old / "var.img").read_bytes()).hexdigest()
+        (old / "backup-manifest.json").write_text(json.dumps({
+            "kind": "jibo-var-backup", "image": "var.img", "sha256": old_hash,
+            "device_tag": "serial-sha256:" + hashlib.sha256(b"UNKNOWN").hexdigest()}))
+        listing = ('Found DFU: alt=0, name="jibo-dfu-v1"\n'
+                   'Found DFU: alt=1, name="var", serial="UNKNOWN"\n')
+
+        def upload(_dfu_util, _port, destination):
+            Path(destination).write_bytes(self.var)
+            return hashlib.sha256(self.var).hexdigest()
+
+        with patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "dfu"}]), \
+                patch.object(toolkit, "dfu_alternatives",
+                             return_value=([toolkit.MARKER, "var"], listing)), \
+                patch.object(toolkit, "BACKUP_ROOT", self.backups), \
+                patch.object(toolkit, "EXPECTED_VAR_SIZE", len(self.var)), \
+                patch.object(toolkit, "_upload_var", side_effect=upload) as read_var:
+            result = toolkit.backup_var(port="1-2", dfu_util="dfu-util")
+            repeat = toolkit.backup_var(port="1-2", dfu_util="dfu-util")
+
+        self.assertEqual(read_var.call_count, 2)
+        self.assertEqual(result["status"], "backup complete")
+        self.assertNotEqual(Path(result["image"]), old / "var.img")
+        self.assertEqual(Path(result["image"]).read_bytes(), self.var)
+        self.assertEqual(repeat["image"], result["image"])
+        self.assertEqual(len(list(self.backups.glob("var-backup-*/var.img"))), 1)
+
     def test_var_backup_discards_a_short_dfu_read(self):
         listing = ('Found DFU: alt=0, name="jibo-dfu-v1"\n'
                    'Found DFU: alt=1, name="var", size=4096\n')

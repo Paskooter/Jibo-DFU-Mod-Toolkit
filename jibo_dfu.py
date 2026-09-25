@@ -441,10 +441,12 @@ def _dfu_context(port, dfu_util, include_output=False):
         raise DfuError("The device reports a var size of " + str(reported) +
                        " bytes; this candidate profile expects 524288000. No transfer was attempted.")
     serial = re.search(r'serial="([^"]*)"', output)
-    if serial and serial.group(1).strip():
-        device_tag = "serial-sha256:" + hashlib.sha256(serial.group(1).strip().encode("utf-8")).hexdigest()
+    serial_value = serial.group(1).strip() if serial else ""
+    if serial_value and serial_value.lower() not in {"unknown", "none", "null", "n/a"} and \
+            serial_value.strip("0"):
+        device_tag = "serial-sha256:" + hashlib.sha256(serial_value.encode("utf-8")).hexdigest()
     else:
-        device_tag = "usb-port:" + selected["port"]
+        device_tag = "usb-identity-unavailable"
     context = (selected["port"], names, device_tag)
     return context + (output,) if include_output else context
 
@@ -823,7 +825,14 @@ def _backup_manifest(directory, port, image_path, digest, operations=None, devic
     return record
 
 
-def _find_verified_backup(device_tag=None):
+def _has_unique_device_tag(device_tag):
+    return bool(device_tag and device_tag.startswith("serial-sha256:") and
+                device_tag != "serial-sha256:" + hashlib.sha256(b"UNKNOWN").hexdigest())
+
+
+def _find_verified_backup(device_tag=None, expected_sha256=None):
+    if device_tag is None and expected_sha256 is None:
+        return None
     if not BACKUP_ROOT.is_dir():
         return None
     manifests = sorted(BACKUP_ROOT.rglob("backup-manifest.json"),
@@ -837,6 +846,8 @@ def _find_verified_backup(device_tag=None):
             if record.get("kind") != "jibo-var-backup" or record.get("status") == "failed":
                 continue
             if device_tag is not None and record.get("device_tag") != device_tag:
+                continue
+            if expected_sha256 is not None and record.get("sha256") != expected_sha256:
                 continue
             filename = Path(record.get("image", "var.img")).name
             image_path = manifest_path.parent / filename
@@ -856,7 +867,8 @@ def _find_verified_backup(device_tag=None):
 def _prepare_current_and_baseline(dfu_util, port, device_tag, directory):
     current = Path(directory) / "current-var.img"
     current_hash = _upload_var(dfu_util, port, current)
-    baseline = _find_verified_backup(device_tag)
+    baseline = (_find_verified_backup(device_tag) if _has_unique_device_tag(device_tag) else
+                _find_verified_backup(expected_sha256=current_hash))
     if baseline:
         return {"before": current, "before_sha256": current_hash,
                 "baseline": baseline["image"], "baseline_sha256": baseline["sha256"],
@@ -924,7 +936,8 @@ def _raise_live_operation_error(directory, operation, state, error):
 def backup_var(port=None, dfu_util=None, out=None, refresh=False):
     dfu_util = dfu_util or tool("dfu-util")
     port, _, device_tag = _dfu_context(port, dfu_util)
-    existing = _find_verified_backup(device_tag) if out is None else None
+    existing = (_find_verified_backup(device_tag)
+                if out is None and _has_unique_device_tag(device_tag) else None)
     if existing and not refresh:
         return {"status": "existing verified backup reused", "image": str(existing["image"]),
                 "sha256": existing["sha256"], "manifest": str(existing["manifest"]),
@@ -934,6 +947,15 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
     image_path = directory / "var.img"
     try:
         digest = _upload_var(dfu_util, port, image_path)
+        if out is None:
+            if existing is None:
+                existing = _find_verified_backup(expected_sha256=digest)
+            if existing and existing["sha256"] == digest:
+                image_path.unlink(missing_ok=True)
+                directory.rmdir()
+                return {"status": "existing verified backup reused", "image": str(existing["image"]),
+                        "sha256": digest, "manifest": str(existing["manifest"]),
+                        "created_utc": existing["created_utc"]}
         record = _backup_manifest(directory, port, image_path, digest, device_tag=device_tag)
     except DfuError as exc:
         image_path.unlink(missing_ok=True)
@@ -942,14 +964,6 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
             "partition": "var", "status": "failed", "usb_state": "DFU (0955:701a)",
             "usb_port": port, "error": str(exc), "operation_directory": str(directory)})
         raise
-    if out is None:
-        if existing and existing["sha256"] == digest:
-            image_path.unlink(missing_ok=True)
-            (directory / "backup-manifest.json").unlink(missing_ok=True)
-            directory.rmdir()
-            return {"status": "existing verified backup reused", "image": str(existing["image"]),
-                    "sha256": digest, "manifest": str(existing["manifest"]),
-                    "created_utc": existing["created_utc"]}
     return {"status": "backup complete", "image": str(image_path), "size_bytes": EXPECTED_VAR_SIZE,
             "sha256": digest, "manifest": str(directory / "backup-manifest.json"),
             "operation_directory": str(directory), "profile": record["profile"]}

@@ -172,6 +172,34 @@ class SafeWorkflowTests(unittest.TestCase):
             self.assertFalse(state["baseline_matches_current"])
             self.assertEqual(len(list(backup_root.glob("var-backup-*"))), 1)
 
+    def test_unidentified_robot_gets_its_own_prewrite_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            backup_root = root / "Jibo-Backups"
+            old = backup_root / "var-backup-other"
+            old.mkdir(parents=True)
+            (old / "var.img").write_bytes(b"old-robot")
+            (old / "backup-manifest.json").write_text(json.dumps({
+                "kind": "jibo-var-backup", "image": "var.img",
+                "sha256": hashlib.sha256(b"old-robot").hexdigest(),
+                "device_tag": "serial-sha256:" + hashlib.sha256(b"UNKNOWN").hexdigest()}))
+            operation = root / "set-mode"
+            operation.mkdir()
+
+            def upload(_tool, _port, destination):
+                Path(destination).write_bytes(b"new-robot")
+                return hashlib.sha256(b"new-robot").hexdigest()
+
+            with patch.object(j, "EXPECTED_VAR_SIZE", len(b"new-robot")), \
+                    patch.object(j, "BACKUP_ROOT", backup_root), \
+                    patch.object(j, "_upload_var", side_effect=upload):
+                state = j._prepare_current_and_baseline(
+                    "dfu-util", "1-1", "usb-identity-unavailable", operation)
+
+            self.assertEqual(state["baseline"].read_bytes(), b"new-robot")
+            self.assertNotEqual(state["baseline"], old / "var.img")
+            self.assertEqual(len(list(backup_root.glob("var-backup-*/var.img"))), 2)
+
     def test_prewrite_failure_keeps_baseline_and_only_a_small_record(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
