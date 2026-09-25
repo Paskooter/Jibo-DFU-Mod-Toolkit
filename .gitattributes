@@ -1,2 +1,4 @@
-# Unified-diff context lines intentionally start with a space before tabs.
-firmware/*.patch -whitespace
+*.sh text eol=lf
+*.py text eol=lf
+*.patch text eol=lf
+*.ps1 text eol=lf

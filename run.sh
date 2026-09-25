@@ -7,9 +7,12 @@ package=${JIBO_PYZ:-$repo_dir/dist/jibo-dfu-linux-x86_64.pyz}
 loader=${JIBO_LOADER:-$repo_dir/assets/loader.bin}
 shofel_src=${JIBO_SHOFEL_SRC:-$repo_dir/.build/ShofEL2-for-T124}
 shofel_commit=31ac3a260c8a1501869aff6690b3b9ad4904ef58
+usb_monitor_pid=
+package_stage_dir=
 
 die() { printf 'Jibo launcher: %s\n' "$*" >&2; exit 1; }
 say() { printf 'Jibo launcher: %s\n' "$*"; }
+has() { command -v "$1" >/dev/null 2>&1; }
 
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] ||
   die 'This package requires Linux x86_64 (including x86_64 WSL).'
@@ -25,9 +28,52 @@ as_root() {
   if (( EUID == 0 )); then "$@"; else sudo "$@"; fi
 }
 
+stop_usb_monitor() {
+  if [[ -n $usb_monitor_pid ]]; then
+    kill "$usb_monitor_pid" 2>/dev/null || true
+    wait "$usb_monitor_pid" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  stop_usb_monitor
+  if [[ -n $package_stage_dir ]]; then rm -rf -- "$package_stage_dir"; fi
+}
+trap cleanup EXIT
+
+start_wsl_usb_handoff() {
+  [[ -n ${WSL_DISTRO_NAME:-} && ${JIBO_MANUAL_USB:-0} != 1 && -f $repo_dir/run.ps1 ]] || return 0
+  local powershell win_script
+  if [[ -n ${JIBO_WINDOWS_POWERSHELL:-} ]]; then
+    powershell=$JIBO_WINDOWS_POWERSHELL
+  elif has powershell.exe; then
+    powershell=$(command -v powershell.exe)
+  elif [[ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]]; then
+    powershell=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+  else
+    say 'Windows PowerShell is unavailable from WSL; attach Jibo USB manually with usbipd.'
+    return 0
+  fi
+  if ! has wslpath; then
+    say 'wslpath is unavailable; attach Jibo USB manually with usbipd.'
+    return 0
+  fi
+  win_script=$(wslpath -w "$repo_dir/run.ps1") || {
+    say 'Could not locate the Windows USB helper; attach Jibo USB manually with usbipd.'
+    return 0
+  }
+  if ! "$powershell" -NoProfile -ExecutionPolicy Bypass -File "$win_script" -UsbOnly -Distro "$WSL_DISTRO_NAME"; then
+    say 'Automatic USB attachment did not complete. You can attach Jibo manually with usbipd.'
+    return 0
+  fi
+  "$powershell" -NoProfile -ExecutionPolicy Bypass -File "$win_script" -UsbOnly -MonitorUsb -Distro "$WSL_DISTRO_NAME" &
+  usb_monitor_pid=$!
+}
+
 launch() {
   command -v python3 >/dev/null 2>&1 || die 'Python 3 is required to run the package.'
   need_sudo
+  start_wsl_usb_handoff
   say 'Opening the toolkit.'
   as_root python3 "$package" "$@"
 }
@@ -41,8 +87,11 @@ say 'The local package is missing; checking build dependencies.'
 
 # Each distribution receives only packages needed by the missing commands.
 missing=()
-has() { command -v "$1" >/dev/null 2>&1; }
-add_missing() { missing+=("$1"); }
+add_missing() {
+  local item
+  for item in "${missing[@]}"; do [[ $item == "$1" ]] && return; done
+  missing+=("$1")
+}
 has python3 || add_missing python3
 has git || add_missing git
 has patch || add_missing patch
@@ -94,7 +143,7 @@ if ((${#missing[@]})); then
     done
     say "Installing missing packages with pacman: ${packages[*]}"
     need_sudo
-    as_root pacman -Sy --needed --noconfirm "${packages[@]}"
+    as_root pacman -S --needed --noconfirm "${packages[@]}"
   else
     die "No supported package manager found; install: ${missing[*]}"
   fi
@@ -144,7 +193,6 @@ done
 say 'Packaging the toolkit.'
 mkdir -p -- "$(dirname -- "$package")"
 package_stage_dir=$(mktemp -d "$(dirname -- "$package")/.jibo-package.XXXXXXXX")
-trap 'rm -rf -- "$package_stage_dir"' EXIT
 staged_package=$package_stage_dir/jibo-dfu.pyz
 python3 "$repo_dir/scripts/package.py" \
   --loader "$loader" \
