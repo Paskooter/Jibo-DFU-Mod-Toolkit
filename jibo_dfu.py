@@ -232,20 +232,21 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
     except OSError as exc:
         raise DfuError("Could not start transfer command: " + str(exc)) from exc
 
-    successful = result_code == 0 and not timed_out
-    if successful:
-        completion = label.replace("Reading", "Read", 1)
-        print("{} in {:.1f}s.".format(completion, elapsed), file=terminal, flush=True)
-    elif not interactive:
-        print("Transfer stopped after {:.1f}s.".format(elapsed), file=terminal, flush=True)
-    else:
-        terminal.flush()
-
     if timed_out:
         raise DfuError("Command timed out after {} seconds: {}\n{}".format(
             timeout, argv[0], _transfer_error_detail(output)))
     if result_code:
         raise DfuError("Command failed: {}\n{}".format(argv[0], _transfer_error_detail(output)))
+    if download_size:
+        totals = re.findall(r"Sent a total of (\d+) bytes", output)
+        transferred = int(totals[-1]) if totals else None
+        if transferred != download_size:
+            reported = str(transferred) if transferred is not None else "no byte count"
+            raise DfuError("DFU write ended after reporting {} bytes; expected {}. "
+                           "No further partition writes were attempted. {}".format(
+                               reported, download_size, _transfer_error_detail(output)))
+    completion = label.replace("Reading", "Read", 1)
+    print("{} in {:.1f}s.".format(completion, elapsed), file=terminal, flush=True)
     return output
 
 

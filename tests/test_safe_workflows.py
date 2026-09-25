@@ -45,11 +45,28 @@ class SafeWorkflowTests(unittest.TestCase):
         progress = TerminalOutput()
         command = ("import sys,time; "
                    "sys.stderr.write('Download [==========]  50%     52428800 bytes\\r'); "
-                   "sys.stderr.flush(); time.sleep(0.4)")
+                   "sys.stderr.flush(); time.sleep(0.4); "
+                   "sys.stderr.write('Sent a total of 104857600 bytes\\n')")
         with patch.object(j.sys, "stderr", progress):
             j.run_with_progress([sys.executable, "-c", command], timeout=5,
                                 label="Writing sample partition", download_size=104_857_600)
         self.assertIn("50.0% | 50.0/100.0 MiB", progress.getvalue())
+
+    def test_dfu_write_rejects_short_success_before_next_partition(self):
+        progress = io.StringIO()
+        command = "print('Sent a total of 4096 bytes')"
+        with patch.object(j.sys, "stderr", progress):
+            with self.assertRaisesRegex(j.DfuError,
+                                        "reporting 4096 bytes; expected 8192"):
+                j.run_with_progress([sys.executable, "-c", command], timeout=5,
+                                    label="Writing sample partition", download_size=8192)
+        self.assertNotIn("Writing sample partition in", progress.getvalue())
+
+    def test_dfu_write_requires_a_final_byte_count(self):
+        with patch.object(j.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(j.DfuError, "reporting no byte count"):
+                j.run_with_progress([sys.executable, "-c", "print('Done!')"], timeout=5,
+                                    label="Writing sample partition", download_size=8192)
 
     def test_progress_tracks_private_temporary_output(self):
         with tempfile.TemporaryDirectory() as directory:
