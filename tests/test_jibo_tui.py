@@ -30,6 +30,9 @@ class FakeScreen:
     def keypad(self, enabled):
         pass
 
+    def timeout(self, milliseconds):
+        self.timeout_ms = milliseconds
+
     def move(self, _y, _x):
         pass
 
@@ -81,7 +84,7 @@ class TuiReadinessTests(unittest.TestCase):
             [{"port": "1-2", "state": "rcm"}], shofel_dfu=False))
         item = jibo_tui.build_menu_items(unavailable)[0]
         self.assertFalse(item.enabled)
-        self.assertIn("launch-enabled ShofEL", item.reason)
+        self.assertIn("./run.sh", item.reason)
 
         already_dfu = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-2", "state": "dfu"}], shofel_dfu=True))
@@ -197,6 +200,42 @@ class TuiReadinessTests(unittest.TestCase):
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
         self.assertEqual(app.command, "backup-var")
+
+    def test_idle_usb_transition_rebuilds_enabled_actions(self):
+        snapshots = [
+            [{"port": "1-1", "state": "rcm"}],
+            [{"port": "1-1", "state": "dfu"}],
+            [{"port": "1-1", "state": "dfu"}],
+        ]
+        api = fake_api(shofel_dfu=True)
+        api.devices = lambda: snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
+        app = jibo_tui.TerminalMenu(api)
+        self.assertFalse(app.items[1].enabled)
+        app.selected = 1
+        screen = FakeScreen([-1, curses.KEY_ENTER])
+        with patch.object(curses, "curs_set", return_value=None):
+            app.session(screen)
+        self.assertEqual(screen.timeout_ms, 1500)
+        self.assertEqual(app.readiness.state, "dfu-ready")
+        self.assertTrue(app.items[1].enabled)
+        self.assertEqual(app.command, "probe-dfu-gpt")
+
+    def test_enter_rechecks_usb_and_blocks_disconnected_action(self):
+        snapshots = [
+            [{"port": "1-1", "state": "dfu"}],
+            [],
+        ]
+        api = fake_api()
+        api.devices = lambda: snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
+        app = jibo_tui.TerminalMenu(api)
+        app.selected = 2
+        screen = FakeScreen([curses.KEY_ENTER, ord("q")])
+        with patch.object(curses, "curs_set", return_value=None):
+            app.session(screen)
+        self.assertEqual(app.command, "quit")
+        self.assertEqual(app.readiness.state, "none")
+        self.assertFalse(app.items[2].enabled)
+        self.assertIn("Connect", app.note)
 
     def test_dfu_gpt_probe_passes_selected_port_without_confirmation(self):
         api = fake_api([{"port": "1-3", "state": "dfu"}])
@@ -358,12 +397,13 @@ class CursesPromptTests(unittest.TestCase):
     def test_mode_action_supplies_curses_confirmation_callback_to_backend(self):
         calls = {}
         api = SimpleNamespace(
-            set_mode_live=lambda mode, confirmation=None: calls.update(
-                mode=mode, confirmation=confirmation))
+            set_mode_live=lambda mode, port=None, confirmation=None: calls.update(
+                mode=mode, port=port, confirmation=confirmation))
         with patch.object(jibo_tui, "_select_mode", return_value="developer"), \
                 patch.object(jibo_tui, "confirm_action", return_value=True) as confirm:
-            jibo_tui.execute_action(api, "set-mode", jibo_tui.Readiness("dfu-ready", ()))
+            jibo_tui.execute_action(api, "set-mode", jibo_tui.Readiness("dfu-ready", (), port="1-1"))
             self.assertEqual(calls["mode"], "developer")
+            self.assertEqual(calls["port"], "1-1")
             self.assertTrue(calls["confirmation"]({"partition": "var", "usb_port": "1-1"}))
             confirmation_text = confirm.call_args.args[1]
         self.assertIn("Partition: var", confirmation_text)

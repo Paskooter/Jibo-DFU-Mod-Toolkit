@@ -32,9 +32,9 @@ class MenuItem:
     reason: str = ""
 
 
-def inspect_readiness(api):
+def inspect_readiness(api, found=None):
     """Read USB state and, for DFU, check for the toolkit's loader marker."""
-    found = tuple(api.devices())
+    found = tuple(api.devices()) if found is None else tuple(found)
     if not found:
         return Readiness("none", found)
     if len(found) != 1:
@@ -125,7 +125,7 @@ def build_menu_items(readiness, update_packages=()):
 
     if readiness.state == "rcm":
         shofel_dfu_reason = ("" if readiness.shofel_dfu_available else
-                             "Install the launch-enabled ShofEL DFU tool and payload.")
+                             "The DFU entry helper is unavailable. Run ./run.sh to build the toolkit package.")
     elif readiness.state == "multiple":
         shofel_dfu_reason = "Connect one robot at a time."
     elif readiness.state in ("dfu-ready", "dfu-error", "dfu-no-marker",
@@ -473,15 +473,21 @@ class TerminalMenu:
         self.note = ""
         self.refresh()
 
-    def refresh(self):
-        self.readiness = inspect_readiness(self.api)
+    def refresh(self, found=None):
+        previous_readiness = self.readiness
+        previous_items = self.items
+        selected_key = self.items[self.selected].key if self.items else None
+        self.readiness = inspect_readiness(self.api, found)
         folder = Path.cwd() / "updates"
         try:
             packages = self.api._update_candidates(folder)
         except Exception:
             packages = ()
         self.items = build_menu_items(self.readiness, packages)
-        self.selected = min(self.selected, len(self.items) - 1) if self.items else 0
+        self.selected = next((index for index, item in enumerate(self.items)
+                              if item.key == selected_key),
+                             min(self.selected, len(self.items) - 1) if self.items else 0)
+        return self.readiness != previous_readiness or self.items != previous_items
 
     def render(self, screen):
         screen.erase()
@@ -502,7 +508,7 @@ class TerminalMenu:
             _addstr(screen, line, 0, "USB port " + self.readiness.port)
             line += 1
         line += 1
-        _addstr(screen, line, 0, "ACTIONS   (↑/↓ select, Enter open, r refresh, q quit)", bold)
+        _addstr(screen, line, 0, "ACTIONS   (↑/↓ select, Enter open, r refresh, q quit; USB auto-refreshes)", bold)
         first_item_line = line + 1
         for index, item in enumerate(self.items):
             y = first_item_line + index
@@ -539,6 +545,9 @@ class TerminalMenu:
             screen.keypad(True)
         except Exception:
             pass
+        # A timed read lets the menu rebuild enabled actions after a USB
+        # disconnect, reconnect, or RCM-to-DFU transition without a keypress.
+        screen.timeout(1500)
         if hasattr(curses, "use_default_colors"):
             try:
                 curses.start_color()
@@ -548,6 +557,10 @@ class TerminalMenu:
         while True:
             self.render(screen)
             key = screen.getch()
+            if key == -1:
+                if self.refresh():
+                    self.note = "USB state changed. Available actions updated."
+                continue
             if key in (ord("q"), ord("Q"), 27):
                 self.command = "quit"
                 return
@@ -565,7 +578,15 @@ class TerminalMenu:
             elif key in (curses.KEY_ENTER, 10, 13):
                 if not self.items:
                     continue
-                item = self.items[self.selected]
+                selected_key = self.items[self.selected].key
+                # Recheck immediately before dispatch so an unplugged robot
+                # cannot open an action enabled by an earlier USB snapshot.
+                self.refresh()
+                item = next((candidate for candidate in self.items
+                             if candidate.key == selected_key), None)
+                if item is None:
+                    self.note = "The selected action is no longer available."
+                    continue
                 if not item.enabled:
                     self.note = item.reason
                     continue
@@ -639,7 +660,7 @@ def _select_mode(title="Set robot mode"):
         detail="Mode changes are written to the robot only after the change plan is reviewed.")
 
 
-def _run_update(api):
+def _run_update(api, port=None):
     folder = Path.cwd() / "updates"
     packages = api._update_candidates(folder)
     if not packages:
@@ -664,7 +685,7 @@ def _run_update(api):
     confirmation = lambda plan: confirm_action(
         "Confirm full-flash update",
         _confirmation_details(plan, "Review the package, var policy, and partitions before writing."))
-    return api.flash_update(package, preserve_var=policy_key == "preserve",
+    return api.flash_update(package, preserve_var=policy_key == "preserve", port=port,
                             confirmation=confirmation)
 
 
@@ -684,7 +705,7 @@ def execute_action(api, key, readiness):
         return api.enter_shofel_dfu(port=readiness.port,
                                     confirm_meerkat_rev02=True)
     if key == "backup-var":
-        return api.backup_var()
+        return api.backup_var(port=readiness.port)
     if key == "probe-dfu-gpt":
         if readiness.state != "dfu-ready":
             raise RuntimeError("The partition layout check is available only while the robot is in DFU.")
@@ -696,7 +717,7 @@ def execute_action(api, key, readiness):
         confirmation = lambda plan: confirm_action(
             "Confirm mode change",
             _confirmation_details(plan, "Review the var write plan before changing the robot mode."))
-        return api.set_mode_live(mode, confirmation=confirmation)
+        return api.set_mode_live(mode, port=readiness.port, confirmation=confirmation)
     if key == "configure-wifi":
         ssid = text_input("Configure Wi-Fi", "Wi-Fi network name (SSID):")
         if ssid is None:
@@ -719,11 +740,11 @@ def execute_action(api, key, readiness):
             _confirmation_details(plan, "Review the var write plan before adding this network."))
         try:
             return api.configure_wifi_live(ssid, password, open_network,
-                                           confirmation=confirmation)
+                                           port=readiness.port, confirmation=confirmation)
         finally:
             password = None
     if key == "flash-update":
-        return _run_update(api)
+        return _run_update(api, port=readiness.port)
     if key == "write-var":
         image = text_input("Write an edited var image", "Path to edited 500 MiB var image:")
         if image is None or not image.strip():
@@ -731,7 +752,8 @@ def execute_action(api, key, readiness):
         confirmation = lambda plan: confirm_action(
             "Confirm var write",
             _confirmation_details(plan, "Review the var write plan before writing to the robot."))
-        return api.write_var(image.strip(), confirmation=confirmation)
+        return api.write_var(image.strip(), port=readiness.port,
+                             confirmation=confirmation)
     if key == "inspect-backup":
         image = text_input("Inspect a var backup", "Path to var backup image:")
         if image is None or not image.strip():
@@ -801,5 +823,9 @@ def run(api_module):
         except KeyboardInterrupt:
             show_screen(label, "Cancelled.")
         except Exception as exc:
-            show_screen("Action failed", str(exc))
+            current = tuple(api_module.devices())
+            if not current and app.readiness.devices:
+                show_screen("Robot disconnected", "The robot is no longer visible over USB.\n" + str(exc))
+            else:
+                show_screen("Action failed", str(exc))
         app.refresh()
