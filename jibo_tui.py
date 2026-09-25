@@ -819,7 +819,9 @@ def run(api_module):
         label = next(item.label for item in app.items if item.key == action)
         try:
             result = execute_action(api_module, action, app.readiness)
-            show_screen(label, _screen_lines(result))
+            if action != "enter-dfu-shofel" or not (
+                    isinstance(result, dict) and result.get("state") == "dfu"):
+                show_screen(label, _screen_lines(result))
         except KeyboardInterrupt:
             show_screen(label, "Cancelled.")
         except Exception as exc:
