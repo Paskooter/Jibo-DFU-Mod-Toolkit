@@ -8,13 +8,15 @@ import jibo_dfu_bounded as bounded
 
 class FakeLibusb:
     def __init__(self, *, short_after=None, upload_error=None, upload_exception=None,
-                 abort_error=None, state=2):
+                 abort_error=None, state=2, marker_bytes=bounded.MARKER_BYTES):
         self.calls = []
         self.short_after = short_after
         self.upload_error = upload_error
         self.upload_exception = upload_exception
         self.abort_error = abort_error
         self.state = state
+        self.marker_bytes = marker_bytes
+        self.remaining = marker_bytes
 
     def libusb_control_transfer(self, _handle, request_type, request, value, interface,
                                 buffer, length, _timeout):
@@ -24,11 +26,16 @@ class FakeLibusb:
                 raise self.upload_exception
             if self.upload_error is not None:
                 return self.upload_error
-            actual = length if self.short_after is None else min(length, self.short_after)
+            actual = min(length, self.remaining)
+            if self.short_after is not None:
+                actual = min(actual, self.short_after)
             if actual and buffer is not None:
                 target = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
                 for index in range(actual):
                     target[index] = index & 0xFF
+            self.remaining -= actual
+            if actual < length:
+                self.remaining = self.marker_bytes
             return actual
         if request == bounded._DFU_ABORT:
             return self.abort_error if self.abort_error is not None else 0
@@ -45,27 +52,37 @@ class FakeLibusb:
 
 
 class BoundedUploadTests(unittest.TestCase):
-    def test_upload_is_capped_and_aborted_then_state_is_verified(self):
+    def test_complete_marker_upload_resets_for_repeat_and_checks_idle(self):
         lib = FakeLibusb()
 
         result = bounded._upload_bounded(lib, object(), interface=3, transfer_size=4096)
+        repeated = bounded._upload_bounded(lib, object(), interface=3, transfer_size=4096)
 
-        self.assertEqual(len(result), bounded.MAX_UPLOAD_BYTES)
+        self.assertEqual(len(result), bounded.MARKER_BYTES)
+        self.assertEqual(result, repeated)
         upload_calls = [call for call in lib.calls if call[1] == bounded._DFU_UPLOAD]
-        self.assertEqual([call[2] for call in upload_calls], list(range(8)))
-        self.assertEqual([call[4] for call in upload_calls], [4096] * 8)
-        self.assertEqual(sum(call[4] for call in upload_calls), 32768)
+        self.assertEqual([call[2] for call in upload_calls], list(range(5)) * 2)
+        self.assertEqual([call[4] for call in upload_calls], [4096] * 10)
         self.assertEqual(lib.calls[-2][1], bounded._DFU_ABORT)
         self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATUS)
         self.assertTrue(all(call[3] == 3 for call in lib.calls))
 
-    def test_short_upload_stops_early_but_still_runs_cleanup(self):
+    def test_early_short_upload_is_rejected_but_still_runs_cleanup(self):
         lib = FakeLibusb(short_after=1024)
 
-        result = bounded._upload_bounded(lib, object(), interface=1, transfer_size=4096)
+        with self.assertRaisesRegex(bounded.BoundedDfuError, "expected 17408 bytes"):
+            bounded._upload_bounded(lib, object(), interface=1, transfer_size=4096)
 
-        self.assertEqual(len(result), 1024)
         self.assertEqual(len([call for call in lib.calls if call[1] == bounded._DFU_UPLOAD]), 1)
+        self.assertEqual([call[1] for call in lib.calls[-2:]], [bounded._DFU_ABORT, bounded._DFU_GETSTATUS])
+
+    def test_marker_that_exceeds_read_limit_is_rejected(self):
+        lib = FakeLibusb(marker_bytes=bounded.MAX_UPLOAD_BYTES + 512)
+
+        with self.assertRaisesRegex(bounded.BoundedDfuError, "did not finish"):
+            bounded._upload_bounded(lib, object(), interface=1, transfer_size=4096)
+
+        self.assertEqual(len([call for call in lib.calls if call[1] == bounded._DFU_UPLOAD]), 8)
         self.assertEqual([call[1] for call in lib.calls[-2:]], [bounded._DFU_ABORT, bounded._DFU_GETSTATUS])
 
     def test_upload_failure_still_aborts_and_checks_state(self):
@@ -102,9 +119,9 @@ class BoundedUploadTests(unittest.TestCase):
 
         self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATUS)
 
-    def test_helper_rejects_alternate_names_other_than_emmc_zero(self):
-        with self.assertRaisesRegex(bounded.BoundedDfuError, "only permits the emmc-000"):
-            bounded.read_dfu_alt_prefix("1-1", alternate="var", libusb=object())
+    def test_helper_rejects_alternate_names_other_than_marker(self):
+        with self.assertRaisesRegex(bounded.BoundedDfuError, "only permits the read-only Jibo marker"):
+            bounded.read_dfu_alt_prefix("1-1", alternate="emmc-000", libusb=object())
 
     def test_sysfs_port_check_requires_exact_jibo_dfu_vid_pid(self):
         with tempfile.TemporaryDirectory() as directory:

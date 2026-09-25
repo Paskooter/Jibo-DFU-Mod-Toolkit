@@ -206,8 +206,6 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertEqual(result, {
             "status": "partition table read and checked",
             "port": "1-3",
-            "message": ("Before another GPT check or an update, reset to RCM/APX and re-enter DFU. "
-                        "This loader advances its eMMC GPT cursor after a check."),
         })
         confirm.assert_not_called()
 

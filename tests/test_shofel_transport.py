@@ -120,13 +120,13 @@ class ShofelTransportTests(unittest.TestCase):
         with patch.object(toolkit, "_dfu_context",
                           return_value=("1-2", [toolkit.MARKER, "var", "emmc-000"], "device")), \
                 patch.object(toolkit.bounded, "read_dfu_alt_prefix",
-                             return_value=make_gpt_prefix()) as bounded_read, \
+                             return_value=make_gpt_prefix()[:toolkit.bounded.MARKER_BYTES]) as bounded_read, \
                 patch.object(toolkit, "run_with_progress") as upload:
             result = toolkit.probe_dfu_gpt(port="1-2", dfu_util="dfu-util")
         bounded_read.assert_called_once_with("1-2")
         upload.assert_not_called()
         self.assertEqual(result["partition_sizes_bytes"]["var"], toolkit.EXPECTED_VAR_SIZE)
-        self.assertEqual(result["bytes_read"], 32768)
+        self.assertEqual(result["bytes_read"], toolkit.bounded.MARKER_BYTES)
         self.assertFalse(result["backup_created"])
 
     def test_var_backup_reads_named_dfu_alternative_and_records_private_manifest(self):

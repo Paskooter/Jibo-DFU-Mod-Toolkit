@@ -70,7 +70,7 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The current l
 
 | Action | What it does |
 | --- | --- |
-| Check partition layout | Reads 32 KiB of the live eMMC GPT into memory and checks the Jibo partition sizes. No backup or eMMC write. |
+| Check partition layout | Reads the 17 KiB read-only GPT marker into memory and checks the Jibo partition sizes. No backup or eMMC write. The check can be repeated in the same DFU session. |
 | Back up var | Reads the 500 MiB `var` partition and saves a SHA-256 manifest. Reuses a verified existing backup for the same DFU device unless refreshed. |
 | Inspect or edit a local var image | Views mode and Wi-Fi presence, or creates an edited copy without changing the robot. |
 | Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; reads current `var`, saves one rollback backup, writes the edit, then reads it back. |
@@ -78,7 +78,7 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The current l
 | Write an edited var image | Writes an offline image after backup and confirmation, then verifies its readback. |
 | Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, backs up each partition before its first write, expands images to their final partition sizes offline, and verifies each write by readback. |
 
-A successful 32 KiB layout check leaves the loader's `emmc-000` upload cursor advanced. Reset the robot into RCM/APX and re-enter DFU before another layout check or an update in that session. Other named partition alternatives, including `var`, are separate.
+The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transfer resets the loader's read cursor, so another check or an update can run without restarting DFU.
 
 For scripts, the corresponding commands are:
 
@@ -93,6 +93,6 @@ Use `--out /path/to/new/directory` with `backup-var` to force a fresh read for c
 
 ## Hardware results and remaining work
 
-On Moth, ShofEL started the RAM loader and the robot entered DFU on the same USB port. A bounded 32 KiB read validated the GPT. A full DFU read of `var` took 116.9 seconds and produced exactly 524,288,000 bytes with SHA-256 `4a58631e0c6eb0559bef7d2827676a1bce7965886f2887afbdc65dedce18416b`. That matched Moth's September read-only ShofEL `var` backup byte for byte. The temporary comparison copy was removed; neither validation wrote eMMC. An older full eMMC dump from June has different `var` contents, so it is not the matching reference for this test.
+On Moth, ShofEL started the RAM loader and the robot entered DFU on the same USB port. Two consecutive 17 KiB GPT marker reads in one DFU session validated the partition layout. A full DFU read of `var` took 116.9 seconds and produced exactly 524,288,000 bytes with SHA-256 `4a58631e0c6eb0559bef7d2827676a1bce7965886f2887afbdc65dedce18416b`. That matched Moth's September read-only ShofEL `var` backup byte for byte. The temporary comparison copy was removed; neither validation wrote eMMC. An older full eMMC dump from June has different `var` contents, so it is not the matching reference for this test.
 
 A mode change to `int-developer` has also been confirmed on a connected Jibo. The new Windows USB helper has been checked against a Jibo already attached in DFU; its automatic reattachment during an RCM-to-DFU transition has not yet been tested end to end. Full update installation and readback, automatic board-profile selection, a complete user-area eMMC backup, and other robot revisions still need hardware validation. The toolkit does not enable SSH.

@@ -1,11 +1,8 @@
-"""Small, host-bounded DFU upload helper for Jibo's read-only GPT probe.
+"""Read the complete, read-only GPT marker through bounded DFU uploads.
 
-Only DFU_UPLOAD is used to read storage. The helper limits the sum of the
-requested and received payload to 32 KiB, then sends DFU_ABORT and verifies
-DFU_STATE_dfuIDLE with DFU_GETSTATUS. It does not create files or send DNLOAD.
-On the current U-Boot backend, DFU_ABORT resets the protocol state but does not
-rewind the selected entity's upload cursor. Do not read emmc-000 a second time
-in the same loader session; reset/re-enter the RAM loader before another probe.
+The marker is 34 sectors: protective MBR, GPT header, and partition entries.
+Its final short upload resets this U-Boot loader's entity cursor, so repeated
+checks can run in the same DFU session. No file or DFU_DNLOAD is created.
 """
 
 from __future__ import annotations
@@ -19,7 +16,8 @@ import re
 VID = 0x0955
 PID = 0x701A
 MAX_UPLOAD_BYTES = 32 * 1024
-DEFAULT_ALT_NAME = "emmc-000"
+MARKER_BYTES = 34 * 512
+DEFAULT_ALT_NAME = "jibo-dfu-v1"
 DFU_INTERFACE = (0xFE, 0x01, 0x02)
 
 _USB_IN = 0x80
@@ -296,7 +294,7 @@ def _dfu_transfer_size(lib, handle, interface):
 
 
 def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_BYTES):
-    """Upload at most max_bytes, then always ABORT and confirm the idle state."""
+    """Read the whole marker, then ABORT and confirm the idle state."""
     if max_bytes != MAX_UPLOAD_BYTES:
         raise BoundedDfuError("This helper is fixed to a 32 KiB maximum upload.")
     if transfer_size < 1 or transfer_size > MAX_UPLOAD_BYTES:
@@ -307,6 +305,7 @@ def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_
     cleanup_errors = []
     try:
         block = 0
+        reached_end = False
         while len(result) < MAX_UPLOAD_BYTES:
             request_length = min(transfer_size, MAX_UPLOAD_BYTES - len(result))
             buffer = (ctypes.c_ubyte * request_length)()
@@ -318,8 +317,13 @@ def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_
                 raise BoundedDfuError("The DFU device returned more bytes than the bounded request.")
             result.extend(bytes(buffer[:received]))
             if received < request_length:
+                reached_end = True
                 break
             block += 1
+        if not reached_end or len(result) != MARKER_BYTES:
+            raise BoundedDfuError(
+                "The GPT marker did not finish at its expected {} bytes (received {}).".format(
+                    MARKER_BYTES, len(result)))
     except BaseException as exc:
         primary_error = exc
 
@@ -358,15 +362,9 @@ def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_
 
 def read_dfu_alt_prefix(port, alternate=DEFAULT_ALT_NAME, *, sysfs_root="/sys/bus/usb/devices",
                         libusb=None):
-    """Read a bounded prefix from one named Jibo DFU alternate setting.
-
-    The returned bytes stay in memory. This function never sends DFU_DNLOAD and
-    never writes an output file. On the current U-Boot backend, the selected
-    entity cursor remains advanced after DFU_ABORT, so reset/re-enter the RAM
-    loader before another emmc-000 read. Unit tests inject a fake libusb object.
-    """
+    """Read the complete GPT marker into memory without sending DFU_DNLOAD."""
     if alternate != DEFAULT_ALT_NAME:
-        raise BoundedDfuError("The bounded GPT helper only permits the emmc-000 alternate.")
+        raise BoundedDfuError("The bounded GPT helper only permits the read-only Jibo marker.")
     if libusb is None:
         libusb = _load_libusb()
     _verify_sysfs_device(port, sysfs_root)

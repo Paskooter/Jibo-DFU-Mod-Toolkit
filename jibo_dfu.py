@@ -521,8 +521,8 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size):
 
 
 def _read_gpt_capacities(dfu_util, port, names):
-    if "emmc-000" not in names:
-        raise DfuError("This DFU loader does not expose emmc-000; the toolkit cannot verify the live GPT layout.")
+    if MARKER not in names:
+        raise DfuError("This DFU loader does not expose the read-only GPT marker.")
     try:
         return updates.parse_gpt_prefix(bounded.read_dfu_alt_prefix(port))
     except (bounded.BoundedDfuError, updates.UpdateError) as exc:
@@ -542,7 +542,7 @@ def probe_dfu_gpt(port=None, dfu_util=None):
         raise DfuError("The live GPT reports an unexpected var size: " + str(capacities["var"]))
     return {"status": "partition table read and checked", "port": port,
             "partition_sizes_bytes": {name: capacities[name] for name in required},
-            "bytes_read": 32_768, "backup_created": False}
+            "bytes_read": bounded.MARKER_BYTES, "backup_created": False}
 
 
 def _expected_skills_chunks(capacity):
@@ -1310,7 +1310,7 @@ def main(argv=None):
     shofel_entry.add_argument("--confirm-meerkat-rev02", action="store_true", required=True,
                               help="Confirm the Meerkat Rev02 SDRAM profile for this robot")
     gpt_probe = sub.add_parser("probe-dfu-gpt",
-                               help="Read and validate the live 32 KiB GPT through DFU without saving a backup")
+                               help="Read and validate the live GPT marker through DFU without saving a backup")
     _add_device_arguments(gpt_probe)
     _add_dfu_argument(gpt_probe)
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
