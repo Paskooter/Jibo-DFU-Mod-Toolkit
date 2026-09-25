@@ -68,6 +68,25 @@ class SafeWorkflowTests(unittest.TestCase):
                 j.run_with_progress([sys.executable, "-c", "print('Done!')"], timeout=5,
                                     label="Writing sample partition", download_size=8192)
 
+    def test_small_mailbox_accepts_dfu_util_09_completion_without_total_line(self):
+        output = ("Download [============             ]  50%           46 bytes\r"
+                  "Download [=========================] 100%           46 bytes\n"
+                  "Download done.\nstate(7) = dfuMANIFEST, status(0) = No error condition is present\n"
+                  "state(2) = dfuIDLE, status(0) = No error condition is present\nDone!\n")
+        self.assertEqual(j._dfu_download_final_count(output, True), 46)
+        self.assertIsNone(j._dfu_download_final_count(output))
+        with patch.object(j.sys, "stderr", io.StringIO()):
+            j.run_with_progress([sys.executable, "-c", "print(" + repr(output) + ", end='')"],
+                                timeout=5, label="Selecting file for read", download_size=46,
+                                allow_progress_completion=True)
+
+    def test_small_mailbox_rejects_short_or_unfinished_completion(self):
+        output = ("Download [=========================] 100%           45 bytes\n"
+                  "Download done.\nstate(2) = dfuIDLE, status(0) = No error condition is present\nDone!\n")
+        self.assertEqual(j._dfu_download_final_count(output, True), 45)
+        self.assertIsNone(j._dfu_download_final_count(output.replace("dfuIDLE", "dfuERROR"), True))
+        self.assertIsNone(j._dfu_download_final_count(output.replace("Download done.", ""), True))
+
     def test_progress_tracks_private_temporary_output(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "var.img"

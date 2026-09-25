@@ -164,8 +164,23 @@ def _dfu_download_progress_from_log(log, expected_size):
     return min(int(matches[-1]), expected_size) if matches else None
 
 
+def _dfu_download_final_count(output, allow_progress_completion=False):
+    """Require an exact final byte count; bounded mailboxes accept dfu-util 0.9's completion log."""
+    totals = re.findall(r"Sent a total of (\d+) bytes", output)
+    if totals:
+        return int(totals[-1])
+    if not allow_progress_completion:
+        return None
+    completed = re.findall(r"Download\s+\[[^\]\r\n]*\]\s+100%\s+(\d+)\s+bytes", output)
+    if (not completed or "Download done." not in output or "Done!" not in output or
+            not re.search(r"state\(2\)\s*=\s*dfuIDLE,\s*status\(0\)", output)):
+        return None
+    return int(completed[-1])
+
+
 def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progress_size=None,
-                      byte_progress=False, download_size=None):
+                      byte_progress=False, download_size=None,
+                      allow_progress_completion=False):
     """Run a quiet transfer with progress when byte counts are available."""
     started = time.monotonic()
     terminal = sys.stderr
@@ -255,8 +270,7 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
     if result_code:
         raise DfuError("Command failed: {}\n{}".format(argv[0], _transfer_error_detail(output)))
     if download_size:
-        totals = re.findall(r"Sent a total of (\d+) bytes", output)
-        transferred = int(totals[-1]) if totals else None
+        transferred = _dfu_download_final_count(output, allow_progress_completion)
         if transferred != download_size:
             reported = str(transferred) if transferred is not None else "no byte count"
             raise DfuError("DFU write ended after reporting {} bytes; expected {}. "
@@ -1513,7 +1527,7 @@ def _file_request_transfer(dfu_util, port, partition, request, directory, label)
         run_with_progress([dfu_util, "-d", "0955:701a", "--path", port, "-a", alt,
                            "-D", str(request_path)],
                           timeout=120, label=label,
-                          download_size=len(request))
+                          download_size=len(request), allow_progress_completion=True)
     finally:
         request_path.unlink(missing_ok=True)
 

@@ -89,6 +89,7 @@ class FileDfuTests(unittest.TestCase):
             argv = run.call_args.args[0]
             self.assertIn("-D", argv)
             self.assertNotIn("-Z", argv)
+            self.assertTrue(run.call_args.kwargs["allow_progress_completion"])
             self.assertFalse((Path(directory) / "file-request.bin").exists())
 
     def test_stat_preflight_requires_regular_file_and_one_small_extent(self):
