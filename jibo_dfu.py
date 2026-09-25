@@ -728,16 +728,7 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size):
 def _read_gpt_capacities(dfu_util, port, names):
     if "emmc-000" not in names:
         raise DfuError("This DFU loader does not expose emmc-000; the toolkit cannot verify the live GPT layout.")
-    with tempfile.TemporaryDirectory(prefix="jibo-gpt-") as directory:
-        prefix = Path(directory) / "gpt-prefix.bin"
-        run_with_progress(
-            [dfu_util, "-d", "0955:701a", "--path", port, "-a", "emmc-000",
-             "-U", str(prefix), "-Z", "32768"],
-            timeout=120, label="Reading the 32 KiB eMMC partition table")
-        try:
-            return updates.parse_gpt_prefix(prefix.read_bytes())
-        except (OSError, updates.UpdateError) as exc:
-            raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
+    raise DfuError("The installed dfu-util cannot limit an emmc-000 upload. GPT reads are disabled until a bounded DFU reader is available.")
 
 
 def probe_dfu_gpt(port=None, dfu_util=None):
