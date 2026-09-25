@@ -80,9 +80,9 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refr
 
 The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transfer resets the loader's read cursor, so another check or an update can run without restarting DFU.
 
-With the included loader, mode and Wi-Fi changes transfer the 500 MiB `var` image. If a loader exposes the file-level capability, those same menu actions edit the existing `mode.json` or Wi-Fi file directly after saving or reusing the partition backup. Later edits can avoid the full-image transfer. The file-level loader remains an opt-in source candidate; see [the file-level protocol](firmware/file-level-protocol.md) and [loader build notes](docs/loader-build.md). A read-only file transfer succeeded on Moth; direct file writes have not been tested on hardware.
+With the included loader, mode and Wi-Fi changes transfer the 500 MiB `var` image. If a loader exposes the file-level capability, those same menu actions edit the existing `mode.json` or Wi-Fi file directly after saving or reusing the partition backup. Later edits can avoid the full-image transfer. The file-level loader remains an opt-in candidate; see [the file-level protocol](firmware/file-level-protocol.md) and [loader build notes](docs/loader-build.md). On Moth, a direct mode-file write passed content and metadata readback. Other direct file writes remain untested on hardware.
 
-With that candidate running, `stat-partition-file /jibo/mode.json --partition var` reads the file's UID, GID, permissions, and inode without writing to the robot. `set-mode-file --mode int-developer` records the same metadata before and after its write and checks that it did not change.
+With that candidate running, `stat-partition-file /jibo/mode.json --partition var` reads the file's UID, GID, permissions, and inode without writing to the robot. `set-mode-file --mode developer` records the same metadata before and after its write and checks that it did not change.
 
 For scripts, the corresponding commands are:
 

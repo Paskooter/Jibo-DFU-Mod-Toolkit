@@ -80,5 +80,11 @@ On 2026-09-25, Moth entered DFU with this candidate and a read-only request for
 `fa76e6a145e80d3ef8d955abd5a17426feba569df832d2cf6af7dbd5b86c5240`).
 The saved Moth var image from 2026-09-24 contained `{"mode":"int-developer"}`;
 because the files differ, that older image cannot serve as a same-state byte
-comparison for the live read. No direct file write has been tested on hardware.
-The candidate is not enabled by the pinned loader.
+comparison for the live read. A subsequent direct write changed the live file
+from `normal` to `developer`; the immediate file-level readback matched SHA-256
+`d6c405b54ef96016170d89a9095189a27bb031d6a5f9e134d0d7c91ce641a47c`.
+Before and after, the file was inode 1455, owned by UID/GID 0:0, with mode
+0600, one link, and the same ext4 UUID. The current 500 MiB var dump matched
+an existing backup, so the write reused that rollback image. Other direct
+file writes have not yet been tested on hardware. The candidate is not enabled
+by the pinned loader.
