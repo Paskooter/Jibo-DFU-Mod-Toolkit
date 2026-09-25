@@ -22,6 +22,7 @@ class Readiness:
     alt_names: tuple = ()
     detail: str = ""
     shofel_available: bool = False
+    shofel_dfu_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,14 @@ def inspect_readiness(api):
             available = bool(api.shofel_available())
         except Exception:
             pass
-        return Readiness("rcm", found, port=port, shofel_available=available)
+        dfu_available = False
+        try:
+            dfu_available = bool(api.shofel_dfu_available())
+        except Exception:
+            pass
+        return Readiness("rcm", found, port=port,
+                         shofel_available=available,
+                         shofel_dfu_available=dfu_available)
     try:
         executable = api.tool("dfu-util")
         names, output = api.dfu_alternatives(executable, port)
@@ -82,7 +90,7 @@ def status_lines(readiness):
                 (readiness.detail or "Connect one robot at a time.") + ".")
     if readiness.state == "rcm":
         return ("STEP 2 / 3   RCM/APX detected",
-                "RCM/APX is the entry state. Choose “Enter DFU from RCM/APX” to load recovery into RAM.")
+                "RCM/APX is the entry state. Choose an RCM/APX recovery option to load DFU into RAM.")
     if readiness.state == "dfu-ready":
         return ("STEP 3 / 3   DFU active; Jibo recovery loader ready",
                 "The robot is ready for the partition and update actions below.")
@@ -130,6 +138,17 @@ def build_menu_items(readiness, update_packages=()):
         enter_reason = "Connect the robot and enter RCM/APX first."
 
     if readiness.state == "rcm":
+        shofel_dfu_reason = ("" if readiness.shofel_dfu_available else
+                             "Install the launch-enabled ShofEL DFU tool and payload.")
+    elif readiness.state == "multiple":
+        shofel_dfu_reason = "Connect one robot at a time."
+    elif readiness.state in ("dfu-ready", "dfu-error", "dfu-no-marker",
+                              "dfu-profile-incomplete"):
+        shofel_dfu_reason = "The robot is already in DFU."
+    else:
+        shofel_dfu_reason = "Connect the robot and enter RCM/APX first."
+
+    if readiness.state == "rcm":
         shofel_reason = ("" if readiness.shofel_available else
                           "Install shofel2_t124 and its adjacent emmc_server.bin, or use the CLI --shofel option.")
     elif readiness.state == "multiple":
@@ -160,7 +179,10 @@ def build_menu_items(readiness, update_packages=()):
     else:
         update_reason = ""
     items = [
-        MenuItem("enter-dfu", "Enter DFU from RCM/APX", is_rcm, enter_reason),
+        MenuItem("enter-dfu-shofel", "Enter DFU with ShofEL (RAM loader)",
+                 is_rcm and readiness.shofel_dfu_available, shofel_dfu_reason),
+        MenuItem("enter-dfu-signed", "Enter DFU with signed recovery",
+                 is_rcm, enter_reason),
         MenuItem("backup-var-shofel", "Back up var with ShofEL (read-only)",
                  is_rcm and readiness.shofel_available, shofel_reason),
         MenuItem("backup-var", "Back up var", is_dfu, connection_reason),
@@ -578,7 +600,8 @@ class TerminalMenu:
 
 def _action_hint(key):
     hints = {
-        "enter-dfu": "Loads the recovery program into RAM while the robot is in RCM/APX.",
+        "enter-dfu-shofel": "Initializes the selected SDRAM profile and starts the RAM recovery loader from RCM/APX.",
+        "enter-dfu-signed": "Loads the signed recovery program into RAM while the robot is in RCM/APX.",
         "backup-var-shofel": "Reads the GPT and var partition over ShofEL USB. This action does not write eMMC.",
         "backup-var": "Read the robot's var partition and save one reusable local rollback image.",
         "set-mode": "Choose a mode; review the proposed change and confirm before writing.",
@@ -692,7 +715,20 @@ def _run_update(api):
 
 def execute_action(api, key, readiness):
     """Run an action selected from the main screen using the shared curses prompts."""
-    if key == "enter-dfu":
+    if key == "enter-dfu-shofel":
+        if readiness.state != "rcm":
+            raise RuntimeError("ShofEL DFU entry is available only while the robot is in RCM/APX.")
+        if not api.shofel_dfu_available():
+            raise RuntimeError("The launch-enabled ShofEL DFU tool and payload are unavailable.")
+        if not confirm_action(
+                "Enter DFU with ShofEL",
+                "Use the Meerkat Rev02 SDRAM profile to start the RAM recovery loader "
+                "on USB port {}?\nNo partition write is performed during entry.".format(
+                    readiness.port)):
+            return {"status": "cancelled", "message": "DFU entry was cancelled."}
+        return api.enter_shofel_dfu(port=readiness.port,
+                                    confirm_meerkat_rev02=True)
+    if key in ("enter-dfu", "enter-dfu-signed"):
         return _run_enter(api, readiness)
     if key == "backup-var":
         return api.backup_var()
