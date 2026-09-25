@@ -1,6 +1,7 @@
 """Host-only tests for the experimental generic file mailbox client."""
 import hashlib
 import io
+import json
 import struct
 import tempfile
 import unittest
@@ -111,6 +112,17 @@ class FileDfuTests(unittest.TestCase):
                     j._stat_partition_file_rpc(
                         "dfu-util", "1-2", "var", "/jibo/mode.json", directory)
 
+    def test_stat_command_reports_octal_permissions_without_writing(self):
+        metadata = {"inode": 26450, "size_bytes": 17, "allocated_bytes": 1024,
+                    "uid": 0, "gid": 0, "mode": 0o100644, "nlink": 1,
+                    "extent_count": 1, "ext4_uuid": "00" * 16}
+        with patch.object(j, "_file_loader_context", return_value=("1-1", [], "serial-sha256:robot", "")), \
+                patch.object(j, "_stat_partition_file_rpc", return_value=metadata) as request:
+            result = j.stat_partition_file_live("/jibo/mode.json", "var", "1-1", "dfu-util")
+        self.assertEqual(result["permissions_octal"], "0644")
+        self.assertEqual((result["uid"], result["gid"]), (0, 0))
+        request.assert_called_once()
+
     def test_bundled_loader_is_capability_gated_before_file_transfer(self):
         with patch.object(j, "_dfu_context",
                           return_value=("1-2", [j.MARKER, "var"], "unknown", "")):
@@ -124,7 +136,7 @@ class FileDfuTests(unittest.TestCase):
             with self.assertRaisesRegex(j.DfuError, "stable eMMC identity"):
                 j._file_loader_context("1-2", "dfu-util", ("var",), True)
 
-    def _transaction_patches(self, operation_dir, events, *, confirm=True):
+    def _transaction_patches(self, operation_dir, events, *, post_mode=None):
         metadata = {"inode": 12, "size_bytes": 3, "allocated_bytes": 4096,
                     "uid": 0, "gid": 0, "mode": 0o100600, "nlink": 1,
                     "extent_count": 1, "ext4_uuid": "ab" * 16}
@@ -135,6 +147,8 @@ class FileDfuTests(unittest.TestCase):
             result = metadata.copy()
             if stat_calls[0] > 1:
                 result["size_bytes"] = 4
+                if post_mode is not None:
+                    result["mode"] = post_mode
             return result
         def read(*_args):
             events.append("read")
@@ -198,6 +212,25 @@ class FileDfuTests(unittest.TestCase):
             self.assertLess(events.index("write"), events.index("ack"))
             self.assertLess(events.index("ack"), events.index("post-stat"))
             self.assertEqual(events.count("backup:var"), 1)
+
+    def test_transaction_rejects_permission_change_after_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            events = []
+            patches = self._transaction_patches(operation_dir, events,
+                                                post_mode=0o100644)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                    patches[5], patches[6], patches[7], redirect_stdout(io.StringIO()):
+                transaction = j.FileTransaction(("var",), "1-2", "dfu-util",
+                                                operation_dir)
+                transaction.replace("var", "/jibo/mode.json", b"new!")
+                with patch.object(j, "_read_partition_file_rpc", side_effect=[b"old", b"new!"]):
+                    with self.assertRaisesRegex(j.DfuError, "did not match its file-level readback"):
+                        transaction.commit(True)
+            record = json.loads((operation_dir / "file-transaction.json").read_text())
+            self.assertEqual(record["status"], "verification failed")
+            self.assertEqual(record["writes"][0]["after_metadata"]["mode"], 0o100644)
+            self.assertLess(events.index("backup:var"), events.index("write"))
 
 
 if __name__ == "__main__":

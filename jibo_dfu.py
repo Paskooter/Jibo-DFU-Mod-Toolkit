@@ -1588,6 +1588,18 @@ def read_partition_file_live(path, partition="var", port=None, dfu_util=None):
         return _read_partition_file_rpc(dfu_util, port, partition, path, temp)
 
 
+def stat_partition_file_live(path, partition="var", port=None, dfu_util=None):
+    """Read current ownership and permissions without changing the partition."""
+    _validate_file_path(path)
+    dfu_util = dfu_util or tool("dfu-util")
+    port, _, _, _ = _file_loader_context(port, dfu_util, (partition,), False)
+    with tempfile.TemporaryDirectory(prefix="jibo-file-stat-", dir="/tmp") as temp:
+        details = _stat_partition_file_rpc(dfu_util, port, partition, path, temp)
+    return {"status": "stat", "partition": partition, "path": path,
+            "permissions_octal": format(stat.S_IMODE(details["mode"]), "04o"),
+            **details}
+
+
 def _partition_file_backup(dfu_util, port, device_tag, partition, size, names,
                            alt_output, identity):
     if partition == "var":
@@ -2026,6 +2038,12 @@ def main(argv=None):
     read_file.add_argument("--out", type=Path, required=True, help="New private output file")
     _add_device_arguments(read_file)
     _add_dfu_argument(read_file)
+    stat_file = sub.add_parser("stat-partition-file",
+                               help="Inspect an existing file's owner, permissions, and inode through DFU")
+    stat_file.add_argument("path", help="Absolute path inside the selected ext4 partition")
+    stat_file.add_argument("--partition", required=True, choices=FILE_LEVEL_PARTITIONS)
+    _add_device_arguments(stat_file)
+    _add_dfu_argument(stat_file)
     write_file = sub.add_parser("write-partition-file",
                                 help="Replace one existing file through the experimental file mailbox")
     write_file.add_argument("path", help="Absolute path inside the selected ext4 partition")
@@ -2126,6 +2144,9 @@ def main(argv=None):
             result = {"status": "read", "partition": args.partition, "path": args.path,
                       "output": str(output), "size_bytes": len(payload),
                       "sha256": hashlib.sha256(payload).hexdigest()}
+        elif args.command == "stat-partition-file":
+            result = stat_partition_file_live(args.path, args.partition, args.port,
+                                              tool("dfu-util", args.dfu_util))
         elif args.command == "write-partition-file":
             source_arg = args.image.expanduser()
             if source_arg.is_symlink():
