@@ -1206,6 +1206,45 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         raise DfuError(str(exc) + "\nUpdate record: " + str(record_path)) from exc
 
 
+def verify_update_write(manifest, partition, port=None, dfu_util=None):
+    """Read back one direct DFU update target and compare it with its record."""
+    if partition not in ("rootfsA", "rootfsB", "services", "var"):
+        raise DfuError("Readback comparison supports rootfsA, rootfsB, services, and var.")
+    manifest = Path(manifest).expanduser()
+    if manifest.is_symlink() or not manifest.is_file():
+        raise DfuError("Update record is missing or is a symbolic link: " + str(manifest))
+    try:
+        record = json.loads(manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise DfuError("Could not read the update record: " + str(exc)) from exc
+    if record.get("kind") != "jibo-full-flash-update":
+        raise DfuError("The supplied file is not an update operation record.")
+    entries = [item for item in record.get("writes", [])
+               if isinstance(item, dict) and item.get("partition") == partition]
+    if len(entries) != 1:
+        raise DfuError("The update record does not contain exactly one write for " + partition + ".")
+    expected_hash = entries[0].get("candidate_sha256")
+    expected_size = entries[0].get("size_bytes")
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or \
+            not isinstance(expected_size, int) or expected_size <= 0:
+        raise DfuError("The update record has an invalid size or hash for " + partition + ".")
+
+    dfu_util = dfu_util or tool("dfu-util")
+    port, names, _ = _dfu_context(port, dfu_util)
+    if partition not in names:
+        raise DfuError("The DFU loader does not expose " + partition + ".")
+    capacities = _read_gpt_capacities(dfu_util, port, names)
+    if capacities.get(partition) != expected_size:
+        raise DfuError("The live " + partition + " size does not match the saved update record.")
+    with tempfile.TemporaryDirectory(prefix="jibo-verify-update-") as temporary:
+        actual_hash = _upload_partition(dfu_util, port, partition, expected_size,
+                                        Path(temporary) / "readback.img")
+    return {"status": "match" if actual_hash == expected_hash else "mismatch",
+            "partition": partition, "size_bytes": expected_size,
+            "expected_sha256": expected_hash, "readback_sha256": actual_hash,
+            "temporary_readback_removed": True}
+
+
 def set_mode_live(mode, port=None, dfu_util=None, out=None, confirmation=None):
     if mode not in images.MODE_VALUES:
         raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
@@ -1391,6 +1430,12 @@ def main(argv=None):
     _add_operation_argument(flash)
     flash.add_argument("--dry-run", action="store_true", help="Verify package and live partition sizes without writing")
     flash.add_argument("--confirm", help="Exactly FLASH UPDATE, for scripted writes")
+    verify = sub.add_parser("verify-update-write",
+                            help="Read back one update partition and compare it with a saved operation record")
+    verify.add_argument("manifest", type=Path, help="Saved update-manifest.json from a flash attempt")
+    verify.add_argument("--partition", required=True, choices=("rootfsA", "rootfsB", "services", "var"))
+    _add_device_arguments(verify)
+    _add_dfu_argument(verify)
     args = parser.parse_args(argv)
     try:
         if args.command == "interactive":
@@ -1433,11 +1478,14 @@ def main(argv=None):
             result = flash_update(args.package, args.preserve_var, args.port,
                                   tool("dfu-util", args.dfu_util), args.operation_dir,
                                   args.confirm, args.dry_run)
+        elif args.command == "verify-update-write":
+            result = verify_update_write(args.manifest, args.partition, args.port,
+                                         tool("dfu-util", args.dfu_util))
         else:
             result = write_var(args.image, args.port, tool("dfu-util", args.dfu_util),
                                args.operation_dir, args.confirm)
         print(json.dumps(result, indent=2, default=str))
-        return 0
+        return 1 if isinstance(result, dict) and result.get("status") == "mismatch" else 0
     except (DfuError, images.ImageError, updates.UpdateError, OSError) as exc:
         print("Error: " + str(exc), file=sys.stderr)
         return 1

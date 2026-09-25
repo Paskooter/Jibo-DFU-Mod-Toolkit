@@ -64,6 +64,48 @@ def add_image_files(archive, prefix="release/flash_jibo/output/images", skip=())
 
 
 class UpdatePackageTests(unittest.TestCase):
+    def test_verify_update_write_reads_only_and_removes_temporary_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = b"services readback"
+            expected_hash = hashlib.sha256(payload).hexdigest()
+            manifest = root / "update-manifest.json"
+            manifest.write_text(json.dumps({
+                "kind": "jibo-full-flash-update", "writes": [{
+                    "partition": "services", "size_bytes": len(payload),
+                    "candidate_sha256": expected_hash, "status": "write started"}]}))
+            readback_paths = []
+
+            def upload(_tool, _port, _name, _size, destination):
+                readback_paths.append(Path(destination))
+                Path(destination).write_bytes(payload)
+                return hashlib.sha256(payload).hexdigest()
+
+            with patch.object(toolkit, "_dfu_context",
+                              return_value=("1-1", ["var", "services"], "device")), \
+                    patch.object(toolkit, "_read_gpt_capacities",
+                                 return_value={"services": len(payload)}), \
+                    patch.object(toolkit, "_upload_partition", side_effect=upload) as read:
+                result = toolkit.verify_update_write(manifest, "services", "1-1", "dfu-util")
+            self.assertEqual(result["status"], "match")
+            read.assert_called_once()
+            self.assertFalse(readback_paths[0].exists())
+
+    def test_verify_update_write_checks_live_partition_size_before_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "update-manifest.json"
+            manifest.write_text(json.dumps({
+                "kind": "jibo-full-flash-update", "writes": [{
+                    "partition": "services", "size_bytes": 16,
+                    "candidate_sha256": "a" * 64}]}))
+            with patch.object(toolkit, "_dfu_context",
+                              return_value=("1-1", ["var", "services"], "device")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value={"services": 32}), \
+                    patch.object(toolkit, "_upload_partition") as read:
+                with self.assertRaisesRegex(toolkit.DfuError, "does not match"):
+                    toolkit.verify_update_write(manifest, "services", "1-1", "dfu-util")
+            read.assert_not_called()
+
     def test_gpt_layout_parser_returns_exact_partition_extents(self):
         layout = updates.parse_gpt_layout_prefix(make_gpt_prefix())
         self.assertEqual(layout["rootfsA"]["first_lba"], 34)
