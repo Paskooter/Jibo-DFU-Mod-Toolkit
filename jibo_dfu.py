@@ -760,7 +760,7 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                 if actual_hash != expected_hash:
                     chunk_record["status"] = "readback mismatch"
                     _private_write(record_path, record)
-                    raise DfuError("{} did not match its readback. DFU was left active; use the saved backups.".format(
+                    raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(
                         chunk["name"]))
                 with readback.open("rb") as stream:
                     _copy_exact(stream, _NullWriter(), chunk["size_bytes"], readback_hash)
@@ -1070,7 +1070,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         raise DfuError("The robot is in RCM/APX. Enter DFU with ShofEL before installing an update.")
     package = _call_with_progress(lambda: updates.validate_package(package_path),
                                   "Checking the selected update package")
-    port, names, device_tag, alt_output = _dfu_context(
+    port, names, _, alt_output = _dfu_context(
         selected["port"], dfu_util, include_output=True)
     partitions = [name for name in UPDATE_ORDER if name != "var" or not preserve_var]
     skills_aliases = [name for name in names if name.startswith("skills-")]
@@ -1085,6 +1085,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     plan = {"package": str(package.source), "version": package.version,
             "usb_port": port, "var_policy": "preserve current configuration" if preserve_var else
             "replace with package var image (fresh setup and lost local settings)",
+            "rollback_backup": "var only; other partitions are restored from the package",
             "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
             "skills_transfer": ("{} GPT-bounded DFU chunks".format(len(skills_chunks))
                                 if skills_chunks else "single named DFU alternative"),
@@ -1095,7 +1096,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     print(json.dumps(plan, indent=2))
     print("This writes the listed partitions, verifies each by a full USB readback, then requests a reset.")
     print("A preserved var keeps its current mode, identity, network settings, and first-boot resize marker.")
-    print("A fresh var replaces those settings with the package image; a rollback backup is saved first.")
+    print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
     if callable(confirmation):
         if not confirmation(plan):
             return {**plan, "status": "cancelled"}
@@ -1115,22 +1116,12 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             prepared = _call_with_progress(
                 lambda: updates.prepare_images(package, preserve_var, capacities, prepared_dir),
                 "Preparing partition images on this computer")
-            record["status"] = "backing up original partitions"
+            record["status"] = "backing up var"
             _private_write(record_path, record)
             # Even a preserve-var update gets one reusable rollback image of var.
             var_backup = backup_var(port, dfu_util)
             record["backups"]["var"] = var_backup
             _private_write(record_path, record)
-            for name in partitions:
-                if name == "var":
-                    continue
-                if name == "skills" and skills_chunks:
-                    record["backups"][name] = _backup_skills_partition_once(
-                        dfu_util, port, device_tag, capacities[name], skills_chunks)
-                else:
-                    record["backups"][name] = _backup_partition_once(
-                        dfu_util, port, device_tag, name, capacities[name])
-                _private_write(record_path, record)
             for name in partitions:
                 candidate = prepared[name]
                 digest = _sha256_file(candidate)
@@ -1155,7 +1146,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 if actual != digest:
                     entry["status"] = "verification failed"
                     _private_write(record_path, record)
-                    raise DfuError("{} did not match its readback. DFU was left active; use the saved backups.".format(name))
+                    raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(name))
                 entry["status"] = "verified"
                 _private_write(record_path, record)
         record["status"] = "verified; reset pending"

@@ -76,7 +76,7 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refr
 | Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; reads current `var`, saves one rollback backup, writes the edit, then reads it back. |
 | Configure Wi-Fi | Adds a chosen network through the same backup, write, and readback workflow. |
 | Write an edited var image | Writes an offline image after backup and confirmation, then verifies its readback. |
-| Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, backs up each partition before its first write, expands images to their final partition sizes offline, and verifies each write by readback. |
+| Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, saves or reuses one `var` rollback backup, expands package images to their final partition sizes offline, and verifies each write by readback. `rootfsA`, `rootfsB`, `services`, and `skills` are restored from the package if needed; they are not backed up first. |
 
 The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transfer resets the loader's read cursor, so another check or an update can run without restarting DFU.
 
@@ -89,10 +89,12 @@ sudo python3 dist/jibo-dfu-linux-x86_64.pyz inspect-var /path/to/var.img
 sudo python3 dist/jibo-dfu-linux-x86_64.pyz list-updates
 ```
 
-Use `--out /path/to/new/directory` with `backup-var` to force a fresh read for comparison. The default reuses one verified baseline; `--refresh` reads the current state and discards the new copy if it is byte-identical to the saved baseline. The update workflow similarly reuses one validated rollback backup per device and partition.
+Use `--out /path/to/new/directory` with `backup-var` to force a fresh read for comparison. The default reuses one verified baseline; `--refresh` reads the current state and discards the new copy if it is byte-identical to the saved baseline. The update workflow saves or reuses a `var` rollback backup. Its reads of other partitions occur after writing to verify that the result matches the selected package.
 
 ## Hardware results and remaining work
 
 On Moth, ShofEL started the RAM loader and the robot entered DFU on the same USB port. Two consecutive 17 KiB GPT marker reads in one DFU session validated the partition layout. A full DFU read of `var` took 116.9 seconds and produced exactly 524,288,000 bytes with SHA-256 `4a58631e0c6eb0559bef7d2827676a1bce7965886f2887afbdc65dedce18416b`. That matched Moth's September read-only ShofEL `var` backup byte for byte. The temporary comparison copy was removed; neither validation wrote eMMC. An older full eMMC dump from June has different `var` contents, so it is not the matching reference for this test.
 
-A mode change to `int-developer` has also been confirmed on a connected Jibo. The new Windows USB helper has been checked against a Jibo already attached in DFU; its automatic reattachment during an RCM-to-DFU transition has not yet been tested end to end. Full update installation and readback, automatic board-profile selection, a complete user-area eMMC backup, and other robot revisions still need hardware validation. The toolkit does not enable SSH.
+A mode change to `int-developer` has also been confirmed on a connected Jibo. The owner has verified the Windows/WSL USB helper through RCM-to-DFU reattachment, other USB state changes, unplug/replug, and power-off/power-on. An official update installation is being tested; its complete write, readback, and boot result have not yet been reported. The toolkit can back up `var`; a complete eMMC user-area backup is not implemented yet. The toolkit does not enable SSH.
+
+The current ShofEL entry uses the Meerkat Rev02 SDRAM initialization profile verified on Moth. **Board-profile selection** means choosing RAM initialization parameters before the DFU loader can run. The current `RAM_CODE=2` strap does not distinguish all board revisions, so the toolkit does not guess a profile from USB identity alone. [Jibo's board history](https://pvindex.org/confluence/display/ENG/Boards,+Revisions+and+History) lists multiple JB1001 and JB1014 mainboard revisions, but does not establish how many distinct SDRAM profiles those robots need. Supporting more robots requires a reliable identifier readable before RAM initialization, matching parameter sets, and hardware checks on representative revisions. Automatic selection and coverage beyond the tested profile remain open work.

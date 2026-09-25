@@ -619,6 +619,7 @@ def _confirmation_details(plan, introduction):
         ("version", "Version"),
         ("usb_port", "USB port"),
         ("var_policy", "Var policy"),
+        ("rollback_backup", "Rollback backup"),
         ("partition", "Partition"),
         ("size_bytes", "Size (bytes)"),
         ("before_sha256", "Current var SHA-256"),

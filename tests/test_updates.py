@@ -102,8 +102,9 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "_dfu_context", return_value=("1-1", names, "device", alt_output)), \
                     patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
                     patch.object(toolkit, "_new_operation_dir", return_value=operation), \
-                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}) as var_backup, \
                     patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
+                    patch.object(toolkit, "_backup_skills_partition_once") as skills_backup, \
                     patch.object(toolkit.updates, "prepare_images", return_value={name: candidate for name in ("rootfsA", "rootfsB", "services", "skills")}), \
                     patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
                     patch.object(toolkit, "run_with_progress", side_effect=transfer), \
@@ -113,9 +114,50 @@ class UpdatePackageTests(unittest.TestCase):
                                                   confirmation="FLASH UPDATE")
             written = [argv[argv.index("-a") + 1] for argv in transfers if "-D" in argv]
             self.assertEqual(written, ["rootfsA", "rootfsB", "services", "skills"])
-            self.assertEqual(backup.call_count, 4)
+            var_backup.assert_called_once_with("1-1", "dfu-util")
+            backup.assert_not_called()
+            skills_backup.assert_not_called()
             self.assertEqual(upload.call_count, 4)
             self.assertEqual(result["status"], "verified; reset requested")
+            self.assertEqual(result["backups"], {"var": {"image": "saved-var.img"}})
+
+    def test_fresh_var_flash_backs_up_only_var_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (images_dir / filename).write_bytes(b"package placeholder")
+            candidate = root / "prepared.img"
+            candidate.write_bytes(b"prepared")
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = dict(updates.KNOWN_CAPACITIES)
+            capacities["skills"] = 10_991_139_328
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"]
+            transfers = []
+            with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", names, "device", "")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}) as var_backup, \
+                    patch.object(toolkit, "_backup_partition_once") as other_backup, \
+                    patch.object(toolkit, "_backup_skills_partition_once") as skills_backup, \
+                    patch.object(toolkit.updates, "prepare_images",
+                                 return_value={name: candidate for name in toolkit.UPDATE_ORDER}), \
+                    patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
+                    patch.object(toolkit, "run_with_progress", side_effect=lambda argv, **_kwargs: transfers.append(argv)), \
+                    patch.object(toolkit, "run", return_value=""):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = toolkit.flash_update(root / "release", False, port="1-1",
+                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE")
+            var_backup.assert_called_once_with("1-1", "dfu-util")
+            other_backup.assert_not_called()
+            skills_backup.assert_not_called()
+            self.assertEqual(result["backups"], {"var": {"image": "saved-var.img"}})
+            self.assertEqual(upload.call_count, 5)
+            self.assertEqual([argv[argv.index("-a") + 1] for argv in transfers],
+                             list(toolkit.UPDATE_ORDER))
 
     def test_chunked_skills_update_validates_and_transfers_exact_gpt_slices(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -165,7 +207,7 @@ class UpdatePackageTests(unittest.TestCase):
                                  return_value=("1-1", names, "device", alt_output)), \
                     patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
                     patch.object(toolkit, "_new_operation_dir", return_value=operation), \
-                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}) as var_backup, \
                     patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
                     patch.object(toolkit, "_backup_skills_partition_once",
                                  return_value={"image": "saved-skills.img"}) as skills_backup, \
@@ -177,8 +219,9 @@ class UpdatePackageTests(unittest.TestCase):
                     result = toolkit.flash_update(root / "release", True, port="1-1",
                                                   dfu_util="dfu-util", confirmation="FLASH UPDATE")
 
-            self.assertEqual(skills_backup.call_count, 1)
-            self.assertEqual(backup.call_count, 3)
+            var_backup.assert_called_once_with("1-1", "dfu-util")
+            skills_backup.assert_not_called()
+            backup.assert_not_called()
             self.assertEqual([written[name] for name in chunk_names],
                              [skills_payload[:1024], skills_payload[1024:2048], skills_payload[2048:]])
             self.assertEqual(result["status"], "verified; reset requested")
