@@ -12,6 +12,7 @@ import pwd
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import struct
 import sys
@@ -38,6 +39,7 @@ FILE_RPC_READ = 1
 FILE_RPC_WRITE = 2
 FILE_RPC_STAT = 3
 FILE_STAT_STRUCT = struct.Struct("<QIIIIIII16s")
+FILE_WRITE_PRECONDITION = struct.Struct("<QIIIII16s32s")
 EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
 UPDATE_CONFIRMATION = "FLASH UPDATE"
@@ -553,7 +555,8 @@ def _verify_or_bind_partition_identity(backup, identity):
     manifest = Path(backup["manifest"])
     try:
         record = json.loads(manifest.read_text())
-        if record.get("sha256") != backup["sha256"]:
+        if (record.get("sha256") != backup["sha256"] or
+                _sha256_file(backup["image"]) != backup["sha256"]):
             raise DfuError("The saved partition manifest hash does not match its image.")
         recorded = record.get("partition_identity")
         if recorded is not None and recorded != identity:
@@ -626,6 +629,9 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size, identity
     image = directory / "partition.img"
     try:
         digest = _upload_partition(dfu_util, port, partition, size, image)
+        if identity and _ext4_uuid_from_image(image) != identity.get("ext4_uuid"):
+            raise DfuError("The downloaded {} image ext4 UUID does not match the live partition."
+                           .format(partition))
         existing = _find_partition_backup_by_hash(partition, size, digest)
         if existing:
             image.unlink(missing_ok=True)
@@ -849,6 +855,8 @@ def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, 
     try:
         uploaded = _upload_skills_partition(dfu_util, port, capacity, chunks,
                                             destination=image, workdir=directory)
+        if identity and _ext4_uuid_from_image(image) != identity.get("ext4_uuid"):
+            raise DfuError("The downloaded skills image ext4 UUID does not match the live partition.")
         same_bytes = _find_partition_backup_by_hash("skills", capacity, uploaded["sha256"])
         if same_bytes:
             image.unlink(missing_ok=True)
@@ -943,13 +951,14 @@ def _update_candidates(folder):
 
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
                      transport="USB DFU upload", usb_state="DFU (0955:701a)",
-                     profile="Jibo RAM DFU loader"):
+                     profile="Jibo RAM DFU loader", partition_identity=None):
     record = {"schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
               "partition": "var", "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
               "profile": profile, "transport": transport, "usb_state": usb_state,
               "usb_port": port, "device_tag": device_tag or "usb-identity-unavailable",
               "device_tags": [device_tag] if device_tag else [],
               "image": Path(image_path).name,
+              "partition_identity": partition_identity,
               "operations": operations or ["read var partition"]}
     _private_write(Path(directory) / "backup-manifest.json", record)
     return record
@@ -1085,12 +1094,15 @@ def _raise_live_operation_error(directory, operation, state, error):
     raise DfuError(details) from error
 
 
-def backup_var(port=None, dfu_util=None, out=None, refresh=False):
+def backup_var(port=None, dfu_util=None, out=None, refresh=False, expected_identity=None):
     dfu_util = dfu_util or tool("dfu-util")
     port, _, device_tag = _dfu_context(port, dfu_util)
     existing = (_find_verified_backup(device_tag)
                 if out is None and _has_unique_device_tag(device_tag) else None)
     if existing and not refresh:
+        backup = {"image": existing["image"], "sha256": existing["sha256"],
+                  "manifest": existing["manifest"]}
+        _verify_or_bind_partition_identity(backup, expected_identity)
         return {"status": "existing verified backup reused", "image": str(existing["image"]),
                 "sha256": existing["sha256"], "manifest": str(existing["manifest"]),
                 "created_utc": existing["created_utc"],
@@ -1099,6 +1111,8 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
     image_path = directory / "var.img"
     try:
         digest = _upload_var(dfu_util, port, image_path)
+        if expected_identity and _ext4_uuid_from_image(image_path) != expected_identity.get("ext4_uuid"):
+            raise DfuError("The downloaded var image ext4 UUID does not match the live partition.")
         if out is None:
             if existing is None:
                 existing = _find_verified_backup(expected_sha256=digest)
@@ -1106,10 +1120,14 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
                 image_path.unlink(missing_ok=True)
                 directory.rmdir()
                 _bind_verified_backup_identity(existing, device_tag, digest)
+                _verify_or_bind_partition_identity({"image": existing["image"],
+                    "sha256": existing["sha256"], "manifest": existing["manifest"]},
+                    expected_identity)
                 return {"status": "existing verified backup reused", "image": str(existing["image"]),
                         "sha256": digest, "manifest": str(existing["manifest"]),
                         "created_utc": existing["created_utc"]}
-        record = _backup_manifest(directory, port, image_path, digest, device_tag=device_tag)
+        record = _backup_manifest(directory, port, image_path, digest, device_tag=device_tag,
+                                  partition_identity=expected_identity)
     except DfuError as exc:
         image_path.unlink(missing_ok=True)
         _private_write(directory / "backup-manifest.json", {
@@ -1416,7 +1434,13 @@ def _validate_file_path(path):
 def _file_alt_name(partition):
     if partition not in FILE_LEVEL_PARTITIONS:
         raise DfuError("File operations support only: " + ", ".join(FILE_LEVEL_PARTITIONS))
-    return "jibo-file-" + partition
+    return "jibo-file-" + partition + "-in"
+
+
+def _file_response_alt_name(partition):
+    if partition not in FILE_LEVEL_PARTITIONS:
+        raise DfuError("File operations support only: " + ", ".join(FILE_LEVEL_PARTITIONS))
+    return "jibo-file-" + partition + "-out"
 
 
 def _file_loader_context(port, dfu_util, partitions, require_identity):
@@ -1428,10 +1452,17 @@ def _file_loader_context(port, dfu_util, partitions, require_identity):
                if name not in names]
     if missing:
         raise DfuError("The active loader does not expose file operations for: " + ", ".join(missing))
+    missing = [name for name in (_file_response_alt_name(partition) for partition in partitions)
+               if name not in names]
+    if missing:
+        raise DfuError("The active loader does not expose file responses for: " + ", ".join(missing))
+    if require_identity and not _has_unique_device_tag(device_tag):
+        raise DfuError("File writes require a stable eMMC identity from the candidate loader. The current UNKNOWN-serial "
+                       "loader cannot safely reuse rollback baselines; use the full-partition workflow.")
     return port, names, device_tag, listing
 
 
-def _file_request(path, operation, content=b"", request_id=None):
+def _file_request(path, operation, content=b"", request_id=None, precondition=None):
     path_bytes = _validate_file_path(path)
     if operation not in (FILE_RPC_READ, FILE_RPC_WRITE, FILE_RPC_STAT):
         raise DfuError("Unsupported file request operation.")
@@ -1439,11 +1470,16 @@ def _file_request(path, operation, content=b"", request_id=None):
         raise DfuError("A read or stat request cannot include file contents.")
     if operation == FILE_RPC_WRITE and not (0 < len(content) <= FILE_LEVEL_MAX_BYTES):
         raise DfuError("A replacement must contain 1 to {} bytes.".format(FILE_LEVEL_MAX_BYTES))
+    if operation == FILE_RPC_WRITE and (precondition is None or
+                                         len(precondition) != FILE_WRITE_PRECONDITION.size):
+        raise DfuError("A file replacement requires a complete compare-and-write precondition.")
+    if operation != FILE_RPC_WRITE and precondition is not None:
+        raise DfuError("Only file replacements accept a compare-and-write precondition.")
     request_id = request_id or secrets.token_bytes(16)
     if len(request_id) != 16:
         raise DfuError("A file request ID must contain 16 bytes.")
     return (FILE_RPC_HEADER.pack(FILE_RPC_MAGIC, operation, len(path_bytes), len(content), request_id) +
-            path_bytes + content), request_id
+            path_bytes + (precondition or b"") + content), request_id
 
 
 def _decode_file_response(response, request_id):
@@ -1497,8 +1533,9 @@ def _stat_partition_file_rpc(dfu_util, port, partition, path, workdir):
         raise DfuError("The file mailbox returned invalid stat metadata.")
     (inode, size, allocated_bytes, uid, gid, mode, nlink,
      extent_count, ext4_uuid) = FILE_STAT_STRUCT.unpack(response)
-    if (not inode or size > FILE_LEVEL_MAX_BYTES or
+    if (not inode or not stat.S_ISREG(mode) or size > FILE_LEVEL_MAX_BYTES or
             allocated_bytes < size or not allocated_bytes or
+            allocated_bytes > FILE_LEVEL_MAX_BYTES or
             nlink != 1 or extent_count != 1 or len(ext4_uuid) != 16):
         raise DfuError("The target must be an existing bounded regular file with one allocated extent and no hard links.")
     return {"inode": inode, "size_bytes": size, "allocated_bytes": allocated_bytes,
@@ -1511,7 +1548,7 @@ def _upload_file_response(dfu_util, port, partition, request_id, workdir, label)
     destination.unlink(missing_ok=True)
     try:
         run_with_progress([dfu_util, "-d", "0955:701a", "--path", port,
-                           "-a", _file_alt_name(partition), "-U", str(destination)],
+                           "-a", _file_response_alt_name(partition), "-U", str(destination)],
                           timeout=120, label="Reading {} from {}".format(label, partition))
         if not destination.is_file() or destination.stat().st_size > (
                 FILE_LEVEL_MAX_BYTES + FILE_RPC_RESPONSE_HEADER.size):
@@ -1536,7 +1573,8 @@ def _partition_file_backup(dfu_util, port, device_tag, partition, size, names,
                            alt_output, identity):
     if partition == "var":
         # backup-var already enforces byte-identical matching for an UNKNOWN serial.
-        record = backup_var(port=port, dfu_util=dfu_util)
+        record = backup_var(port=port, dfu_util=dfu_util,
+                            expected_identity=identity)
         backup = {"image": record["image"], "sha256": record["sha256"],
                   "manifest": record["manifest"], "status": record["status"]}
         _verify_or_bind_partition_identity(backup, identity)
@@ -1682,8 +1720,14 @@ class FileTransaction:
                 write_entry = {**change, "status": "write started"}
                 record["writes"].append(write_entry)
                 _private_write(record_path, record)
+                before = change["before_metadata"]
+                precondition = FILE_WRITE_PRECONDITION.pack(
+                    before["inode"], before["size_bytes"], before["allocated_bytes"],
+                    before["uid"], before["gid"], before["mode"],
+                    bytes.fromhex(before["ext4_uuid"]),
+                    bytes.fromhex(change["before_sha256"]))
                 request, request_id = _file_request(edit["path"], FILE_RPC_WRITE,
-                                                    edit["content"])
+                                                    edit["content"], precondition=precondition)
                 _file_request_transfer(self.dfu_util, port, edit["partition"], request,
                                        request_dir, "Writing {} in {}".format(
                                            edit["path"], edit["partition"]))
@@ -2064,24 +2108,29 @@ def main(argv=None):
                       "output": str(output), "size_bytes": len(payload),
                       "sha256": hashlib.sha256(payload).hexdigest()}
         elif args.command == "write-partition-file":
-            source = args.image.expanduser().resolve()
-            if source.is_symlink() or not source.is_file():
+            source_arg = args.image.expanduser()
+            if source_arg.is_symlink():
+                raise DfuError("Replacement file is a symbolic link: " + str(source_arg))
+            source = source_arg.resolve()
+            if not source.is_file():
                 raise DfuError("Replacement file does not exist or is a symbolic link: " + str(source))
             if not (0 < source.stat().st_size <= FILE_LEVEL_MAX_BYTES):
                 raise DfuError("Replacement files must contain 1 to {} bytes.".format(
                     FILE_LEVEL_MAX_BYTES))
             result = write_partition_file_live(
                 args.partition, args.path, source.read_bytes(), args.port,
-                tool("dfu-util", args.dfu_util), args.operation_dir, args.yes)
+                tool("dfu-util", args.dfu_util), args.operation_dir,
+                True if args.yes else None)
         elif args.command == "set-mode-file":
             result = set_mode_file_live(args.mode, args.partition, args.port,
                                         tool("dfu-util", args.dfu_util),
-                                        args.operation_dir, args.yes)
+                                        args.operation_dir, True if args.yes else None)
         elif args.command == "configure-wifi-file":
             password = _password_from_args(args)
             result = configure_wifi_file_live(
                 args.ssid, password, args.open_network, args.partition, args.port,
-                tool("dfu-util", args.dfu_util), args.operation_dir, args.yes)
+                tool("dfu-util", args.dfu_util), args.operation_dir,
+                True if args.yes else None)
             password = None
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}

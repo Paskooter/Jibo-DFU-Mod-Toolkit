@@ -22,12 +22,14 @@ class FileDfuTests(unittest.TestCase):
 
     def test_request_and_response_bind_to_nonce_and_content_hash(self):
         request_id = bytes(range(16))
+        precondition = b"p" * j.FILE_WRITE_PRECONDITION.size
         request, returned_id = j._file_request("/jibo/mode.json", j.FILE_RPC_WRITE,
-                                              b"{}", request_id)
+                                              b"{}", request_id, precondition)
         self.assertEqual(returned_id, request_id)
         header = j.FILE_RPC_HEADER.unpack_from(request)
         self.assertEqual(header[:5], (j.FILE_RPC_MAGIC, j.FILE_RPC_WRITE,
                                       len(b"/jibo/mode.json"), 2, request_id))
+        self.assertEqual(request[len(j.FILE_RPC_HEADER.pack(*header)):][-2:], b"{}")
         data = b"response"
         response = (j.FILE_RPC_RESPONSE_HEADER.pack(
             j.FILE_RPC_RESPONSE_MAGIC, request_id, 0, len(data), hashlib.sha256(data).digest()) + data)
@@ -36,6 +38,11 @@ class FileDfuTests(unittest.TestCase):
             j._decode_file_response(response, b"x" * 16)
         with self.assertRaisesRegex(j.DfuError, "SHA-256"):
             j._decode_file_response(response[:-1] + b"!", request_id)
+
+    def test_write_request_requires_compare_and_write_precondition(self):
+        with self.assertRaisesRegex(j.DfuError, "precondition"):
+            j._file_request("/jibo/mode.json", j.FILE_RPC_WRITE, b"{}")
+        self.assertNotEqual(j.FILE_WRITE_PRECONDITION.size, 0)
 
     def test_request_transfer_does_not_pass_upload_size_with_download(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -46,10 +53,36 @@ class FileDfuTests(unittest.TestCase):
             self.assertNotIn("-Z", argv)
             self.assertFalse((Path(directory) / "file-request.bin").exists())
 
+    def test_stat_preflight_requires_regular_file_and_one_small_extent(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(j, "_file_request_transfer"), \
+                patch.object(j, "_upload_file_response") as response:
+            base = (7, 3, 4096, 0, 0, 0o100600, 1, 1, b"u" * 16)
+            response.return_value = j.FILE_STAT_STRUCT.pack(*base)
+            self.assertEqual(j._stat_partition_file_rpc(
+                "dfu-util", "1-2", "var", "/jibo/mode.json", directory)["allocated_bytes"], 4096)
+            for changes, message in (((5, 3, 4096, 0, 0, 0o040755, 1, 1, b"u" * 16),
+                                      "regular file"),
+                                     ((5, 3, 8192, 0, 0, 0o100600, 1, 1, b"u" * 16),
+                                      "regular file"),
+                                     ((5, 3, 4096, 0, 0, 0o100600, 1, 2, b"u" * 16),
+                                      "one allocated extent")):
+                response.return_value = j.FILE_STAT_STRUCT.pack(*changes)
+                with self.subTest(changes=changes), self.assertRaisesRegex(j.DfuError, message):
+                    j._stat_partition_file_rpc(
+                        "dfu-util", "1-2", "var", "/jibo/mode.json", directory)
+
     def test_bundled_loader_is_capability_gated_before_file_transfer(self):
         with patch.object(j, "_dfu_context",
                           return_value=("1-2", [j.MARKER, "var"], "unknown", "")):
             with self.assertRaisesRegex(j.DfuError, "pinned loader cannot perform file-level"):
+                j._file_loader_context("1-2", "dfu-util", ("var",), True)
+
+    def test_unknown_identity_cannot_start_a_file_write(self):
+        names = [j.MARKER, "jibo-file-v1", "jibo-file-var-in", "jibo-file-var-out"]
+        unknown = "serial-sha256:" + hashlib.sha256(b"UNKNOWN").hexdigest()
+        with patch.object(j, "_dfu_context", return_value=("1-2", names, unknown, "")):
+            with self.assertRaisesRegex(j.DfuError, "stable eMMC identity"):
                 j._file_loader_context("1-2", "dfu-util", ("var",), True)
 
     def _transaction_patches(self, operation_dir, events, *, confirm=True):
@@ -60,7 +93,10 @@ class FileDfuTests(unittest.TestCase):
         def stat(*_args):
             stat_calls[0] += 1
             events.append("stat" if stat_calls[0] == 1 else "post-stat")
-            return metadata.copy() if stat_calls[0] == 1 else {**metadata, "size_bytes": 4}
+            result = metadata.copy()
+            if stat_calls[0] > 1:
+                result["size_bytes"] = 4
+            return result
         def read(*_args):
             events.append("read")
             return b"old"
@@ -75,7 +111,8 @@ class FileDfuTests(unittest.TestCase):
             return b""
         return (
             patch.object(j, "_file_loader_context", return_value=(
-                "1-2", [j.MARKER, "jibo-file-var", "var"], "serial-sha256:robot", "")),
+                "1-2", [j.MARKER, "jibo-file-var-in", "jibo-file-var-out", "var"],
+                "serial-sha256:robot", "")),
             patch.object(j, "_read_gpt_layout", return_value={
                 "var": {"first_lba": 100, "last_lba": 107, "size_bytes": 4096}}),
             patch.object(j, "_stat_partition_file_rpc", side_effect=stat),
@@ -96,7 +133,7 @@ class FileDfuTests(unittest.TestCase):
                     patches[5], patches[6], patches[7], redirect_stdout(io.StringIO()):
                 transaction = j.FileTransaction(("var", "services"), "1-2", "dfu-util",
                                                 operation_dir)
-                transaction.replace("var", "/jibo/mode.json", b"new!")
+                transaction.replace("var", "/jibo/mode.json", b"new")
                 result = transaction.commit(False)
             self.assertEqual(result["status"], "cancelled")
             backup.assert_not_called()
