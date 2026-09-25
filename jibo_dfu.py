@@ -336,6 +336,27 @@ def shofel_available():
         return False
 
 
+def _shofel_dfu_tool(override=None):
+    """Find a matched ShofEL host and launch-enabled RAM payload."""
+    executable = _shofel_tool(override)
+    payload = Path(executable).parent / "dfu_stage2.bin"
+    if not payload.is_file() or payload.stat().st_size == 0:
+        raise DfuError("Missing non-empty dfu_stage2.bin next to " + executable)
+    capability = run([executable, "--dfu-stage-capability"], timeout=5).strip()
+    if capability != "dfu-stage-launch=1":
+        raise DfuError("This ShofEL host cannot start the RAM DFU loader. Build and package the launch-enabled host and matching stage payload.")
+    return executable
+
+
+def shofel_dfu_available():
+    """Return whether the local ShofEL pair can start the RAM DFU loader."""
+    try:
+        _shofel_dfu_tool()
+        return (ROOT / "bundles" / "default" / "loader.bin").is_file()
+    except (DfuError, OSError):
+        return False
+
+
 def probe_rcm_dram(port=None, shofel=None):
     """Report T124 memory-controller state without accessing eMMC."""
     executable = _shofel_tool(shofel)
@@ -450,6 +471,54 @@ def stage_rcm_dfu(port=None, shofel=None, loader=None,
             "image": str(image), "size_bytes": image.stat().st_size,
             "sha256": _sha256_file(image), "emmc_writes": False,
             "started": False}
+
+
+def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
+                     timeout=120, confirm_meerkat_rev02=False):
+    """Start the pinned RAM loader through ShofEL, then confirm DFU on the same port."""
+    if not confirm_meerkat_rev02:
+        raise DfuError("Confirm the Meerkat Rev02 SDRAM profile before entering DFU through ShofEL.")
+    if not 0 < timeout <= 600:
+        raise DfuError("Timeout must be between 0 and 600 seconds.")
+    executable = _shofel_dfu_tool(shofel)
+    image = Path(loader) if loader is not None else ROOT / "bundles" / "default" / "loader.bin"
+    if image.is_symlink() or not image.is_file():
+        raise DfuError("Missing or symlinked RAM DFU loader image: " + str(image))
+    image = image.resolve()
+    selected = select_device(devices(), port)
+    if selected is None or selected["state"] != "rcm":
+        raise DfuError("Connect the robot in RCM/APX before entering DFU through ShofEL.")
+    port = selected["port"]
+    dfu_util = tool("dfu-util", dfu_util)
+    output = run_with_progress(
+        [executable, "--usb-port-path", port, "DFU_STAGE", str(image),
+         "--confirm-meerkat-rev02", "--launch"],
+        timeout=180, label="Loading the RAM DFU program", cwd=str(Path(executable).parent),
+        byte_progress=True)
+    if "Starting verified ARM-state SPL at 0x80108000." not in output:
+        raise DfuError("ShofEL did not confirm the loader launch.")
+
+    print("Waiting for DFU on USB port " + port + "…", flush=True)
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        current = select_device(devices(), port)
+        if current and current["state"] == "dfu":
+            try:
+                names, _ = dfu_alternatives(dfu_util, port)
+            except DfuError as exc:
+                last_error = str(exc)
+            else:
+                if MARKER not in names or "var" not in names:
+                    missing = [name for name in (MARKER, "var") if name not in names]
+                    raise DfuError("DFU appeared, but the RAM loader is missing: " + ", ".join(missing))
+                return {"port": port, "state": "dfu", "already_running": False,
+                        "loader_verified": True, "alternatives": names,
+                        "entry_transport": "ShofEL"}
+        time.sleep(0.25)
+    detail = " Last DFU listing error: " + last_error if last_error else ""
+    raise DfuError("The RAM loader started, but DFU did not become ready on USB port " +
+                   port + ". Check USB forwarding and the robot's connection." + detail)
 
 
 def dfu_alternatives(executable, port):
@@ -1623,6 +1692,17 @@ def main(argv=None):
     entry.add_argument("--timeout", type=float, default=30)
     entry.add_argument("--allow-unverified-profile", action="store_true",
                        help="Override the hardware-profile check after confirming the bundle matches the robot")
+    shofel_entry = sub.add_parser("enter-dfu-shofel",
+                                  help="Start the RAM DFU loader from RCM/APX through ShofEL")
+    _add_device_arguments(shofel_entry)
+    shofel_entry.add_argument("--shofel", help="Path to the launch-enabled ShofEL host and adjacent payloads")
+    shofel_entry.add_argument("--loader", type=Path,
+                              help="RAM DFU image (defaults to the packaged pinned loader)")
+    _add_dfu_argument(shofel_entry)
+    shofel_entry.add_argument("--timeout", type=float, default=120,
+                              help="Seconds to wait for DFU after the loader starts")
+    shofel_entry.add_argument("--confirm-meerkat-rev02", action="store_true", required=True,
+                              help="Confirm the Meerkat Rev02 SDRAM profile for this robot")
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
     _add_device_arguments(backup)
     _add_dfu_argument(backup)
@@ -1721,6 +1801,10 @@ def main(argv=None):
             rcm = tool("tegrarcm", args.tegrarcm) if device and device["state"] == "rcm" else "tegrarcm"
             result = enter(args.bundle, args.port, rcm, tool("dfu-util", args.dfu_util),
                            args.timeout, args.allow_unverified_profile)
+        elif args.command == "enter-dfu-shofel":
+            result = enter_shofel_dfu(args.port, args.shofel, args.loader,
+                                      args.dfu_util, args.timeout,
+                                      args.confirm_meerkat_rev02)
         elif args.command == "backup-var":
             if args.transport == "shofel":
                 result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh, args.bus_width)

@@ -233,6 +233,64 @@ class ShofelTransportTests(unittest.TestCase):
                 toolkit.stage_rcm_dfu(port="1-2", loader=toolkit.ROOT / "bundles/default/loader.bin",
                                       confirm_meerkat_rev02=True)
 
+    def test_shofel_dfu_entry_requires_profile_confirmation_before_usb_access(self):
+        with patch.object(toolkit, "_shofel_dfu_tool") as locate, \
+                patch.object(toolkit, "devices") as connected:
+            with self.assertRaisesRegex(toolkit.DfuError, "Confirm the Meerkat Rev02"):
+                toolkit.enter_shofel_dfu(port="1-2")
+        locate.assert_not_called()
+        connected.assert_not_called()
+
+    def test_shofel_dfu_tool_requires_launch_enabled_host(self):
+        directory = self.root / "shofel-launch-gate"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        (directory / "dfu_stage2.bin").write_bytes(b"stage")
+        with patch.object(toolkit, "_shofel_tool", return_value=str(executable)), \
+                patch.object(toolkit, "run", return_value="dfu-stage-launch=0\n"):
+            with self.assertRaisesRegex(toolkit.DfuError, "cannot start"):
+                toolkit._shofel_dfu_tool()
+
+    def test_shofel_dfu_entry_launches_then_checks_same_port_marker_and_var(self):
+        directory = self.root / "shofel-launch"
+        directory.mkdir()
+        executable = directory / "shofel2_t124"
+        executable.write_bytes(b"host")
+        image = self.root / "loader.bin"
+        image.write_bytes(b"pinned loader")
+        states = [[{"port": "1-2", "state": "rcm"}],
+                  [{"port": "1-2", "state": "dfu"}]]
+        with patch.object(toolkit, "_shofel_dfu_tool", return_value=str(executable)), \
+                patch.object(toolkit, "devices", side_effect=states), \
+                patch.object(toolkit, "tool", return_value="dfu-util"), \
+                patch.object(toolkit, "run_with_progress",
+                             return_value="Starting verified ARM-state SPL at 0x80108000.") as transfer, \
+                patch.object(toolkit, "dfu_alternatives",
+                             return_value=([toolkit.MARKER, "var"], "")) as alternatives:
+            result = toolkit.enter_shofel_dfu(
+                port="1-2", loader=image, confirm_meerkat_rev02=True)
+        argv = transfer.call_args.args[0]
+        self.assertEqual(argv, [str(executable), "--usb-port-path", "1-2", "DFU_STAGE",
+                                str(image.resolve()), "--confirm-meerkat-rev02", "--launch"])
+        self.assertTrue(transfer.call_args.kwargs["byte_progress"])
+        self.assertEqual(transfer.call_args.kwargs["cwd"], str(directory))
+        alternatives.assert_called_once_with("dfu-util", "1-2")
+        self.assertEqual(result["state"], "dfu")
+        self.assertTrue(result["loader_verified"])
+        self.assertEqual(result["entry_transport"], "ShofEL")
+
+    def test_shofel_dfu_entry_requires_live_loader_marker_and_var(self):
+        with patch.object(toolkit, "_shofel_dfu_tool", return_value="/opt/shofel/shofel2_t124"), \
+                patch.object(toolkit, "devices", side_effect=[
+                    [{"port": "1-2", "state": "rcm"}], [{"port": "1-2", "state": "dfu"}]]), \
+                patch.object(toolkit, "tool", return_value="dfu-util"), \
+                patch.object(toolkit, "run_with_progress",
+                             return_value="Starting verified ARM-state SPL at 0x80108000."), \
+                patch.object(toolkit, "dfu_alternatives", return_value=(["var"], "")):
+            with self.assertRaisesRegex(toolkit.DfuError, "missing: jibo-dfu-v1"):
+                toolkit.enter_shofel_dfu(confirm_meerkat_rev02=True)
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

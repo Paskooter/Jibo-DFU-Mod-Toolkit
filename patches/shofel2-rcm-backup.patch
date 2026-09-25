@@ -210,10 +210,10 @@ index 64a09fe..3bb1222 100644
 -
 diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
 new file mode 100644
-index 0000000..522e159
+index 0000000..4e9b990
 --- /dev/null
 +++ b/STAGE2-PROBE.md
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,131 @@
 +# T124 DRAM probe and DFU-loader route
 +
 +`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
@@ -260,8 +260,9 @@ index 0000000..522e159
 +```
 +
 +Run from this repository after `make`, so `dram_probe.bin`, `dram_trace.bin`,
-+and `intermezzo.bin` are beside `shofel2_t124`. These diagnostics are
-+host-build validated only; they have not been run on a robot.
++and `intermezzo.bin` are beside `shofel2_t124`. Moth's phased trace reached
++the absent-BCT gate; the integrated initializer below subsequently passed its
++live RAM checks.
 +
 +## Same-session stage-2 path
 +
@@ -286,13 +287,15 @@ index 0000000..522e159
 +   word. Any failed gate stops before the image can be launched.
 +
 +The default build sets `DFU_STAGE2_ENABLE_LAUNCH=0`. It can stage and verify
-+the image, then return the device to RCM, but rejects `--launch`. The separate
-+launch path requires both that compile-time gate and the host's explicit
-+`--launch`; it also repeats reversible memory checks at the SPL stack and
-+malloc ranges before accepting the final `JGO1` command. No hardware run has
-+validated the DRAM initializer, profile, transfer, or launch. Keep launch
-+disabled until Moth reports a successful init and the board profile is
-+confirmed.
++the image, then return the device to RCM, but rejects `--launch`. Moth passed
++the Meerkat Rev02 RAM initialization, scratch restore, complete loader
++transfer, and SHA-256 DRAM readback in a stage-only run. The separate launch
++path requires `make DFU_STAGE2_ENABLE_LAUNCH=1 all`, the matching host and
++payload, and the host's explicit `--launch`; it repeats reversible memory
++checks at the SPL stack and malloc ranges before accepting the final `JGO1`
++command. The launch and DFU re-enumeration have not yet been run on Moth.
++`shofel2_t124 --dfu-stage-capability` reports whether the host was built with
++the launch gate enabled without accessing USB.
 +
 +## Loader handoff findings
 +
@@ -330,8 +333,8 @@ index 0000000..522e159
 +whole-disk `emmc-*` and `jibo-dfu-v1` aliases. Explicit host DFU transfers can
 +write the exposed partition entities, subject to the local backend's bounds.
 +Those later user-triggered writes are distinct from stage-2, which only writes
-+the verified loader into DRAM. The receiver and launch handoff are host-build
-+validated only; no robot transfer or launch has been run.
++the verified loader into DRAM. The stage-only transfer has passed on Moth;
++the launch handoff awaits a hardware run.
 +
 +## Source references
 +
@@ -615,7 +618,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..1d8eb85 100644
+index 9e49a2f..be26666 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -638,7 +641,7 @@ index 9e49a2f..1d8eb85 100644
  
  #include <sys/stat.h>
  #include <time.h>
-@@ -26,9 +32,486 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -26,9 +32,492 @@ void print_hex_memory( void *mem, size_t size ) {
    printf( "\n" );
  }
  
@@ -1030,10 +1033,16 @@ index 9e49a2f..1d8eb85 100644
 +
 +    if (usb_send_bulk_txn(rcm_usb, RCM_EP1_OUT, sizeof(request), &request) < 0)
 +        return -1;
-+    if (receive_stage_ack(rcm_usb, &ack) < 0 ||
-+        ack.code != DFU_STAGE2_ACK_ACCEPTED || ack.chunk_index != 0 ||
++    if (receive_stage_ack(rcm_usb, &ack) < 0) {
++        fprintf(stderr, "Error: no valid stage-2 response to loader metadata.\n");
++        send_stage_reset(rcm_usb);
++        return -1;
++    }
++    if (ack.code != DFU_STAGE2_ACK_ACCEPTED || ack.chunk_index != 0 ||
 +        ack.length != DFU_STAGE2_LOADER_SIZE) {
-+        fprintf(stderr, "Error: stage-2 rejected loader metadata.\n");
++        fprintf(stderr,
++                "Error: stage-2 rejected loader metadata (code 0x%08x, chunk %u, length %u).\n",
++                ack.code, ack.chunk_index, ack.length);
 +        send_stage_reset(rcm_usb);
 +        return -1;
 +    }
@@ -1126,7 +1135,7 @@ index 9e49a2f..1d8eb85 100644
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -38,6 +521,7 @@ void print_help() {
+@@ -38,12 +527,18 @@ void print_help() {
                  "\t* EMMC_READ start_sector num_sectors out_file -> Reads eMMC sectors to file (hex values).\n"
                  "\t* EMMC_WRITE start_sector in_file -> Writes file to eMMC at start_sector (hex value).\n"
                  "\t* EMMC_READ_EXT_CSD out_file -> Reads 512-byte EXT_CSD register (chip health/config info).\n"
@@ -1134,7 +1143,18 @@ index 9e49a2f..1d8eb85 100644
                  "\t* EMMC_ERASE start_sector end_sector -> Erases sectors (tells controller to reallocate bad blocks).\n\n" );
  
  }
-@@ -53,6 +537,11 @@ int main( int argc, char *argv[] ) {
+ 
+ int main( int argc, char *argv[] ) {
+ 
++    if (argc == 2 && !strcmp(argv[1], "--dfu-stage-capability")) {
++        printf("dfu-stage-launch=%d\n", DFU_STAGE2_ENABLE_LAUNCH ? 1 : 0);
++        return 0;
++    }
++
+     int _ret_main = -1;
+     int rcm_usb = 0;
+ 
+@@ -53,6 +548,11 @@ int main( int argc, char *argv[] ) {
  
      char *payload_filename = NULL;
      uint32_t payload_thumb_mode = 1;
@@ -1146,7 +1166,7 @@ index 9e49a2f..1d8eb85 100644
  
      uint8_t *dump = NULL;
      uint32_t dump_start = 0;
-@@ -60,15 +549,60 @@ int main( int argc, char *argv[] ) {
+@@ -60,15 +560,60 @@ int main( int argc, char *argv[] ) {
      char *dump_filename;
      int dump_fd = -1;
      uint8_t do_print_fuse = 0;
@@ -1208,7 +1228,7 @@ index 9e49a2f..1d8eb85 100644
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -106,6 +640,57 @@ int main( int argc, char *argv[] ) {
+@@ -106,6 +651,57 @@ int main( int argc, char *argv[] ) {
          }
          payload_filename = "boot_bct.bin";
  
@@ -1266,7 +1286,7 @@ index 9e49a2f..1d8eb85 100644
      } else if ( !strcmp( argv[1], "PAYLOAD" ) ) {
  
          if ( ( argc != 3 ) && ( argc != 4 ) ) {
-@@ -180,6 +765,16 @@ int main( int argc, char *argv[] ) {
+@@ -180,6 +776,16 @@ int main( int argc, char *argv[] ) {
          sscanf( argv[3], "%x", &emmc_num_sectors );  /* Reusing num_sectors for end_sector */
          emmc_mode = 5;
  
@@ -1283,7 +1303,7 @@ index 9e49a2f..1d8eb85 100644
      } else {
  
          fprintf( stderr, "Error: invalid command.\n\n" );
-@@ -188,6 +783,37 @@ int main( int argc, char *argv[] ) {
+@@ -188,6 +794,37 @@ int main( int argc, char *argv[] ) {
  
      }
  
@@ -1321,7 +1341,7 @@ index 9e49a2f..1d8eb85 100644
    // --------------------
    
  
-@@ -195,11 +821,11 @@ int main( int argc, char *argv[] ) {
+@@ -195,11 +832,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -1336,7 +1356,7 @@ index 9e49a2f..1d8eb85 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -251,6 +877,63 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +888,63 @@ int main( int argc, char *argv[] ) {
  
    //----------------------
  
@@ -1400,7 +1420,7 @@ index 9e49a2f..1d8eb85 100644
  
    // --- MEM DUMP CMD ----
  
-@@ -464,8 +1147,24 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +1158,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -1427,7 +1447,7 @@ index 9e49a2f..1d8eb85 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +1172,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +1183,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -1547,7 +1567,7 @@ index 9e49a2f..1d8eb85 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,13 +1284,282 @@ int main( int argc, char *argv[] ) {
+@@ -508,13 +1295,282 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -1583,9 +1603,9 @@ index 9e49a2f..1d8eb85 100644
 +                if ( emmc_read_error || emmc_output_error ) {
 +                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
 +                    goto emmc_exit;
-+                }
-+            }
-+
+                 }
+             }
+ 
 +            if ( dump_fd >= 0 ) {
 +                if ( close(dump_fd) < 0 ) {
 +                    dump_fd = -1;
@@ -1599,11 +1619,11 @@ index 9e49a2f..1d8eb85 100644
 +                    printf( "Error: Failed to install verified dump at %s: %s\n",
 +                            emmc_filename, strerror(errno) );
 +                    goto emmc_exit;
-                 }
++                }
 +                free(emmc_temp_filename);
 +                emmc_temp_filename = NULL;
-             }
- 
++            }
++
              printf( "\nRead complete. Output: %s\n", emmc_filename );
              _ret_main = 0;
          }
@@ -1830,7 +1850,7 @@ index 9e49a2f..1d8eb85 100644
          if ( emmc_mode == 3 ) { /* EMMC_WRITE */
  
              int in_fd = open( emmc_filename, O_RDONLY );
-@@ -546,7 +1591,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +1602,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -1839,7 +1859,7 @@ index 9e49a2f..1d8eb85 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +1708,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +1719,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -1855,7 +1875,7 @@ index 9e49a2f..1d8eb85 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -686,8 +1740,8 @@ exit:
+@@ -686,8 +1751,8 @@ exit:
      if ( dump ) free( dump );
      if ( dump_fd > 0 ) close( dump_fd );
      if ( data ) free( data );

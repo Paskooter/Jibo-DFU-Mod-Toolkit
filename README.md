@@ -33,7 +33,7 @@ This opens the terminal interface; it is not a separate desktop window. Use **�
 The screen leads through **connect → RCM/APX → DFU → choose an action**. RCM/APX is the robot's USB recovery entry state. The toolkit loads the matching recovery program into RAM to make DFU available; only DFU exposes the partition actions.
 
 - In **DFU**, with this project's recovery loader showing its Jibo marker, the menu can read or edit `var` and install supported full-flash packages. `dfu-util` is required.
-- In **RCM/APX**, DFU-based partition and update actions need recovery loaded first. Choose **Enter DFU from RCM/APX** to load it into RAM. A source clone does not include the signed recovery bundle or the `tegrarcm` host tool; the owner must provide the matching bundle in `bundles/default/` and make `tegrarcm` available. Do not use a bundle made for a different board profile.
+- In **RCM/APX**, DFU-based partition and update actions need recovery loaded first. **Enter DFU with ShofEL (RAM loader)** is the primary choice when its launch-enabled host, matching stage payload, and pinned loader are installed. It uses the Meerkat Rev02 RAM profile confirmed on Moth and does not need the robot's production signing key. **Enter DFU with signed recovery** remains available for robots with a matching recovery bundle and `tegrarcm`. A source clone does not include either recovery image.
 - Alternatively, an explicit ShofEL `var` backup can read the live GPT and `var` sectors directly over USB while the robot remains in RCM/APX. It needs the ShofEL host, `intermezzo.bin`, and `emmc_server.bin`, but no signed recovery bundle or production key. The operation only invokes `EMMC_READ`; it does not write or erase eMMC.
 
 The recovery bundle is omitted from GitHub because it is a hardware-profile-specific signed artifact. The repository does not contain a signing key. The `.pyz` file is also a generated local package and is not needed to run the menu from source.
@@ -46,7 +46,8 @@ The screen refreshes USB state each time it returns from an action. The first ac
 
 | Action | What it does |
 | --- | --- |
-| **Enter DFU from RCM/APX** | Loads the matching recovery program into RAM; available only while the robot is in RCM/APX. |
+| **Enter DFU with ShofEL (RAM loader)** | Initializes the confirmed RAM profile, loads the pinned recovery program, and checks for DFU on the same USB port. Available in RCM/APX with the launch-enabled ShofEL pair. |
+| **Enter DFU with signed recovery** | Uses a matching signed recovery bundle to load the program into RAM from RCM/APX. |
 | **Back up var** | Reads the 500 MiB partition and saves a private baseline on this computer. A verified baseline for that robot is reused. |
 | **Back up var with ShofEL (read-only)** | Available in RCM/APX when ShofEL is installed; validates the GPT and reads the exact `var` extent over USB without writing eMMC. |
 | **Set robot mode** | Prepares a mode change, displays the write plan, asks for confirmation on the terminal screen, then reads the partition back to verify it. |
@@ -96,7 +97,15 @@ sudo python3 jibo_dfu.py stage-rcm-dfu --shofel ../ShofEL2-for-T124/shofel2_t124
 
 The generated `.pyz` uses its bundled loader by default, so `--loader` can be omitted there. Keep the profile confirmation tied to a matching Boot0 check for the specific robot.
 
-Moth completed the live RAM initialization and scratch restore check with the expected 2 GiB range. Its first loader-stage attempt then timed out because the optimized payload omitted the receiver code. The build now checks that the linked entry reaches the receiver and that both the loader stream and RAM readback SHA passes are present. The corrected stage transfer still awaits a hardware result; RAM initialization alone does not show that the loader reached memory.
+Moth completed the live RAM initialization and scratch restore check with the expected 2 GiB range. Its first loader-stage attempt timed out because the optimized payload omitted the receiver code. The build now checks that the linked entry reaches the receiver and that both the loader stream and RAM readback SHA passes are present. With that fix, Moth staged and SHA-256 verified the full 415,088-byte loader in RAM, then returned to RCM without starting it or writing eMMC.
+
+For the ShofEL DFU entry action, build the ShofEL host and stage payload together with `make DFU_STAGE2_ENABLE_LAUNCH=1 all`, and place the pinned recovery `loader.bin` in `bundles/default/` or pass its path with `--loader`. The host checks the loader's exact size and SHA-256 before opening USB. On a robot whose Boot0 profile matches Meerkat Rev02, the scripted command is:
+
+```sh
+sudo python3 jibo_dfu.py enter-dfu-shofel --shofel ../ShofEL2-for-T124/shofel2_t124 --loader /path/to/loader.bin --port 1-1 --confirm-meerkat-rev02
+```
+
+The locally generated `.pyz` can bundle the matched ShofEL pair and loader, in which case `--shofel` and `--loader` are omitted. The command launches the loader only after its transfer and DRAM readback checks pass, then requires DFU enumeration with the Jibo marker and `var` alternative on the same USB port. The launch and DFU readback still require a Moth hardware result.
 
 The benchmarks read and discard an 8 MiB sample so you can check the USB transfer rate before a full backup. The optional 8-bit test first compares sector 0 and eMMC card information across the bus switch, then returns the bus to 1-bit mode and verifies that restoration. It does not leave a sample image on disk. On Moth, the 8-bit EXT_CSD read failed its preflight (status 9) and the 1-bit interface was restored; this path still needs hardware work. The board's production device tree declares an 8-bit eMMC bus, so this result does not establish that the wiring is limited to 1 bit. After a successful 8-bit benchmark on a robot, add `--bus-width 8` to the `backup-var --transport shofel` command to use the same verified read path for the full partition; the default remains 1-bit.
 
@@ -140,7 +149,7 @@ RCM-to-DFU entry, a `var` read, and a mode change to `int-developer` were tested
 
 ## What is available and what is not
 
-Available now: USB detection, recovery-bundle integrity checks, DFU entry for the tested profile, `var` backup and inspection over DFU or read-only ShofEL, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
+Available now: USB detection, recovery-bundle integrity checks, signed DFU entry for the tested profile, a ShofEL DFU entry path with successful stage-only transfer on Moth, `var` backup and inspection over DFU or read-only ShofEL, offline mode/Wi-Fi editing, guarded `var` write/readback, and a full-flash package workflow with optional `var` preservation.
 
 Still being built: SSH/firewall changes, full user-area eMMC backup, automatic board-profile selection, and support for additional Jibo hardware populations. The ShofEL read-only backup worked on Moth; its DFU loader route and the update workflow still need hardware validation. SSH is not enabled by this tool.
 
