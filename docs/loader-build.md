@@ -33,3 +33,5 @@ assert hashlib.sha256(padded).hexdigest() == '8f46062f2d201824337093a1e4c154e304
 print('Pinned loader reproduced')
 PY
 ```
+
+To compile the opt-in file-level DFU candidate from the same source and toolchain, use a different output directory and add `--file-level-candidate` to the build command. The script enables the file RPC and eMMC-CID USB serial only in that candidate, then checks that the file RPC object was compiled. Its protocol and supported ext4 layouts are described in [the file-level protocol](../firmware/file-level-protocol.md). The resulting image is separate from `assets/loader.bin` and is not included in the normal toolkit package.
