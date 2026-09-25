@@ -1,12 +1,12 @@
 diff --git a/Makefile b/Makefile
-index 2e4d38e..fe10926 100644
+index 2e4d38e..51fdd17 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -1,21 +1,56 @@
+@@ -1,21 +1,43 @@
  CFLAGS := -Wall -Werror -I include -MMD
  
 -BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin
-+.PHONY: all test test_stage2_artifact clean cleanall
++.PHONY: all test test_stage2_artifact clean cleanall FORCE
 +
 +BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin dram_probe.bin dram_trace.bin dfu_stage2.bin
  
@@ -24,21 +24,8 @@ index 2e4d38e..fe10926 100644
 +
 +# Catch a silently garbage-collected stage-2 payload before it can be packaged.
 +NM_ARM = $(TOOLCHAIN_ARM)nm
-+test_stage2_artifact: dfu_stage2.bin build/dfu_stage2.elf
-+	@size=$$(wc -c < dfu_stage2.bin); \
-+	  if [ "$$size" -le 4096 ] || [ "$$size" -gt 199788 ]; then \
-+	    echo "dfu_stage2.bin has implausible size: $$size bytes" >&2; exit 1; \
-+	  fi
-+	@$(NM_ARM) build/dfu_stage2.elf | awk \
-+	  -v launch_enabled=$(DFU_STAGE2_ENABLE_LAUNCH) \
-+	  '$$3 == "entry" { entry = 1 } \
-+	   $$3 == "jibo_init_dram" { init = 1 } \
-+	   $$3 == "t124_launch_spl" { launch = 1 } \
-+	   END { \
-+	     if (!entry || !init) { print "dfu_stage2.elf is missing entry or jibo_init_dram" > "/dev/stderr"; exit 1 } \
-+	     if (launch_enabled && !launch) { print "launch-enabled build is missing t124_launch_spl" > "/dev/stderr"; exit 1 } \
-+	     if (!launch_enabled && launch) { print "launch-disabled build unexpectedly contains t124_launch_spl" > "/dev/stderr"; exit 1 } \
-+	   }'
++OBJDUMP_ARM = $(TOOLCHAIN_ARM)objdump
++test_stage2_artifact: build/dfu_stage2_0.bin build/dfu_stage2_1.bin
 +
  # --------- x86 ----------
  
@@ -61,14 +48,18 @@ index 2e4d38e..fe10926 100644
  shofel2_t124: $(OBJ_FILES_x86)
  	$(CC_x86) $(CFLAGS_x86) -o $@ $^
  
-@@ -32,13 +67,32 @@ OBJCOPY_ARM = $(TOOLCHAIN_ARM)objcopy
- CFLAGS_ARM := -Wall -I include -MMD -march=armv4t -mthumb -Os -ffreestanding \
+@@ -29,20 +51,47 @@ CC_ARM = $(TOOLCHAIN_ARM)gcc
+ AS_ARM = $(TOOLCHAIN_ARM)as
+ OBJCOPY_ARM = $(TOOLCHAIN_ARM)objcopy
+ 
+-CFLAGS_ARM := -Wall -I include -MMD -march=armv4t -mthumb -Os -ffreestanding \
++CFLAGS_ARM_COMMON := -Wall -I include -MMD -march=armv4t -mthumb -Os -ffreestanding \
  	-fno-common	-fomit-frame-pointer -nostdlib -fno-builtin-printf \
  	-fno-asynchronous-unwind-tables -fPIE -fno-builtin -fno-exceptions \
--	-Wno-array-bounds -Wno-error \
-+	-Wno-array-bounds -Wno-error -DDFU_STAGE2_ENABLE_LAUNCH=$(DFU_STAGE2_ENABLE_LAUNCH) \
+ 	-Wno-array-bounds -Wno-error \
  	-Wl,--no-dynamic-linker,--build-id=none,-T,payloads/payload.ld
- 
++CFLAGS_ARM := $(CFLAGS_ARM_COMMON) -DDFU_STAGE2_ENABLE_LAUNCH=$(DFU_STAGE2_ENABLE_LAUNCH)
++
 +RAMINIT_DIR := payloads/raminit
 +RAMINIT_VENDOR := $(RAMINIT_DIR)/vendor/coreboot-t124
 +RAMINIT_INCLUDES := -I$(RAMINIT_DIR)/include -I$(RAMINIT_VENDOR)
@@ -84,19 +75,30 @@ index 2e4d38e..fe10926 100644
 +	build/obj_arm/raminit_params.o build/obj_arm/raminit_timerus.o \
 +	build/obj_arm/raminit_lp0.o
 +CFLAGS_ARM += $(RAMINIT_INCLUDES)
-+DFU_STAGE2_OBJ_FILES := build/obj_arm/dfu_stage2.o \
++DFU_STAGE2_SHARED_OBJ_FILES := \
 +	build/obj_arm/dram_probe_common.o build/obj_arm/sha256.o \
 +	build/obj_arm/spl_launch.o $(RAMINIT_OBJ_FILES)
-+
+ 
  # shameless copypasta from https://stackoverflow.com/a/2908351/375416
  C_FILES_ARM := $(wildcard payloads/*.c)
  OBJ_FILES_ARM := $(addprefix build/obj_arm/,$(notdir $(C_FILES_ARM:.c=.o)))
 --include $(OBJ_FILES_ARM:.o=.d)
-+-include $(OBJ_FILES_ARM:.o=.d) $(RAMINIT_OBJ_FILES:.o=.d)
++# The include files are generated as a side effect of compiling the variant
++# objects; this empty rule prevents implicit intermediate-object guessing.
++build/obj_arm/dfu_stage2_%.d: ;
++-include $(OBJ_FILES_ARM:.o=.d) $(RAMINIT_OBJ_FILES:.o=.d) \
++	build/obj_arm/dfu_stage2_0.d build/obj_arm/dfu_stage2_1.d
  
  build/obj_arm/%.o: payloads/%.c
  	$(CC_ARM) $(CFLAGS_ARM) -c -o $@ $<
-@@ -61,6 +115,42 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
+ 
++build/obj_arm/dfu_stage2_%.o: payloads/dfu_stage2.c
++	$(CC_ARM) $(CFLAGS_ARM_COMMON) $(RAMINIT_INCLUDES) -DDFU_STAGE2_ENABLE_LAUNCH=$* -c -o $@ $<
++
+ build/reset_example.elf: build/obj_arm/reset_example.o
+ 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
+ 
+@@ -61,6 +110,56 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
  build/intermezzo.elf: build/obj_arm/intermezzo.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
@@ -133,20 +135,35 @@ index 2e4d38e..fe10926 100644
 +build/dram_trace.elf: build/obj_arm/dram_trace.o build/obj_arm/dram_probe_common.o
 +	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
 +
-+build/dfu_stage2.elf: $(DFU_STAGE2_OBJ_FILES)
-+	$(CC_ARM) $(CFLAGS_ARM) -Wl,--gc-sections,-u,entry -o $@ $^ -lgcc
++build/dfu_stage2_%.elf: build/obj_arm/dfu_stage2_%.o $(DFU_STAGE2_SHARED_OBJ_FILES) tests/check_stage2_artifact.py
++	$(CC_ARM) $(CFLAGS_ARM_COMMON) -Wl,--gc-sections,-u,entry -o $@ $(filter %.o,$^) -lgcc
++	python3 tests/check_stage2_artifact.py --elf $@ --launch-enabled $* --nm $(NM_ARM) --objdump $(OBJDUMP_ARM)
++
++build/dfu_stage2_%.bin: build/dfu_stage2_%.elf
++	$(OBJCOPY_ARM) -O binary $< $@
++	python3 tests/check_stage2_artifact.py --bin $@
++
++FORCE:
++
++# Keep the normal command-line artifact pointed at the selected build variant.
++build/dfu_stage2.elf: build/dfu_stage2_$(DFU_STAGE2_ENABLE_LAUNCH).elf FORCE
++	cp $< $@
++
++dfu_stage2.bin: build/dfu_stage2_$(DFU_STAGE2_ENABLE_LAUNCH).bin FORCE
++	cp $< $@
 +
  %.bin: build/%.elf
  	$(OBJCOPY_ARM) -O binary $< $@
  
-@@ -68,9 +158,8 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
+@@ -68,9 +167,9 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
  
  
  clean:
 -	rm -f $(OBJ_FILES_ARM) $(OBJ_FILES_x86)
 -	rm -f shofel2_t124 build/*.elf $(BIN_FILES)
 +	rm -f $(OBJ_FILES_ARM) $(OBJ_FILES_x86) $(RAMINIT_OBJ_FILES)
-+	rm -f shofel2_t124 test_sha256 test_emmc_boot0_protocol build/*.elf $(BIN_FILES)
++	rm -f shofel2_t124 test_sha256 test_emmc_boot0_protocol build/*.elf build/dfu_stage2_*.bin $(BIN_FILES)
++	rm -f build/obj_arm/dfu_stage2_0.o build/obj_arm/dfu_stage2_0.d build/obj_arm/dfu_stage2_1.o build/obj_arm/dfu_stage2_1.d
  
  cleanall: clean
  	rm -f build/obj_arm/*.d build/obj_x86/*.d
@@ -2364,10 +2381,10 @@ index 7d73596..57d8805 100644
 -
 diff --git a/payloads/dfu_stage2.c b/payloads/dfu_stage2.c
 new file mode 100644
-index 0000000..caeb936
+index 0000000..e24d716
 --- /dev/null
 +++ b/payloads/dfu_stage2.c
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,291 @@
 +#include "types.h"
 +#include "t124.h"
 +#include "dram_probe.h"
@@ -2552,10 +2569,13 @@ index 0000000..caeb936
 +    t124_enter_rcm();
 +}
 +
-+static void receive_loader(ep1_x_imm_t ep1_out_read_imm,
-+                           ep1_x_imm_t ep1_in_write_imm,
-+                           struct dfu_stage2_ack *ack,
-+                           u32 dram_size_bytes)
++/* Keep the ROM callbacks opaque to GCC IPA; at -Os, specializing their fixed
++ * ROM addresses can make the receiver path appear unreachable. */
++static void __attribute__((noinline, noclone))
++receive_loader(ep1_x_imm_t ep1_out_read_imm,
++               ep1_x_imm_t ep1_in_write_imm,
++               struct dfu_stage2_ack *ack,
++               u32 dram_size_bytes)
 +{
 +    struct dfu_stage2_request request;
 +    struct sha256_ctx hash_ctx;
@@ -12850,6 +12870,122 @@ index 0000000..1f35081
 +    except (OSError, ValueError, subprocess.SubprocessError) as exc:
 +        print("error:", exc, file=sys.stderr)
 +        sys.exit(1)
+diff --git a/tests/check_stage2_artifact.py b/tests/check_stage2_artifact.py
+new file mode 100644
+index 0000000..6d58ba8
+--- /dev/null
++++ b/tests/check_stage2_artifact.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python3
++"""Fail closed if the linked DFU stage payload lost its loader path."""
++
++import argparse
++import re
++import subprocess
++from pathlib import Path
++
++
++def run(*command):
++    try:
++        return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT)
++    except (OSError, subprocess.CalledProcessError) as exc:
++        raise SystemExit(f"stage-2 artifact check failed running {command[0]}: {exc}")
++
++
++def check_binary(path):
++    size = Path(path).stat().st_size
++    if size <= 4096 or size > 199788:
++        raise SystemExit(
++            f"{path} has implausible size: {size} bytes (expected 4097..199788)"
++        )
++
++
++def check_elf(path, launch_enabled, nm, objdump):
++    symbol_output = run(nm, "-S", path)
++    symbols = {line.split()[-1] for line in symbol_output.splitlines() if line.split()}
++
++    required = {
++        "entry",
++        "jibo_init_dram",
++        "sha256_init",
++        "sha256_update",
++        "sha256_final",
++    }
++    has_symbol = lambda name: any(
++        symbol == name or symbol.startswith(name + ".") for symbol in symbols
++    )
++    missing = {name for name in required if not has_symbol(name)}
++    if not has_symbol("receive_loader"):
++        missing.add("receive_loader")
++    if missing:
++        raise SystemExit(
++            f"{path} is missing linked stage-2 routines: {', '.join(sorted(missing))}"
++        )
++
++    launch_present = has_symbol("t124_launch_spl")
++    if launch_enabled and not launch_present:
++        raise SystemExit(f"{path} is missing t124_launch_spl in the launch-enabled build")
++    if not launch_enabled and launch_present:
++        raise SystemExit(f"{path} unexpectedly contains t124_launch_spl in the default build")
++
++    disassembly = run(objdump, "-d", path)
++    entry_match = re.search(
++        r"(?ms)^[0-9a-f]+ <entry>:\n(.*?)(?=^[0-9a-f]+ <|\Z)", disassembly
++    )
++    if not entry_match:
++        raise SystemExit(f"{path} has no disassembled entry function")
++    entry_body = entry_match.group(1)
++    branch_to = lambda name, body: re.search(
++        rf"(?m)^\s*[0-9a-f]+:\s+[0-9a-f ]+\s+blx?\s+[^\n]*<{re.escape(name)}(?:\.[^>]*)?>",
++        body,
++    )
++    if not branch_to("receive_loader", entry_body):
++        raise SystemExit(
++            f"{path} entry does not call receive_loader; the RAM loader path is unreachable"
++        )
++
++    receiver_match = re.search(
++        r"(?ms)^[0-9a-f]+ <receive_loader(?:\.[^>]*)?>:\n(.*?)(?=^[0-9a-f]+ <|\Z)",
++        disassembly,
++    )
++    if not receiver_match:
++        raise SystemExit(f"{path} has no disassembled receive_loader function")
++    receiver_body = receiver_match.group(1)
++    missing_hash_passes = [
++        name for name in ("sha256_init", "sha256_update", "sha256_final")
++        if len(re.findall(
++            rf"(?m)^\s*[0-9a-f]+:\s+[0-9a-f ]+\s+blx?\s+[^\n]*<{re.escape(name)}(?:\.[^>]*)?>",
++            receiver_body,
++        )) < 2
++    ]
++    if missing_hash_passes:
++        raise SystemExit(
++            f"{path} receive_loader lacks stream and DRAM readback SHA passes: "
++            f"{', '.join(missing_hash_passes)}"
++        )
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--elf")
++    parser.add_argument("--bin")
++    parser.add_argument("--launch-enabled", type=int, choices=(0, 1))
++    parser.add_argument("--nm", default="arm-none-eabi-nm")
++    parser.add_argument("--objdump", default="arm-none-eabi-objdump")
++    args = parser.parse_args()
++
++    if not args.elf and not args.bin:
++        parser.error("provide --elf, --bin, or both")
++    if args.elf:
++        if args.launch_enabled is None:
++            parser.error("--elf requires --launch-enabled 0 or 1")
++        check_elf(args.elf, bool(args.launch_enabled), args.nm, args.objdump)
++    if args.bin:
++        check_binary(args.bin)
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/tests/test_emmc_boot0_protocol.c b/tests/test_emmc_boot0_protocol.c
 new file mode 100644
 index 0000000..a7fecf3
