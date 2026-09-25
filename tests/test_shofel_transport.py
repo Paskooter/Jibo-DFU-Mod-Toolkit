@@ -291,6 +291,29 @@ class ShofelTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(toolkit.DfuError, "missing: jibo-dfu-v1"):
                 toolkit.enter_shofel_dfu(confirm_meerkat_rev02=True)
 
+    def test_dfu_gpt_probe_reads_only_32_kib_and_discards_temporary_data(self):
+        written = []
+
+        def upload(argv, **_kwargs):
+            self.assertEqual(argv[:8], ["dfu-util", "-d", "0955:701a", "--path",
+                                        "1-2", "-a", "emmc-000", "-U"])
+            self.assertEqual(argv[-2:], ["-Z", "32768"])
+            self.assertNotIn("-D", argv)
+            destination = Path(argv[8])
+            destination.write_bytes(make_gpt_prefix(var_size=toolkit.EXPECTED_VAR_SIZE))
+            written.append(destination)
+            return "Upload complete"
+
+        with patch.object(toolkit, "_dfu_context",
+                          return_value=("1-2", [toolkit.MARKER, "var", "emmc-000"], "device")), \
+                patch.object(toolkit, "run_with_progress", side_effect=upload):
+            result = toolkit.probe_dfu_gpt(port="1-2", dfu_util="dfu-util")
+
+        self.assertEqual(result["partition_sizes_bytes"]["var"], toolkit.EXPECTED_VAR_SIZE)
+        self.assertEqual(len(written), 1)
+        self.assertFalse(written[0].exists())
+        self.assertTrue(result["temporary_read_removed"])
+
     def fake_transfer(self, argv, timeout, label, cwd=None, progress_path=None,
                       progress_size=None, *, payload=None, output=CHIP_ID_OUTPUT):
         self.calls.append((argv, timeout, label, cwd))

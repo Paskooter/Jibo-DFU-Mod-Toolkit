@@ -740,6 +740,22 @@ def _read_gpt_capacities(dfu_util, port, names):
             raise DfuError("Could not verify the robot's GPT partition sizes: " + str(exc)) from exc
 
 
+def probe_dfu_gpt(port=None, dfu_util=None):
+    """Validate the live GPT through DFU without saving a partition backup."""
+    dfu_util = dfu_util or tool("dfu-util")
+    port, names, _ = _dfu_context(port, dfu_util)
+    capacities = _read_gpt_capacities(dfu_util, port, names)
+    required = ("rootfsA", "rootfsB", "services", "skills", "var")
+    missing = [name for name in required if name not in capacities]
+    if missing:
+        raise DfuError("The live GPT is missing Jibo partitions: " + ", ".join(missing))
+    if capacities["var"] != EXPECTED_VAR_SIZE:
+        raise DfuError("The live GPT reports an unexpected var size: " + str(capacities["var"]))
+    return {"status": "partition table read and checked", "port": port,
+            "partition_sizes_bytes": {name: capacities[name] for name in required},
+            "temporary_read_removed": True}
+
+
 def _expected_skills_chunks(capacity):
     """Return the exact byte ranges for the loader's GPT-bounded skills alternatives."""
     try:
@@ -1703,6 +1719,10 @@ def main(argv=None):
                               help="Seconds to wait for DFU after the loader starts")
     shofel_entry.add_argument("--confirm-meerkat-rev02", action="store_true", required=True,
                               help="Confirm the Meerkat Rev02 SDRAM profile for this robot")
+    gpt_probe = sub.add_parser("probe-dfu-gpt",
+                               help="Read and validate the live 32 KiB GPT through DFU without saving a backup")
+    _add_device_arguments(gpt_probe)
+    _add_dfu_argument(gpt_probe)
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
     _add_device_arguments(backup)
     _add_dfu_argument(backup)
@@ -1805,6 +1825,8 @@ def main(argv=None):
             result = enter_shofel_dfu(args.port, args.shofel, args.loader,
                                       args.dfu_util, args.timeout,
                                       args.confirm_meerkat_rev02)
+        elif args.command == "probe-dfu-gpt":
+            result = probe_dfu_gpt(args.port, args.dfu_util)
         elif args.command == "backup-var":
             if args.transport == "shofel":
                 result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh, args.bus_width)
