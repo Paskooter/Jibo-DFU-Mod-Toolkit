@@ -86,6 +86,17 @@ def main():
             "/* SHA-256 of the manifest-checked experimental file-RPC loader. */")
         header.write_text(updated)
 
+        # The stage payload also carried a private copy of the original hash.
+        # Make its request and readback checks use the shared protocol value.
+        payload = work / "payloads/dfu_stage2.c"
+        source = payload.read_text()
+        pinned_array = "static const u8 expected_sha256[32] = {\n" + PINNED_HASH + "\n};\n"
+        if source.count(pinned_array) != 1 or source.count("expected_sha256[i]") != 2:
+            raise RuntimeError("the stage payload does not match the pinned hash baseline")
+        source = source.replace(pinned_array, "")
+        source = source.replace("expected_sha256[i]", "DFU_STAGE2_EXPECTED_SHA256[i]")
+        payload.write_text(source)
+
         run("make", "-B", "DFU_STAGE2_ENABLE_LAUNCH=1", "all", "test", cwd=work)
         files = {}
         for name in ("shofel2_t124", "intermezzo.bin", "dfu_stage2.bin"):
@@ -93,6 +104,11 @@ def main():
             if not path.is_file() or not path.stat().st_size:
                 raise RuntimeError("missing built ShofEL artifact: " + name)
             files[name] = digest(path)
+        for name in ("shofel2_t124", "dfu_stage2.bin"):
+            binary = (work / name).read_bytes()
+            if binary.count(bytes.fromhex(sha)) != 1 or bytes.fromhex(
+                    "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689") in binary:
+                raise RuntimeError("built {} does not contain only the candidate loader hash".format(name))
         capability = subprocess.check_output(
             [str(work / "shofel2_t124"), "--dfu-stage-capability"],
             text=True).strip()
