@@ -1,0 +1,78 @@
+# Experimental file-level DFU protocol
+
+The file RPC uses paired MMC/ext4 DFU alternatives. `jibo-file-<partition>-in`
+accepts a request; the matching `jibo-file-<partition>-out` uploads its
+response. The read-only `jibo-file-v1` raw alternate advertises the protocol
+to the host. No request data is interpreted as a shell command or a U-Boot
+filename, and the existing packaged loader does not advertise this capability.
+
+All multi-byte wire fields are little-endian unless marked `digest`. Fixed
+integers have no native-C padding; the implementation parses and writes the
+fields explicitly.
+
+The request begins with a 31-byte header:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | Magic `JIBOFL1\0` |
+| 8 | 1 | Operation: 1 read, 2 replace, 3 stat |
+| 9 | 2 | UTF-8 path byte length |
+| 11 | 4 | Replacement byte length (zero for read/stat) |
+| 15 | 16 | Request nonce |
+
+The header is followed by the absolute path bytes. Paths are 1–255 bytes,
+valid UTF-8, contain no NUL/control character, and have no empty, `.` or `..`
+component. Replacement requests then contain a 76-byte compare-and-write
+precondition followed by 1–4096 replacement bytes:
+
+| Offset in precondition | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | Existing inode number |
+| 8 | 4 | Existing file size |
+| 12 | 4 | Allocated bytes |
+| 16 | 4 | UID |
+| 20 | 4 | GID |
+| 24 | 4 | Mode including file type |
+| 28 | 16 | Ext4 UUID bytes |
+| 44 | 32 | SHA-256 of current file contents |
+
+The response has a 61-byte header followed by its body: 8-byte magic
+`JIBOR1\0\0`, the 16-byte request nonce, 1-byte status, 4-byte body length,
+and a 32-byte SHA-256 digest of the body. A successful read body contains file
+bytes; a successful stat body contains the 52-byte packed values
+`<QIIIIIII16s` (inode, size, allocated bytes, UID, GID, mode, link count,
+extent count, UUID). A successful write response has an empty body. Nonzero
+status indicates rejection; the nonce still identifies that request.
+
+The first implementation is deliberately narrow: only the five named GPT
+partitions are exposed, and writes can replace existing regular files up to
+4096 bytes when they occupy one allocated ext4 extent/block and have one hard
+link. The inode, data block, block bitmap, inode bitmap, group descriptors,
+and journal are checked before a write; symlink traversal, unallocated inodes
+or blocks, uninitialized groups, and superblock/GDT/reserved-GDT blocks are
+rejected. META_BG descriptor locations and group descriptor checksums are
+validated. No create, delete, rename, symlink, hole, multi-extent, or
+allocation operation is provided. The ext4 volume must have supported feature
+bits and a clean superblock/journal. The writer bypasses ext4's journal
+entirely. It writes the existing data block and inode-size field directly
+with checked block I/O, preserving the rest of the inode; host readback
+checks content and metadata after each write. This has a power-loss window
+between the data and inode writes. Recover by restoring the transaction's
+pre-operation partition baseline. The host transaction saves one verified
+full partition baseline for every touched partition before it starts writing.
+
+An interrupted DFU mailbox transfer can be retried from block zero; the
+candidate loader resets file-RPC upload/download state for that retry. If the
+USB DFU session itself has been reset, re-enter the DFU loader before retrying.
+
+The Aero var fixture used during offline checks has 69 groups, 1024-byte
+blocks, 7488 blocks/group, and `s_first_meta_bg=1`. The descriptor for inode
+group 66 is descriptor block index 2: its META_BG location is group 64's first
+block plus the backup superblock, physical block 479234. A classic-GDT fallback
+would look at block 4. Group 66's inode bitmap is block 494211, and the Wi-Fi
+file's data block 494272 is offset 63 in that group; the mode and Wi-Fi extents
+are both allocated. These fixture facts are asserted without including the
+private backup image in the repository.
+
+This is a source/build candidate only. It is not enabled by the pinned loader
+and still requires hardware validation before operational use.

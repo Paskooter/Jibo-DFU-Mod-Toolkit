@@ -40,6 +40,8 @@ FILE_RPC_WRITE = 2
 FILE_RPC_STAT = 3
 FILE_STAT_STRUCT = struct.Struct("<QIIIIIII16s")
 FILE_WRITE_PRECONDITION = struct.Struct("<QIIIII16s32s")
+FILE_RPC_MAX_REQUEST = (FILE_RPC_HEADER.size + 255 +
+                        FILE_WRITE_PRECONDITION.size + FILE_LEVEL_MAX_BYTES)
 EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
 UPDATE_CONFIRMATION = "FLASH UPDATE"
@@ -1478,8 +1480,11 @@ def _file_request(path, operation, content=b"", request_id=None, precondition=No
     request_id = request_id or secrets.token_bytes(16)
     if len(request_id) != 16:
         raise DfuError("A file request ID must contain 16 bytes.")
-    return (FILE_RPC_HEADER.pack(FILE_RPC_MAGIC, operation, len(path_bytes), len(content), request_id) +
-            path_bytes + (precondition or b"") + content), request_id
+    request = (FILE_RPC_HEADER.pack(FILE_RPC_MAGIC, operation, len(path_bytes), len(content), request_id) +
+               path_bytes + (precondition or b"") + content)
+    if len(request) > FILE_RPC_MAX_REQUEST:
+        raise DfuError("The file mailbox request exceeds its protocol size limit.")
+    return request, request_id
 
 
 def _decode_file_response(response, request_id):

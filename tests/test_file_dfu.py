@@ -12,6 +12,44 @@ import jibo_dfu as j
 
 
 class FileDfuTests(unittest.TestCase):
+    def test_wire_sizes_match_candidate_firmware_and_spec(self):
+        source = (Path(j.ROOT) / "firmware/file-level-protocol.md").read_text()
+        c_source = (Path(j.ROOT) / "firmware/file-level.patch").read_text()
+        self.assertEqual(j.FILE_WRITE_PRECONDITION.size, 76)
+        self.assertEqual(j.FILE_RPC_MAX_REQUEST, 4458)
+        self.assertIn("76-byte compare-and-write", source)
+        self.assertIn("#define JIBO_FILE_PRECONDITION 76", c_source)
+        self.assertIn("#define JIBO_FILE_RPC_MAX_REQUEST 4458", c_source)
+
+    def test_aero_meta_bg_group_66_fixture_uses_meta_bg_location(self):
+        patch = (Path(j.ROOT) / "firmware/file-level.patch").read_text()
+        # Geometry and observed inode/data locations from the offline Aero var
+        # backup. Descriptor 2 covers group 64 onward in META_BG.
+        first_data_block = 1
+        blocks_per_group = 7488
+        blocksize = 1024
+        descriptor_size = 32
+        descriptors_per_block = blocksize // descriptor_size
+        first_meta_bg = 1
+        descriptor_index = 66 // descriptors_per_block
+        descriptor_group = descriptor_index * descriptors_per_block
+        group_start = first_data_block + descriptor_group * blocks_per_group
+        # Aero var has no sparse_super feature, so this descriptor copy follows
+        # the backup superblock in group 64.
+        meta_bg_location = group_start + 1
+        classic_location = first_data_block + 1 + descriptor_index
+        self.assertEqual(meta_bg_location, 479234)
+        self.assertEqual(classic_location, 4)
+        self.assertNotEqual(meta_bg_location, classic_location)
+        self.assertIn("candidates[0] = base;", patch)
+        self.assertIn("location = first + replica * blocks_per_group;", patch)
+        self.assertIn("jibo_group_has_super(replica, super)", patch)
+
+        group66_start = first_data_block + 66 * blocks_per_group
+        self.assertEqual(group66_start, 494209)
+        self.assertEqual(494272 - group66_start, 63)
+        self.assertEqual((31154 - 1) - 66 * 472, 1)
+
     def test_path_validation_confines_names_to_simple_absolute_paths(self):
         self.assertEqual(j._validate_file_path("/etc/wpa_supplicant.conf"),
                          b"/etc/wpa_supplicant.conf")

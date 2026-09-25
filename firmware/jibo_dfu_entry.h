@@ -12,6 +12,15 @@
 #define JIBO_DFU_MAX_CHUNK_BLOCKS 0x200000ULL /* 1 GiB at 512 bytes/LBA */
 #define JIBO_DFU_MAX_SKILLS_CHUNKS 1000
 
+#ifdef CONFIG_JIBO_DFU_FILE_RPC
+static int jibo_dfu_file_partition_name_ok(const char *name)
+{
+	return !strcmp(name, "rootfsA") || !strcmp(name, "rootfsB") ||
+		!strcmp(name, "services") || !strcmp(name, "skills") ||
+		!strcmp(name, "var");
+}
+#endif
+
 #ifdef CONFIG_JIBO_DFU_CID_SERIAL
 /* Make the USB serial stable across file edits so backups bind to this eMMC. */
 static int jibo_dfu_set_cid_serial(struct mmc *mmc)
@@ -67,6 +76,13 @@ static void jibo_dfu_entry(void)
 	if (n < 0 || n >= sizeof(alternatives))
 		goto failed;
 	used = n;
+#ifdef CONFIG_JIBO_DFU_FILE_RPC
+	n = snprintf(entry, sizeof(entry), ";jibo-file-v1 raw 0 34");
+	if (n < 0 || n >= sizeof(entry) || used + n >= sizeof(alternatives))
+		goto failed;
+	memcpy(alternatives + used, entry, n + 1);
+	used += n;
+#endif
 	/* This old DFU stack has signed 32-bit lengths. Use <=1 GiB chunks. */
 	for (offset = 0, i = 0; offset < mmc->block_dev.lba; offset += count, ++i) {
 		count = mmc->block_dev.lba - offset;
@@ -88,6 +104,19 @@ static void jibo_dfu_entry(void)
 		    !strncmp((char *)info.name, "emmc-", 5) ||
 		    !strcmp((char *)info.name, "jibo-dfu-v1"))
 			continue;
+#ifdef CONFIG_JIBO_DFU_FILE_RPC
+		if (jibo_dfu_file_partition_name_ok((char *)info.name)) {
+			n = snprintf(entry, sizeof(entry),
+				     ";jibo-file-%s-in ext4 0 %d;"
+				     "jibo-file-%s-out ext4 0 %d",
+				     info.name, i, info.name, i);
+			if (n < 0 || n >= sizeof(entry) ||
+			    used + n >= sizeof(alternatives))
+				goto failed;
+			memcpy(alternatives + used, entry, n + 1);
+			used += n;
+		}
+#endif
 		/* Large skills partitions need bounded raw slices. */
 		if (!strcmp((char *)info.name, "skills") &&
 		    info.size > 0x3fffff) {

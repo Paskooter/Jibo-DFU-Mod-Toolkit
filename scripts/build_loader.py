@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--out", required=True, type=Path, help="New build directory")
     parser.add_argument("--cid-serial-candidate", action="store_true",
                         help="include experimental eMMC-CID USB serial identity support")
+    parser.add_argument("--file-level-candidate", action="store_true",
+                        help="include the experimental ext4 file-RPC mailbox candidate")
     args = parser.parse_args()
     if args.out.exists():
         parser.error("Build directory already exists")
@@ -50,14 +52,33 @@ def main():
         end = value.index("#endif", start) + len("#endif\n")
         board.write_text(value[:start] + value[end:])
     subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(ROOT / "firmware/entry.patch")], cwd=out, check=True)
-    if args.cid_serial_candidate:
+    if args.cid_serial_candidate or args.file_level_candidate:
         subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i",
                         str(ROOT / "firmware/cid-serial.patch")], cwd=out, check=True)
+    if args.file_level_candidate:
+        subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i",
+                        str(ROOT / "firmware/file-level.patch")], cwd=out, check=True)
     shutil.copyfile(ROOT / "firmware/jibo_dfu_entry.h", out / "common/jibo_dfu_entry.h")
     env = os.environ.copy()
     env.update(PATH=str(host / "usr/bin") + os.pathsep + env["PATH"],
                LD_LIBRARY_PATH=str(host / "usr/lib"), CCACHE_DISABLE="1",
                CCACHE_DIR=str(out / ".ccache"), SOURCE_DATE_EPOCH="1788566400")
+    if args.file_level_candidate:
+        config = out / ".config"
+        if not config.is_file():
+            parser.error("File-level candidate requires the pinned source .config")
+        contents = config.read_text()
+        if "CONFIG_JIBO_DFU_FILE_RPC=y" not in contents:
+            contents = contents.replace(
+                "# CONFIG_JIBO_DFU_FILE_RPC is not set\n", "")
+            config.write_text(contents.rstrip() + "\nCONFIG_JIBO_DFU_FILE_RPC=y\n")
+        subprocess.run(["make", "ARCH=arm",
+                        "CROSS_COMPILE=arm-buildroot-linux-gnueabihf-",
+                        "HOSTCFLAGS=-O2 -I" + str(host / "usr/include"),
+                        "HOSTLDFLAGS=-L" + str(host / "usr/lib"),
+                        "olddefconfig"], cwd=out, env=env, check=True)
+        if "CONFIG_JIBO_DFU_FILE_RPC=y" not in config.read_text():
+            parser.error("File-RPC symbol is unavailable in the selected U-Boot config")
     subprocess.run(["make", "ARCH=arm", "CROSS_COMPILE=arm-buildroot-linux-gnueabihf-",
                     "HOSTCFLAGS=-O2 -I" + str(host / "usr/include"),
                     "HOSTLDFLAGS=-L" + str(host / "usr/lib"), "-j4", "u-boot-dtb-tegra.bin"],
@@ -65,6 +86,12 @@ def main():
     config = (out / "include/autoconf.mk").read_text()
     if "CONFIG_ENV_IS_NOWHERE=y" not in config or "CONFIG_ENV_IS_IN_MMC=y" in config:
         raise RuntimeError("Unexpected persistent environment configuration")
+    if args.file_level_candidate:
+        kconfig = (out / "include/config/auto.conf").read_text()
+        if "CONFIG_JIBO_DFU_FILE_RPC=y" not in kconfig:
+            raise RuntimeError("Candidate build omitted CONFIG_JIBO_DFU_FILE_RPC")
+        if not (out / "fs/ext4/jibo_file_rpc.o").is_file():
+            raise RuntimeError("Candidate build omitted the file-RPC object")
     print("Built candidate:", out / "u-boot-dtb-tegra.bin")
 
 
