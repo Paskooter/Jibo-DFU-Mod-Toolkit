@@ -37,7 +37,7 @@ class FakeScreen:
         return self.keys.pop(0) if self.keys else ord("q")
 
 
-def fake_api(devices=(), marker=True, alts=None, shofel=False, shofel_dfu=False):
+def fake_api(devices=(), marker=True, alts=None, shofel_dfu=False):
     if alts is None:
         alts = ["var", "jibo-dfu-v1"] if marker else ["var"]
     return SimpleNamespace(
@@ -45,10 +45,8 @@ def fake_api(devices=(), marker=True, alts=None, shofel=False, shofel_dfu=False)
         devices=lambda: list(devices),
         tool=lambda _name: "dfu-util",
         dfu_alternatives=lambda _tool, _port: (alts, ""),
-        shofel_available=lambda: shofel,
         shofel_dfu_available=lambda: shofel_dfu,
         enter_shofel_dfu=lambda **kwargs: {"action": "enter-dfu-shofel", **kwargs},
-        backup_var_shofel=lambda **kwargs: {"action": "backup-var-shofel", **kwargs},
         probe_dfu_gpt=lambda **kwargs: {"action": "probe-dfu-gpt", **kwargs},
         _update_candidates=lambda _folder: [],
     )
@@ -71,8 +69,13 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertEqual(items[0].key, "enter-dfu-shofel")
         self.assertEqual(items[0].label, "Enter DFU with ShofEL (RAM loader)")
         self.assertTrue(items[0].enabled)
-        self.assertEqual(items[1].key, "enter-dfu-signed")
-        self.assertTrue(items[1].enabled)
+        self.assertFalse(hasattr(available, "shofel_available"))
+        self.assertFalse({"enter-dfu-signed", "backup-var-shofel", "verify-bundle"} &
+                         {item.key for item in items})
+        online_rcm_actions = {"enter-dfu-shofel", "probe-dfu-gpt", "backup-var",
+                              "set-mode", "configure-wifi", "flash-update", "write-var"}
+        self.assertEqual({item.key for item in items if item.key in online_rcm_actions and item.enabled},
+                         {"enter-dfu-shofel"})
 
         unavailable = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-2", "state": "rcm"}], shofel_dfu=False))
@@ -91,8 +94,9 @@ class TuiReadinessTests(unittest.TestCase):
         rcm = jibo_tui.inspect_readiness(fake_api([{"port": "1-1", "state": "rcm"}]))
         items = {item.key: item for item in jibo_tui.build_menu_items(rcm)}
         self.assertFalse(items["enter-dfu-shofel"].enabled)
-        self.assertTrue(items["enter-dfu-signed"].enabled)
-        self.assertFalse(items["backup-var-shofel"].enabled)
+        self.assertNotIn("enter-dfu-signed", items)
+        self.assertNotIn("backup-var-shofel", items)
+        self.assertNotIn("verify-bundle", items)
         self.assertFalse(items["probe-dfu-gpt"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertFalse(items["set-mode"].enabled)
@@ -103,10 +107,8 @@ class TuiReadinessTests(unittest.TestCase):
             fake_api([{"port": "1-1", "state": "dfu"}], marker=False))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_marker)}
         self.assertFalse(items["enter-dfu-shofel"].enabled)
-        self.assertFalse(items["enter-dfu-signed"].enabled)
         self.assertFalse(items["probe-dfu-gpt"].enabled)
         self.assertFalse(items["backup-var"].enabled)
-        self.assertIn("already in DFU", items["enter-dfu-signed"].reason)
 
         no_var = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-1", "state": "dfu"}], alts=["jibo-dfu-v1", "rootfsA"]))
@@ -171,7 +173,7 @@ class TuiReadinessTests(unittest.TestCase):
                 jibo_tui.build_menu_items(missing, ["update.tar.bz2"])}["flash-update"]
         self.assertFalse(item.enabled)
         self.assertIn("cannot write skills", item.reason)
-        self.assertIn("compatible signed recovery bundle", item.reason)
+        self.assertIn("compatible DFU loader", item.reason)
 
         chunked = jibo_tui.Readiness("dfu-ready", (), port="1-1", marker_present=True,
                                      alt_names=base + ("skills-000", "skills-001"))
@@ -190,31 +192,11 @@ class TuiReadinessTests(unittest.TestCase):
     def test_enabled_item_is_returned_for_dispatch(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
         app = jibo_tui.TerminalMenu(api)
-        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN,
-                             curses.KEY_DOWN,
+        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_DOWN,
                              curses.KEY_ENTER])
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
         self.assertEqual(app.command, "backup-var")
-
-    def test_shofel_backup_is_only_available_in_rcm_with_tools_present(self):
-        ready = jibo_tui.inspect_readiness(
-            fake_api([{"port": "1-2", "state": "rcm"}], shofel=True))
-        self.assertTrue(ready.shofel_available)
-        items = {item.key: item for item in jibo_tui.build_menu_items(ready)}
-        self.assertTrue(items["backup-var-shofel"].enabled)
-
-        dfu = jibo_tui.inspect_readiness(
-            fake_api([{"port": "1-2", "state": "dfu"}], shofel=True))
-        items = {item.key: item for item in jibo_tui.build_menu_items(dfu)}
-        self.assertFalse(items["backup-var-shofel"].enabled)
-        self.assertIn("RCM/APX", items["backup-var-shofel"].reason)
-
-    def test_shofel_menu_action_uses_selected_usb_port(self):
-        api = fake_api([{"port": "1-2", "state": "rcm"}], shofel=True)
-        ready = jibo_tui.inspect_readiness(api)
-        result = jibo_tui.execute_action(api, "backup-var-shofel", ready)
-        self.assertEqual(result, {"action": "backup-var-shofel", "port": "1-2"})
 
     def test_dfu_gpt_probe_passes_selected_port_without_confirmation(self):
         api = fake_api([{"port": "1-3", "state": "dfu"}])
