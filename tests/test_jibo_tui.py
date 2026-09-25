@@ -47,7 +47,7 @@ def fake_api(devices=(), marker=True, alts=None, shofel_dfu=False):
         dfu_alternatives=lambda _tool, _port: (alts, ""),
         shofel_dfu_available=lambda: shofel_dfu,
         enter_shofel_dfu=lambda **kwargs: {"action": "enter-dfu-shofel", **kwargs},
-        probe_dfu_gpt=lambda **kwargs: {"action": "probe-dfu-gpt", **kwargs},
+        probe_dfu_gpt=lambda **kwargs: {"status": "partition table read and checked", **kwargs},
         _update_candidates=lambda _folder: [],
     )
 
@@ -203,7 +203,12 @@ class TuiReadinessTests(unittest.TestCase):
         ready = jibo_tui.inspect_readiness(api)
         with patch.object(jibo_tui, "confirm_action") as confirm:
             result = jibo_tui.execute_action(api, "probe-dfu-gpt", ready)
-        self.assertEqual(result, {"action": "probe-dfu-gpt", "port": "1-3"})
+        self.assertEqual(result, {
+            "status": "partition table read and checked",
+            "port": "1-3",
+            "message": ("Before another GPT check or an update, reset to RCM/APX and re-enter DFU. "
+                        "This loader advances its eMMC GPT cursor after a check."),
+        })
         confirm.assert_not_called()
 
     def test_dfu_gpt_probe_dispatch_refuses_non_dfu_state(self):

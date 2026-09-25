@@ -576,7 +576,8 @@ class TerminalMenu:
 def _action_hint(key):
     hints = {
         "enter-dfu-shofel": "Initializes the selected SDRAM profile and starts the RAM recovery loader from RCM/APX.",
-        "probe-dfu-gpt": "Reads the partition layout over DFU. This action does not write eMMC.",
+        "probe-dfu-gpt": ("Reads the partition layout without writing eMMC. After a successful check, "
+                          "reset to RCM/APX and re-enter DFU before another check or update."),
         "backup-var": "Read the robot's var partition and save one reusable local rollback image.",
         "set-mode": "Choose a mode; review the proposed change and confirm before writing.",
         "configure-wifi": "Enter a network; review the proposed change and confirm before writing.",
@@ -688,7 +689,13 @@ def execute_action(api, key, readiness):
     if key == "probe-dfu-gpt":
         if readiness.state != "dfu-ready":
             raise RuntimeError("The partition layout check is available only while the robot is in DFU.")
-        return api.probe_dfu_gpt(port=readiness.port)
+        result = api.probe_dfu_gpt(port=readiness.port)
+        if isinstance(result, dict):
+            result = dict(result)
+            result["message"] = (
+                "Before another GPT check or an update, reset to RCM/APX and re-enter DFU. "
+                "This loader advances its eMMC GPT cursor after a check.")
+        return result
     if key == "set-mode":
         mode = _select_mode()
         if mode is None:
