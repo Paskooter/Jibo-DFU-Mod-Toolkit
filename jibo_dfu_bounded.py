@@ -2,7 +2,7 @@
 
 Only DFU_UPLOAD is used to read storage. The helper limits the sum of the
 requested and received payload to 32 KiB, then sends DFU_ABORT and verifies
-DFU_STATE_dfuIDLE with DFU_GETSTATE. It does not create files or send DNLOAD.
+DFU_STATE_dfuIDLE with DFU_GETSTATUS. It does not create files or send DNLOAD.
 On the current U-Boot backend, DFU_ABORT resets the protocol state but does not
 rewind the selected entity's upload cursor. Do not read emmc-000 a second time
 in the same loader session; reset/re-enter the RAM loader before another probe.
@@ -29,7 +29,7 @@ _USB_CLASS = 0x20
 _USB_INTERFACE = 0x01
 _GET_DESCRIPTOR = 0x06
 _DFU_UPLOAD = 0x02
-_DFU_GETSTATE = 0x05
+_DFU_GETSTATUS = 0x03
 _DFU_ABORT = 0x06
 _DFU_FUNCTIONAL_DESCRIPTOR = 0x21
 _DFU_CAN_UPLOAD = 0x04
@@ -332,14 +332,15 @@ def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_
         cleanup_errors.append(exc)
 
     try:
-        state = (ctypes.c_ubyte * 1)()
+        status = (ctypes.c_ubyte * 6)()
         length = _control(
-            lib, handle, _USB_IN | _USB_CLASS | _USB_INTERFACE, _DFU_GETSTATE,
-            0, interface, state, 1, "DFU_GETSTATE cleanup failed"
+            lib, handle, _USB_IN | _USB_CLASS | _USB_INTERFACE, _DFU_GETSTATUS,
+            0, interface, status, len(status), "DFU_GETSTATUS cleanup failed"
         )
-        if length != 1 or state[0] != _DFU_IDLE:
+        if length != len(status) or status[0] != 0 or status[4] != _DFU_IDLE:
             cleanup_errors.append(BoundedDfuError(
-                "DFU cleanup did not return the interface to dfuIDLE."
+                "DFU cleanup returned {} status byte(s), status {}, state {}; expected status 0 and dfuIDLE (2).".format(
+                    length, status[0], status[4])
             ))
     except Exception as exc:
         cleanup_errors.append(exc)

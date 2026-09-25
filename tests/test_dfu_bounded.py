@@ -32,9 +32,11 @@ class FakeLibusb:
             return actual
         if request == bounded._DFU_ABORT:
             return self.abort_error if self.abort_error is not None else 0
-        if request == bounded._DFU_GETSTATE:
-            ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))[0] = self.state
-            return 1
+        if request == bounded._DFU_GETSTATUS:
+            status = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+            status[0] = 0
+            status[4] = self.state
+            return 6
         raise AssertionError("unexpected USB request {}".format(request))
 
     @staticmethod
@@ -54,7 +56,7 @@ class BoundedUploadTests(unittest.TestCase):
         self.assertEqual([call[4] for call in upload_calls], [4096] * 8)
         self.assertEqual(sum(call[4] for call in upload_calls), 32768)
         self.assertEqual(lib.calls[-2][1], bounded._DFU_ABORT)
-        self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATE)
+        self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATUS)
         self.assertTrue(all(call[3] == 3 for call in lib.calls))
 
     def test_short_upload_stops_early_but_still_runs_cleanup(self):
@@ -64,7 +66,7 @@ class BoundedUploadTests(unittest.TestCase):
 
         self.assertEqual(len(result), 1024)
         self.assertEqual(len([call for call in lib.calls if call[1] == bounded._DFU_UPLOAD]), 1)
-        self.assertEqual([call[1] for call in lib.calls[-2:]], [bounded._DFU_ABORT, bounded._DFU_GETSTATE])
+        self.assertEqual([call[1] for call in lib.calls[-2:]], [bounded._DFU_ABORT, bounded._DFU_GETSTATUS])
 
     def test_upload_failure_still_aborts_and_checks_state(self):
         lib = FakeLibusb(upload_error=-7)
@@ -73,7 +75,7 @@ class BoundedUploadTests(unittest.TestCase):
             bounded._upload_bounded(lib, object(), interface=0, transfer_size=4096)
 
         self.assertEqual([call[1] for call in lib.calls], [
-            bounded._DFU_UPLOAD, bounded._DFU_ABORT, bounded._DFU_GETSTATE
+            bounded._DFU_UPLOAD, bounded._DFU_ABORT, bounded._DFU_GETSTATUS
         ])
 
     def test_keyboard_interrupt_still_runs_cleanup_then_propagates(self):
@@ -83,7 +85,7 @@ class BoundedUploadTests(unittest.TestCase):
             bounded._upload_bounded(lib, object(), interface=0, transfer_size=4096)
 
         self.assertEqual([call[1] for call in lib.calls], [
-            bounded._DFU_UPLOAD, bounded._DFU_ABORT, bounded._DFU_GETSTATE
+            bounded._DFU_UPLOAD, bounded._DFU_ABORT, bounded._DFU_GETSTATUS
         ])
 
     def test_cleanup_fails_if_device_does_not_return_to_idle(self):
@@ -98,7 +100,7 @@ class BoundedUploadTests(unittest.TestCase):
         with self.assertRaisesRegex(bounded.BoundedDfuError, "DFU_ABORT cleanup failed"):
             bounded._upload_bounded(lib, object(), interface=0, transfer_size=4096)
 
-        self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATE)
+        self.assertEqual(lib.calls[-1][1], bounded._DFU_GETSTATUS)
 
     def test_helper_rejects_alternate_names_other_than_emmc_zero(self):
         with self.assertRaisesRegex(bounded.BoundedDfuError, "only permits the emmc-000"):
