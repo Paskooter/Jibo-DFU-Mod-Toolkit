@@ -424,23 +424,27 @@ try {
     }
 
     Write-Host ("Starting Jibo DFU toolkit in WSL distro '{0}'." -f $script:SelectedDistro) -ForegroundColor Green
-    $quotedDistro = '"' + $script:SelectedDistro.Replace('"', '\"') + '"'
-    $quotedLinuxRepo = '"' + $linuxRepo.Replace('"', '\"') + '"'
-    $arguments = '--distribution ' + $quotedDistro + ' --cd ' + $quotedLinuxRepo + ' --exec env JIBO_MANUAL_USB=1 bash ./run.sh'
-    # Keep Win32's working directory local even when this script came from a
-    # \wsl.localhost UNC path. WSL --cd selects the actual Linux directory.
-    $wslProcess = Start-Process -FilePath $script:WslPath -ArgumentList $arguments -WorkingDirectory $env:SystemRoot -NoNewWindow -PassThru
-
-    if (-not $ManualUsb -and $script:UsbipdPath) {
-        while (-not $wslProcess.HasExited) {
-            [void](Invoke-JiboUsbCycle)
-            Start-Sleep -Milliseconds 1200
-            $wslProcess.Refresh()
+    $monitor = $null
+    if (-not $ManualUsb -and $script:UsbipdPath -and -not $script:StateWarningShown) {
+        # Keep USB reattachment running while WSL owns the interactive console.
+        # The child uses -File; no encoded PowerShell command is needed.
+        $monitorArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}"' -f $PSCommandPath, $script:SelectedDistro
+        $monitor = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
+            -ArgumentList $monitorArguments -NoNewWindow -PassThru
+    }
+    try {
+        # Invoke WSL directly so PowerShell passes the distro and Linux path as
+        # separate arguments, including when either contains spaces.
+        & $script:WslPath --distribution $script:SelectedDistro --cd $linuxRepo --exec env JIBO_MANUAL_USB=1 bash ./run.sh
+        $wslExitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($monitor -and -not $monitor.HasExited) {
+            Stop-Process -Id $monitor.Id
+            $monitor.WaitForExit()
         }
     }
-
-    $wslProcess.WaitForExit()
-    exit $wslProcess.ExitCode
+    exit $wslExitCode
 }
 catch {
     Write-Host ("Launcher error: {0}" -f $_.Exception.Message) -ForegroundColor Red
