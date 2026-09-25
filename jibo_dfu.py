@@ -25,7 +25,6 @@ ROOT = Path(__file__).resolve().parent
 RCM = ("0955", "7740")
 DFU = ("0955", "701a")
 MARKER = "jibo-dfu-v1"
-FILES = ("loader.bin", "rcm.bct", "rcm.qry", "rcm.ml", "rcm.bl")
 EXPECTED_VAR_SIZE = 524_288_000
 WRITE_CONFIRMATION = "WRITE VAR"
 UPDATE_CONFIRMATION = "FLASH UPDATE"
@@ -33,9 +32,7 @@ UPDATE_ORDER = ("rootfsA", "rootfsB", "services", "skills", "var")
 SKILLS_SECTOR_SIZE = 512
 SKILLS_CHUNK_SECTORS = 0x200000
 SKILLS_CHUNK_BYTES = SKILLS_SECTOR_SIZE * SKILLS_CHUNK_SECTORS
-EMMC_SECTOR_SIZE = 512
-SHOFEL_GPT_SECTORS = 64
-SHOFEL_READ_FRAME_BYTES = 8 * EMMC_SECTOR_SIZE
+DEFAULT_LOADER = ROOT / "loader.bin"
 
 
 def _invoking_user():
@@ -81,33 +78,6 @@ def select_device(found, port=None):
     if len(selected) > 1:
         raise DfuError("Multiple robots connected; select one using --port.")
     return selected[0] if selected else None
-
-
-def load_bundle(directory):
-    directory = Path(directory).resolve()
-    try:
-        manifest = json.loads((directory / "manifest.json").read_text())
-        if manifest["schema"] != 1 or manifest["entry"] != "jibo-ram-dfu-v1":
-            raise DfuError("Unsupported loader manifest.")
-        if manifest["persistent_writes_on_entry"] is not False:
-            raise DfuError("This tool requires a loader that preserves persistent storage.")
-        if manifest["soc"] != 124 or manifest["load_address"] != "0x80108000":
-            raise DfuError("Unsupported RCM target or load address.")
-        if set(manifest["files"]) != set(FILES):
-            raise DfuError("Bundle must contain precisely the required five artifact records.")
-        for name in FILES:
-            path = directory / name
-            if path.is_symlink() or not path.is_file():
-                raise DfuError("Missing or symlinked bundle artifact: " + name)
-            data = path.read_bytes()
-            record = manifest["files"][name]
-            if len(data) != record["size"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
-                raise DfuError("Bundle integrity check failed: " + name)
-        if (directory / "rcm.bct").stat().st_size != 8192:
-            raise DfuError("T124 BCT must be 8192 bytes.")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise DfuError("Invalid bundle: " + str(exc)) from exc
-    return manifest
 
 
 def run(argv, timeout=30):
@@ -309,8 +279,8 @@ def tool(name, override=None):
     return located
 
 
-def _shofel_tool(override=None):
-    """Resolve ShofEL and its adjacent eMMC payload without running it."""
+def _shofel_dfu_tool(override=None):
+    """Find a matched ShofEL host and launch-enabled RAM payload."""
     candidate = override or str(ROOT / "tools" / "shofel2_t124")
     if not Path(candidate).is_file():
         if override:
@@ -318,28 +288,12 @@ def _shofel_tool(override=None):
         candidate = shutil.which("shofel2_t124")
     if not candidate:
         raise DfuError("Missing shofel2_t124; install it or provide --shofel.")
-    executable = Path(candidate).resolve()
-    if not os.access(str(executable), os.X_OK):
-        raise DfuError("ShofEL host tool is not executable: " + str(executable))
-    for payload_name in ("emmc_server.bin", "intermezzo.bin"):
-        payload = executable.parent / payload_name
-        if not payload.is_file() or payload.stat().st_size == 0:
-            raise DfuError("Missing non-empty " + payload_name + " next to " + str(executable))
-    return str(executable)
-
-
-def shofel_available():
-    """Return whether the default ShofEL host and payload are installed."""
-    try:
-        _shofel_tool()
-        return True
-    except (DfuError, OSError):
-        return False
-
-
-def _shofel_dfu_tool(override=None):
-    """Find a matched ShofEL host and launch-enabled RAM payload."""
-    executable = _shofel_tool(override)
+    executable = str(Path(candidate).resolve())
+    if not os.access(executable, os.X_OK):
+        raise DfuError("ShofEL host tool is not executable: " + executable)
+    intermezzo = Path(executable).parent / "intermezzo.bin"
+    if not intermezzo.is_file() or intermezzo.stat().st_size == 0:
+        raise DfuError("Missing non-empty intermezzo.bin next to " + executable)
     payload = Path(executable).parent / "dfu_stage2.bin"
     if not payload.is_file() or payload.stat().st_size == 0:
         raise DfuError("Missing non-empty dfu_stage2.bin next to " + executable)
@@ -353,125 +307,9 @@ def shofel_dfu_available():
     """Return whether the local ShofEL pair can start the RAM DFU loader."""
     try:
         _shofel_dfu_tool()
-        return (ROOT / "bundles" / "default" / "loader.bin").is_file()
+        return DEFAULT_LOADER.is_file()
     except (DfuError, OSError):
         return False
-
-
-def probe_rcm_dram(port=None, shofel=None):
-    """Report T124 memory-controller state without accessing eMMC."""
-    executable = _shofel_tool(shofel)
-    probe = Path(executable).parent / "dram_probe.bin"
-    if not probe.is_file() or not probe.stat().st_size:
-        raise DfuError("Missing dram_probe.bin next to " + executable)
-    selected = select_device(devices(), port)
-    if selected is None or selected["state"] != "rcm":
-        raise DfuError("Connect the robot in RCM/APX before probing DRAM.")
-    output = run_with_progress([executable, "--usb-port-path", selected["port"],
-                                "DRAM_STATUS"], timeout=30,
-                               label="Checking T124 DRAM state",
-                               cwd=str(Path(executable).parent))
-    marker = "T124 DRAM/EMC probe (no eMMC access)"
-    if marker not in output:
-        raise DfuError("ShofEL did not return a valid DRAM probe report.")
-    report = output.split(marker, 1)[1]
-    lines = [line.strip() for line in report.splitlines() if line.strip()]
-    if not any(line.startswith("Register preflight:") for line in lines) or not any(
-            line.startswith("DRAM scratch round-trip:") or
-            line.startswith("DRAM scratch round-trip at ") for line in lines):
-        raise DfuError("ShofEL returned an incomplete DRAM probe report.")
-    return {"status": "probe complete", "port": selected["port"],
-            "details": lines}
-
-
-def trace_rcm_dram(port=None, shofel=None):
-    """Trace one T124 memory-register read at a time without eMMC access."""
-    executable = _shofel_tool(shofel)
-    trace = Path(executable).parent / "dram_trace.bin"
-    if not trace.is_file() or not trace.stat().st_size:
-        raise DfuError("Missing dram_trace.bin next to " + executable)
-    selected = select_device(devices(), port)
-    if selected is None or selected["state"] != "rcm":
-        raise DfuError("Connect the robot in RCM/APX before tracing DRAM.")
-    output = run_with_progress([executable, "--usb-port-path", selected["port"],
-                                "DRAM_TRACE"], timeout=60,
-                               label="Tracing T124 memory setup",
-                               cwd=str(Path(executable).parent))
-    phases = [line.strip() for line in output.splitlines()
-              if line.startswith("DRAM_TRACE phase ")]
-    if not phases or not any("(complete)" in line for line in phases):
-        raise DfuError("ShofEL returned an incomplete DRAM trace.")
-    return {"status": "trace complete", "port": selected["port"],
-            "phases": phases}
-
-
-def read_rcm_boot0_bct(out, port=None, shofel=None):
-    """Read the bounded Boot0 BCT prefix through ShofEL for profile checks."""
-    executable = _shofel_tool(shofel)
-    selected = select_device(devices(), port)
-    if selected is None or selected["state"] != "rcm":
-        raise DfuError("Connect the robot in RCM/APX before reading Boot0.")
-    target = Path(out).resolve()
-    if target.exists():
-        raise DfuError("Output already exists; choose a new path: " + str(target))
-    if not target.parent.is_dir():
-        raise DfuError("Output directory does not exist: " + str(target.parent))
-    report = run_with_progress([executable, "--usb-port-path", selected["port"],
-                                "EMMC_READ_BOOT0_BCT", str(target)], timeout=90,
-                               label="Reading the 16 KiB Boot0 BCT prefix",
-                               cwd=str(Path(executable).parent))
-    geometry = re.search(r"CSD READ_BL_LEN=(\d+)", report)
-    if geometry is None or not 0 <= int(geometry.group(1)) <= 31:
-        raise DfuError("Boot0 read did not report valid CSD page geometry.")
-    try:
-        if target.stat().st_size != 16_384:
-            raise DfuError("Boot0 read returned the wrong size; discard " + str(target))
-        digest = _sha256_file(target)
-        target.chmod(0o600)
-        _chown_to_invoking_user(target)
-    except OSError as exc:
-        raise DfuError("Boot0 read did not produce a valid output: " + str(exc)) from exc
-    return {"status": "read complete", "port": selected["port"],
-            "image": str(target), "size_bytes": 16_384, "sha256": digest,
-            "read_bl_len_exp": int(geometry.group(1))}
-
-
-def stage_rcm_dfu(port=None, shofel=None, loader=None,
-                  confirm_meerkat_rev02=False):
-    """Stage the pinned RAM DFU loader without starting it or writing eMMC."""
-    if not confirm_meerkat_rev02:
-        raise DfuError("Confirm the Meerkat Rev02 SDRAM candidate before staging; "
-                       "the operation initializes DRAM.")
-
-    executable = _shofel_tool(shofel)
-    stage_payload = Path(executable).parent / "dfu_stage2.bin"
-    if not stage_payload.is_file() or stage_payload.stat().st_size == 0:
-        raise DfuError("Missing non-empty dfu_stage2.bin next to " + executable)
-
-    image = Path(loader) if loader is not None else ROOT / "bundles" / "default" / "loader.bin"
-    if image.is_symlink() or not image.is_file():
-        raise DfuError("Missing or symlinked RAM DFU loader image: " + str(image))
-    image = image.resolve()
-
-    selected = select_device(devices(), port)
-    if selected is None or selected["state"] != "rcm":
-        raise DfuError("Connect the robot in RCM/APX before staging the RAM DFU loader.")
-
-    # Do not add --launch here. ShofEL enforces the pinned loader hash and the
-    # separate launch option is intentionally absent from this first-stage CLI.
-    output = run_with_progress(
-        [executable, "--usb-port-path", selected["port"], "DFU_STAGE",
-         str(image), "--confirm-meerkat-rev02"],
-        timeout=180, label="Staging the RAM DFU loader", cwd=str(Path(executable).parent),
-        byte_progress=True)
-    success_marker = "The SPL was not started; the robot is returning to RCM."
-    if success_marker not in output:
-        raise DfuError("ShofEL did not confirm the RAM loader was staged without starting it.")
-
-    return {"status": "loader staged in RAM; not started", "port": selected["port"],
-            "image": str(image), "size_bytes": image.stat().st_size,
-            "sha256": _sha256_file(image), "emmc_writes": False,
-            "started": False}
 
 
 def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
@@ -482,7 +320,7 @@ def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
     if not 0 < timeout <= 600:
         raise DfuError("Timeout must be between 0 and 600 seconds.")
     executable = _shofel_dfu_tool(shofel)
-    image = Path(loader) if loader is not None else ROOT / "bundles" / "default" / "loader.bin"
+    image = Path(loader) if loader is not None else DEFAULT_LOADER
     if image.is_symlink() or not image.is_file():
         raise DfuError("Missing or symlinked RAM DFU loader image: " + str(image))
     image = image.resolve()
@@ -526,50 +364,6 @@ def dfu_alternatives(executable, port):
     output = run([executable, "-d", "0955:701a", "--path", port, "-l"])
     names = re.findall(r'name="([^"]+)"', output)
     return names, output
-
-
-def enter(bundle, port, tegrarcm, dfu_util, timeout=30, allow_unverified_profile=False):
-    selected = select_device(devices(), port)
-    if selected is None:
-        raise DfuError("No Jibo RCM/DFU device detected. Connect USB and hold recovery while resetting the robot.")
-    port = selected["port"]
-    if selected["state"] == "dfu":
-        names, _ = dfu_alternatives(dfu_util, port)
-        if not names:
-            raise DfuError("DFU device has no accessible alternatives; check USB permissions.")
-        return {"port": port, "state": "dfu", "already_running": True,
-                "loader_verified": MARKER in names, "alternatives": names}
-    manifest = load_bundle(bundle)
-    if not manifest.get("hardware_verified", False) and not allow_unverified_profile:
-        raise DfuError("This recovery bundle is not verified for its declared hardware profile. "
-                       "Use --allow-unverified-profile only after confirming it matches the robot.")
-    root = Path(bundle).resolve()
-    argv = [tegrarcm, "--usb-port-path=" + port, "--download-signed-msgs",
-            "--signed-msgs-file=" + str(root / "rcm"), "--bct=" + str(root / "rcm.bct"),
-            "--bootloader=" + str(root / "loader.bin"), "--loadaddr=0x80108000",
-            "--usb-timeout=5000"]
-    try:
-        run(argv, timeout=max(timeout, 30))
-    except DfuError as exc:
-        if "read RCM query version: USB transfer failure" in str(exc):
-            raise DfuError(
-                "The RCM handshake stopped before the recovery loader was sent. "
-                "The robot is still in RCM/APX; DFU has not started. "
-                "Reset into RCM/APX, then check the USB connection and this robot's signing profile."
-            ) from exc
-        raise
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        current = select_device(devices(), port)
-        if current and current["state"] == "dfu":
-            names, _ = dfu_alternatives(dfu_util, port)
-            if MARKER not in names:
-                raise DfuError("USB entered DFU but the expected loader marker is absent; no partition transfer was attempted.")
-            return {"port": port, "state": "dfu", "already_running": False,
-                    "loader_verified": True, "alternatives": names}
-        time.sleep(0.25)
-    raise DfuError("RCM transfer completed but DFU did not appear on port " + port +
-                   ". Check USB passthrough and reset into RCM before retrying.")
 
 
 def _utc_now():
@@ -996,7 +790,7 @@ def _update_candidates(folder):
 
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
                      transport="USB DFU upload", usb_state="DFU (0955:701a)",
-                     profile="Jibo RAM DFU candidate; firmware revision unknown"):
+                     profile="Jibo RAM DFU loader"):
     record = {"schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
               "partition": "var", "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
               "profile": profile, "transport": transport, "usb_state": usb_state,
@@ -1139,186 +933,6 @@ def backup_var(port=None, dfu_util=None, out=None, refresh=False):
             "operation_directory": str(directory), "profile": record["profile"]}
 
 
-def _parse_shofel_chip_id(output):
-    match = re.search(r"Chip ID:\s*((?:0x[0-9a-fA-F]{2}\s*){16})", output,
-                      flags=re.IGNORECASE)
-    if not match:
-        raise DfuError("ShofEL did not report a valid T124 chip ID; no backup was saved.")
-    return bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", match.group(1)))
-
-
-def _reject_shofel_read_errors(path, start_sector):
-    """Reject the payload's fixed 4 KiB marker frame for failed eMMC reads."""
-    marker_tail = bytes.fromhex("addeadde") * ((SHOFEL_READ_FRAME_BYTES - 4) // 4)
-    with Path(path).open("rb") as stream:
-        frame_index = 0
-        while True:
-            frame = stream.read(SHOFEL_READ_FRAME_BYTES)
-            if not frame:
-                return
-            if len(frame) != SHOFEL_READ_FRAME_BYTES:
-                raise DfuError("ShofEL returned an incomplete eMMC read frame.")
-            first_word = int.from_bytes(frame[:4], "little")
-            if first_word & 0xFFFF0000 == 0xDEAD0000 and frame[4:] == marker_tail:
-                sector = start_sector + frame_index * (SHOFEL_READ_FRAME_BYTES // EMMC_SECTOR_SIZE)
-                code = first_word & 0xFFFF
-                raise DfuError("ShofEL reported an eMMC read error at sector {} (code 0x{:04x}).".format(
-                    sector, code))
-            frame_index += 1
-
-
-def _read_shofel_range(executable, port, start_sector, sector_count, destination,
-                       timeout, label, include_stats=False, bus_width=1):
-    """Read an exact sector range using only ShofEL's EMMC_READ command."""
-    try:
-        start_sector = int(start_sector)
-        sector_count = int(sector_count)
-    except (TypeError, ValueError) as exc:
-        raise DfuError("Invalid ShofEL sector range.") from exc
-    if (start_sector < 0 or sector_count <= 0 or start_sector > 0xFFFFFFFF or
-            sector_count > 0xFFFFFFFF or start_sector + sector_count > 0x100000000):
-        raise DfuError("ShofEL sector range is outside the supported T124 address range.")
-    destination = Path(destination)
-    destination.unlink(missing_ok=True)
-    if bus_width not in (1, 8):
-        raise DfuError("ShofEL read bus width must be 1 or 8 bits.")
-    argv = [executable, "--usb-port-path", port]
-    if bus_width == 8:
-        argv.extend(("--bus-width", "8"))
-    argv.extend(("EMMC_READ", "0x{:x}".format(start_sector),
-                 "0x{:x}".format(sector_count), str(destination)))
-    try:
-        output = run_with_progress(argv, timeout=timeout, label=label,
-                                   cwd=str(Path(executable).parent),
-                                   progress_path=destination, progress_size=sector_count * EMMC_SECTOR_SIZE)
-        expected = sector_count * EMMC_SECTOR_SIZE
-        if not destination.is_file() or destination.stat().st_size != expected:
-            actual = destination.stat().st_size if destination.is_file() else 0
-            raise DfuError("ShofEL returned {} bytes; expected {}.".format(actual, expected))
-        _reject_shofel_read_errors(destination, start_sector)
-        destination.chmod(0o600)
-        _chown_to_invoking_user(destination)
-        chip_id = _parse_shofel_chip_id(output)
-        if include_stats:
-            match = re.search(r"^READ_STATS bytes=(\d+) transfer_seconds=([0-9]+(?:\.[0-9]+)?)$",
-                              output, re.MULTILINE)
-            if not match or int(match.group(1)) != expected or float(match.group(2)) <= 0:
-                raise DfuError("ShofEL did not report valid transfer timing for the completed read.")
-            return chip_id, float(match.group(2))
-        return chip_id
-    except DfuError as exc:
-        destination.unlink(missing_ok=True)
-        if "Couldn't read Chip ID" in str(exc) or "USB receive failed" in str(exc):
-            raise DfuError(str(exc) + "\nReset the robot into RCM/APX before retrying.") from exc
-        raise
-    except OSError:
-        destination.unlink(missing_ok=True)
-        raise
-
-
-def _read_shofel_gpt(executable, port):
-    with tempfile.TemporaryDirectory(prefix="jibo-shofel-gpt-") as directory:
-        prefix = Path(directory) / "gpt-prefix.bin"
-        chip_id = _read_shofel_range(
-            executable, port, 0, SHOFEL_GPT_SECTORS, prefix, 120,
-            "Reading the 32 KiB eMMC GPT with ShofEL")
-        try:
-            layout = updates.parse_gpt_layout_prefix(prefix.read_bytes())
-        except (OSError, updates.UpdateError) as exc:
-            raise DfuError("Could not validate the robot's GPT layout: " + str(exc)) from exc
-    required = {"rootfsA", "rootfsB", "services", "var", "skills"}
-    missing = sorted(required - set(layout))
-    if missing:
-        raise DfuError("GPT is missing Jibo partition names: " + ", ".join(missing) + ".")
-    var = layout["var"]
-    if var["size_bytes"] != EXPECTED_VAR_SIZE:
-        raise DfuError("GPT reports {} bytes for var; this profile expects {}. No partition read was attempted.".format(
-            var["size_bytes"], EXPECTED_VAR_SIZE))
-    for name, expected in updates.KNOWN_CAPACITIES.items():
-        if layout[name]["size_bytes"] != expected:
-            raise DfuError("GPT reports {} bytes for {}; this profile expects {}. No partition read was attempted.".format(
-                layout[name]["size_bytes"], name, expected))
-    return layout, chip_id
-
-
-def backup_var_shofel(port=None, shofel=None, out=None, refresh=False, bus_width=1):
-    """Save a private var baseline through read-only ShofEL eMMC reads."""
-    executable = _shofel_tool(shofel)
-    selected = select_device(devices(), port)
-    if selected is None:
-        raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
-    if selected["state"] != "rcm":
-        raise DfuError("ShofEL var backup requires the robot to be in RCM/APX; no partition read was attempted.")
-    port = selected["port"]
-    layout, chip_id = _read_shofel_gpt(executable, port)
-    device_tag = "tegra-chip-id-sha256:" + hashlib.sha256(chip_id).hexdigest()
-    existing = _find_verified_backup(device_tag) if out is None else None
-    if existing and not refresh:
-        return {"status": "existing verified backup reused", "image": str(existing["image"]),
-                "sha256": existing["sha256"], "manifest": str(existing["manifest"]),
-                "created_utc": existing["created_utc"],
-                "message": "Use --refresh to capture the currently connected var state."}
-
-    directory = _new_operation_dir(out, "var-backup")
-    image_path = directory / "var.img"
-    var = layout["var"]
-    sector_count = var["last_lba"] - var["first_lba"] + 1
-    try:
-        capture_chip_id = _read_shofel_range(
-            executable, port, var["first_lba"], sector_count, image_path, 3600,
-            "Reading the 500 MiB var partition with ShofEL", bus_width=bus_width)
-        if capture_chip_id != chip_id:
-            raise DfuError("The RCM/APX device changed between GPT and var reads; the partial backup was discarded.")
-        digest = _sha256_file(image_path)
-        record = _backup_manifest(
-            directory, port, image_path, digest, device_tag=device_tag,
-            transport="ShofEL2 EMMC_READ (read-only)", usb_state="RCM/APX (0955:7740)",
-            profile="Jibo T124 raw eMMC GPT profile; firmware revision unknown")
-    except (DfuError, OSError) as exc:
-        image_path.unlink(missing_ok=True)
-        _private_write(directory / "backup-manifest.json", {
-            "schema": 1, "kind": "jibo-var-backup", "created_utc": _utc_now(),
-            "partition": "var", "status": "failed", "usb_state": "RCM/APX (0955:7740)",
-            "transport": "ShofEL2 EMMC_READ (read-only)", "usb_port": port,
-            "error": str(exc), "operation_directory": str(directory)})
-        raise
-    if out is None and existing and existing["sha256"] == digest:
-        image_path.unlink(missing_ok=True)
-        (directory / "backup-manifest.json").unlink(missing_ok=True)
-        directory.rmdir()
-        return {"status": "existing verified backup reused", "image": str(existing["image"]),
-                "sha256": digest, "manifest": str(existing["manifest"]),
-                "created_utc": existing["created_utc"]}
-    return {"status": "backup complete", "image": str(image_path),
-            "size_bytes": EXPECTED_VAR_SIZE, "sha256": digest,
-            "manifest": str(directory / "backup-manifest.json"),
-            "operation_directory": str(directory), "profile": record["profile"]}
-
-
-def benchmark_rcm_read(port=None, shofel=None, bus_width=1):
-    """Time a disposable 8 MiB read before attempting a full RCM backup."""
-    executable = _shofel_tool(shofel)
-    selected = select_device(devices(), port)
-    if selected is None or selected["state"] != "rcm":
-        raise DfuError("Connect the robot in RCM/APX before benchmarking ShofEL reads.")
-    size = 8 * 1024 * 1024
-    with tempfile.TemporaryDirectory(prefix="jibo-rcm-read-") as directory:
-        destination = Path(directory) / "sample.img"
-        started = time.monotonic()
-        options = {"include_stats": True}
-        if bus_width == 8:
-            options["bus_width"] = 8
-        _, transfer_seconds = _read_shofel_range(
-            executable, selected["port"], 0, size // EMMC_SECTOR_SIZE,
-            destination, 45, "Reading an 8 MiB RCM sample", **options)
-        elapsed = time.monotonic() - started
-    return {"status": "read complete", "size_bytes": size,
-            "seconds": round(elapsed, 1), "mib_per_second": round(8 / max(elapsed, 0.001), 2),
-            "transfer_seconds": round(transfer_seconds, 1),
-            "transfer_mib_per_second": round(8 / transfer_seconds, 2),
-            "bus_width_bits": bus_width, "sample_removed": True}
-
-
 def _confirm_write(supplied=None, plan=None):
     if callable(supplied):
         try:
@@ -1446,25 +1060,16 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
 
 
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
-                 confirmation=None, dry_run=False, bundle=None, tegrarcm=None):
+                 confirmation=None, dry_run=False):
     """Install an official full-flash package using named DFU alternatives."""
-    package = _call_with_progress(lambda: updates.validate_package(package_path),
-                                  "Checking the selected update package")
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
         raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
     if selected["state"] == "rcm":
-        if dry_run:
-            raise DfuError("A dry run does not load recovery from RCM. Enter DFU first, then retry.")
-        recovery_bundle = Path(bundle or ROOT / "bundles" / "default")
-        if not (recovery_bundle / "manifest.json").is_file():
-            raise DfuError("The robot is in RCM, but the matching signed recovery bundle is not available. "
-                           "Place it in bundles/default or use --bundle.")
-        if confirmation is None and not _ask_confirmation(
-                "Load the matching recovery bundle into RAM before examining the flash plan?", "ENTER RCM"):
-            return {"status": "cancelled", "message": "Recovery was not loaded; no update was attempted."}
-        enter(recovery_bundle, selected["port"], tegrarcm or tool("tegrarcm"), dfu_util)
+        raise DfuError("The robot is in RCM/APX. Enter DFU with ShofEL before installing an update.")
+    package = _call_with_progress(lambda: updates.validate_package(package_path),
+                                  "Checking the selected update package")
     port, names, device_tag, alt_output = _dfu_context(
         selected["port"], dfu_util, include_output=True)
     partitions = [name for name in UPDATE_ORDER if name != "var" or not preserve_var]
@@ -1693,16 +1298,6 @@ def main(argv=None):
     sub.add_parser("interactive", help="Open the guided text menu")
     sub.add_parser("detect", help="Show matching USB devices as JSON")
     sub.add_parser("list", help="Show matching USB devices in plain language")
-    check = sub.add_parser("verify-bundle", help="Check local recovery artifacts without touching USB")
-    check.add_argument("bundle", type=Path)
-    entry = sub.add_parser("enter", help="Load recovery into RAM and leave the robot in DFU")
-    entry.add_argument("--bundle", type=Path, default=ROOT / "bundles" / "default")
-    _add_device_arguments(entry)
-    entry.add_argument("--tegrarcm")
-    _add_dfu_argument(entry)
-    entry.add_argument("--timeout", type=float, default=30)
-    entry.add_argument("--allow-unverified-profile", action="store_true",
-                       help="Override the hardware-profile check after confirming the bundle matches the robot")
     shofel_entry = sub.add_parser("enter-dfu-shofel",
                                   help="Start the RAM DFU loader from RCM/APX through ShofEL")
     _add_device_arguments(shofel_entry)
@@ -1721,37 +1316,8 @@ def main(argv=None):
     backup = sub.add_parser("backup-var", help="Save a private var image and SHA-256 manifest")
     _add_device_arguments(backup)
     _add_dfu_argument(backup)
-    backup.add_argument("--transport", choices=("dfu", "shofel"), default="dfu",
-                        help="Read var through the default signed DFU loader or ShofEL in RCM/APX")
-    backup.add_argument("--shofel", help="Path to shofel2_t124; emmc_server.bin and intermezzo.bin must be beside it")
-    backup.add_argument("--bus-width", type=int, choices=(1, 8), default=1,
-                        help="eMMC data bus width for ShofEL reads (default: 1)")
     backup.add_argument("--out", type=Path, help="New output directory; otherwise ~/Jibo-Backups")
     backup.add_argument("--refresh", action="store_true", help="Capture the current var state instead of reusing the saved baseline")
-    benchmark = sub.add_parser("benchmark-rcm", help="Time an 8 MiB read-only ShofEL sample and discard it")
-    _add_device_arguments(benchmark)
-    benchmark.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
-    benchmark.add_argument("--bus-width", type=int, choices=(1, 8), default=1,
-                           help="eMMC data bus width for ShofEL reads")
-    dram_probe = sub.add_parser("probe-rcm-dram", help="Check T124 DRAM readiness through ShofEL without reading eMMC")
-    _add_device_arguments(dram_probe)
-    dram_probe.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
-    dram_trace = sub.add_parser("trace-rcm-dram", help="Trace T124 memory setup one read at a time without eMMC access")
-    _add_device_arguments(dram_trace)
-    dram_trace.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
-    boot0_bct = sub.add_parser("read-rcm-boot0-bct", help="Read the 16 KiB eMMC Boot0 BCT prefix for board-profile checks")
-    _add_device_arguments(boot0_bct)
-    boot0_bct.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
-    boot0_bct.add_argument("--out", type=Path, required=True,
-                           help="New local output path; existing files are never replaced")
-    stage = sub.add_parser("stage-rcm-dfu",
-                           help="Initialize the confirmed SDRAM profile and stage the RAM DFU loader without launching it")
-    _add_device_arguments(stage)
-    stage.add_argument("--shofel", help="Path to shofel2_t124 and its adjacent payloads")
-    stage.add_argument("--loader", type=Path,
-                       help="RAM DFU image (defaults to the packaged loader; ShofEL verifies its pinned hash)")
-    stage.add_argument("--confirm-meerkat-rev02", action="store_true", required=True,
-                       help="Confirm the Meerkat Rev02 SDRAM candidate; this operation initializes DRAM")
     inspect = sub.add_parser("inspect-var", help="Inspect a local var image without displaying credentials")
     inspect.add_argument("image", type=Path)
     mode_edit = sub.add_parser("edit-mode", help="Create a new offline image with a changed Jibo mode")
@@ -1794,8 +1360,6 @@ def main(argv=None):
     _add_device_arguments(flash)
     _add_dfu_argument(flash)
     _add_operation_argument(flash)
-    flash.add_argument("--bundle", type=Path, help="Matching signed RCM bundle if the robot is not already in DFU")
-    flash.add_argument("--tegrarcm", help="Path to tegrarcm for RCM entry")
     flash.add_argument("--dry-run", action="store_true", help="Verify package and live partition sizes without writing")
     flash.add_argument("--confirm", help="Exactly FLASH UPDATE, for scripted writes")
     args = parser.parse_args(argv)
@@ -1807,15 +1371,6 @@ def main(argv=None):
         elif args.command == "list":
             _display_devices()
             return 0
-        elif args.command == "verify-bundle":
-            result = load_bundle(args.bundle)
-        elif args.command == "enter":
-            if not 0 < args.timeout <= 600:
-                raise DfuError("Timeout must be between 0 and 600 seconds.")
-            device = select_device(devices(), args.port)
-            rcm = tool("tegrarcm", args.tegrarcm) if device and device["state"] == "rcm" else "tegrarcm"
-            result = enter(args.bundle, args.port, rcm, tool("dfu-util", args.dfu_util),
-                           args.timeout, args.allow_unverified_profile)
         elif args.command == "enter-dfu-shofel":
             result = enter_shofel_dfu(args.port, args.shofel, args.loader,
                                       args.dfu_util, args.timeout,
@@ -1823,25 +1378,7 @@ def main(argv=None):
         elif args.command == "probe-dfu-gpt":
             result = probe_dfu_gpt(args.port, args.dfu_util)
         elif args.command == "backup-var":
-            if args.transport == "shofel":
-                result = backup_var_shofel(args.port, args.shofel, args.out, args.refresh, args.bus_width)
-            else:
-                if args.shofel:
-                    raise DfuError("Use --shofel only with --transport shofel.")
-                if args.bus_width != 1:
-                    raise DfuError("Use --bus-width 8 only with --transport shofel.")
-                result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
-        elif args.command == "benchmark-rcm":
-            result = benchmark_rcm_read(args.port, args.shofel, args.bus_width)
-        elif args.command == "probe-rcm-dram":
-            result = probe_rcm_dram(args.port, args.shofel)
-        elif args.command == "trace-rcm-dram":
-            result = trace_rcm_dram(args.port, args.shofel)
-        elif args.command == "read-rcm-boot0-bct":
-            result = read_rcm_boot0_bct(args.out, args.port, args.shofel)
-        elif args.command == "stage-rcm-dfu":
-            result = stage_rcm_dfu(args.port, args.shofel, args.loader,
-                                   args.confirm_meerkat_rev02)
+            result = backup_var(args.port, tool("dfu-util", args.dfu_util), args.out, args.refresh)
         elif args.command == "inspect-var":
             result = images.inspect_var(args.image)
         elif args.command == "edit-mode":
@@ -1866,7 +1403,7 @@ def main(argv=None):
         elif args.command == "flash-update":
             result = flash_update(args.package, args.preserve_var, args.port,
                                   tool("dfu-util", args.dfu_util), args.operation_dir,
-                                  args.confirm, args.dry_run, args.bundle, args.tegrarcm)
+                                  args.confirm, args.dry_run)
         else:
             result = write_var(args.image, args.port, tool("dfu-util", args.dfu_util),
                                args.operation_dir, args.confirm)
