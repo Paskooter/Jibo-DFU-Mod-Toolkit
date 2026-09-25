@@ -598,7 +598,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..4ed8ed9 100644
+index 9e49a2f..1d8eb85 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -1530,7 +1530,7 @@ index 9e49a2f..4ed8ed9 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,13 +1284,222 @@ int main( int argc, char *argv[] ) {
+@@ -508,13 +1284,282 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
@@ -1566,9 +1566,9 @@ index 9e49a2f..4ed8ed9 100644
 +                if ( emmc_read_error || emmc_output_error ) {
 +                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
 +                    goto emmc_exit;
-                 }
-             }
- 
++                }
++            }
++
 +            if ( dump_fd >= 0 ) {
 +                if ( close(dump_fd) < 0 ) {
 +                    dump_fd = -1;
@@ -1582,11 +1582,11 @@ index 9e49a2f..4ed8ed9 100644
 +                    printf( "Error: Failed to install verified dump at %s: %s\n",
 +                            emmc_filename, strerror(errno) );
 +                    goto emmc_exit;
-+                }
+                 }
 +                free(emmc_temp_filename);
 +                emmc_temp_filename = NULL;
-+            }
-+
+             }
+ 
              printf( "\nRead complete. Output: %s\n", emmc_filename );
              _ret_main = 0;
          }
@@ -1645,11 +1645,71 @@ index 9e49a2f..4ed8ed9 100644
 +                report.size != EMMC_BOOT0_BCT_PREFIX_SIZE) {
 +                printf("Error: boot0 read failed (payload status %u, returned size %u).\n",
 +                       report.result, report.size);
-+                printf("PARTITION_CONFIG original=0x%02x selected=0x%02x observed=0x%02x; "
-+                       "BOOT_SIZE_MULT=%u; READ_BL_LEN exponent=%u.\n",
-+                       report.partconf_original, report.partconf_selected,
-+                       report.partconf_restored, report.boot_size_mult,
-+                       report.read_bl_len);
++                if (report.result == EMMC_BOOT0_RESULT_CSD) {
++                    if (report.partconf_original <= 0xffU)
++                        printf("Boot0 selection was not attempted; original PARTITION_CONFIG "
++                               "remains 0x%02x.\n", report.partconf_original);
++                    else
++                        printf("Boot0 selection was not attempted; PARTITION_CONFIG could not "
++                               "be read.\n");
++                    if (report.csd_cmd_error == EMMC_BOOT0_CSD_CMD_NOT_RUN) {
++                        printf("CMD9 SEND_CSD was not run before the card entered "
++                               "Transfer state.\n");
++                    } else if (report.csd_cmd_error == 0) {
++                        if (report.read_bl_len <= 15U)
++                            printf("CMD9 SEND_CSD did not provide a valid READ_BL_LEN "
++                                   "exponent (%u).\n", report.read_bl_len);
++                        else
++                            printf("CMD9 SEND_CSD did not provide a valid READ_BL_LEN "
++                                   "exponent (unavailable; raw=0x%08x).\n",
++                                   report.read_bl_len);
++                    } else {
++                        const char *cmd_error_name = "unknown send_cmd error";
++                        switch (report.csd_cmd_error) {
++                        case EMMC_BOOT0_CSD_CMD_INHIBIT_TIMEOUT:
++                            cmd_error_name = "CMD_INHIBIT timeout";
++                            break;
++                        case EMMC_BOOT0_CSD_CMD_INT_ERROR:
++                            cmd_error_name = "SDHCI command error";
++                            break;
++                        case EMMC_BOOT0_CSD_CMD_COMPLETE_TIMEOUT:
++                            cmd_error_name = "CMD_COMPLETE timeout";
++                            break;
++                        case EMMC_BOOT0_CSD_DAT_INHIBIT_TIMEOUT:
++                            cmd_error_name = "DAT_INHIBIT timeout";
++                            break;
++                        }
++                        printf("CMD9 SEND_CSD failed before partition selection: %s (%u), "
++                               "SDHCI INT_STATUS=0x%08x.\n",
++                               cmd_error_name, report.csd_cmd_error,
++                               report.csd_int_status);
++                    }
++                    if (report.csd_int_status & 0x00010000U)
++                        printf("  Command Timeout Error.\n");
++                    if (report.csd_int_status & 0x00020000U)
++                        printf("  Command CRC Error.\n");
++                    if (report.csd_int_status & 0x00040000U)
++                        printf("  Command End Bit Error.\n");
++                    if (report.csd_int_status & 0x00080000U)
++                        printf("  Command Index Error.\n");
++                } else {
++                    if (report.partconf_original <= 0xffU) {
++                        printf("PARTITION_CONFIG original=0x%02x selected=0x%02x; ",
++                               report.partconf_original, report.partconf_selected);
++                        if (report.partconf_restored <= 0xffU)
++                            printf("final observed=0x%02x.\n", report.partconf_restored);
++                        else
++                            printf("final observed=unavailable.\n");
++                    } else {
++                        printf("PARTITION_CONFIG was not read.\n");
++                    }
++                    printf("BOOT_SIZE_MULT=%u; READ_BL_LEN exponent=",
++                           report.boot_size_mult);
++                    if (report.read_bl_len <= 31U)
++                        printf("%u.\n", report.read_bl_len);
++                    else
++                        printf("unavailable.\n");
++                }
 +                goto emmc_exit;
 +            }
 +            uint8_t expected_selected =
@@ -1753,7 +1813,7 @@ index 9e49a2f..4ed8ed9 100644
          if ( emmc_mode == 3 ) { /* EMMC_WRITE */
  
              int in_fd = open( emmc_filename, O_RDONLY );
-@@ -546,7 +1531,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +1591,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -1762,7 +1822,7 @@ index 9e49a2f..4ed8ed9 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +1648,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +1708,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -1778,7 +1838,7 @@ index 9e49a2f..4ed8ed9 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -686,8 +1680,8 @@ exit:
+@@ -686,8 +1740,8 @@ exit:
      if ( dump ) free( dump );
      if ( dump_fd > 0 ) close( dump_fd );
      if ( data ) free( data );
@@ -2005,10 +2065,10 @@ index 0000000..009a96b
 +
 +#endif
 diff --git a/include/emmc_server.h b/include/emmc_server.h
-index 5229e2e..ce4d16c 100644
+index 5229e2e..fa749d8 100644
 --- a/include/emmc_server.h
 +++ b/include/emmc_server.h
-@@ -13,18 +13,113 @@
+@@ -13,18 +13,126 @@
  #define EMMC_CMD_STATUS         0x03
  #define EMMC_CMD_READ_EXT_CSD   0x04  /* Read 512-byte EXT_CSD register for chip health */
  #define EMMC_CMD_ERASE          0x05  /* Erase a range of sectors (forces reallocation) */
@@ -2024,7 +2084,7 @@ index 5229e2e..ce4d16c 100644
 +#define EMMC_BOOT0_BCT_PREFIX_SIZE 16384U
 +#define EMMC_BOOT0_BCT_SECTORS     (EMMC_BOOT0_BCT_PREFIX_SIZE / EMMC_SECTOR_SIZE)
 +#define EMMC_BOOT0_REPORT_MAGIC    "B0RC"
-+#define EMMC_BOOT0_REPORT_VERSION  1U
++#define EMMC_BOOT0_REPORT_VERSION  2U
 +
 +/* Host/payload status record. Every field is a little-endian 32-bit word. */
 +struct emmc_boot0_report_s {
@@ -2037,6 +2097,8 @@ index 5229e2e..ce4d16c 100644
 +    uint32_t partconf_restored;
 +    uint32_t boot_size_mult;
 +    uint32_t read_bl_len;
++    uint32_t csd_cmd_error;
++    uint32_t csd_int_status;
 +};
 +
 +#define EMMC_BOOT0_RESULT_OK             0U
@@ -2050,11 +2112,22 @@ index 5229e2e..ce4d16c 100644
 +#define EMMC_BOOT0_RESULT_RESTORE        8U
 +#define EMMC_BOOT0_RESULT_ARGUMENT       9U
 +
++/* send_cmd() failure codes for the boot0 preflight CMD9 diagnostic. */
++#define EMMC_BOOT0_CSD_CMD_INHIBIT_TIMEOUT  1U
++#define EMMC_BOOT0_CSD_CMD_INT_ERROR        2U
++#define EMMC_BOOT0_CSD_CMD_COMPLETE_TIMEOUT 3U
++#define EMMC_BOOT0_CSD_DAT_INHIBIT_TIMEOUT  4U
++#define EMMC_BOOT0_CSD_CMD_NOT_RUN          5U
++
 +/* SDHCI stores the 136-bit CSD response in reversed 32-bit registers. U-Boot
 + * reconstructs response[1] from RESPONSE+8 << 8, so CSD.READ_BL_LEN in
 + * response[1][19:16] maps to raw SDHCI RESPONSE+8[11:8]. */
 +static inline uint32_t emmc_csd_read_bl_len_from_response_word2(uint32_t response_word2) {
 +    return (response_word2 >> 8) & 0x0fU;
++}
++
++static inline uint32_t emmc_boot0_csd_command_error(int send_cmd_result) {
++    return send_cmd_result < 0 ? (uint32_t)(-send_cmd_result) : 0U;
 +}
 +
 +static inline uint32_t emmc_boot0_selected_partconf(uint32_t original) {
@@ -2963,7 +3036,7 @@ index 0000000..8276ba1
 +    t124_enter_rcm();
 +}
 diff --git a/payloads/emmc_server.c b/payloads/emmc_server.c
-index 41601b7..802c7aa 100644
+index 41601b7..3fe2be0 100644
 --- a/payloads/emmc_server.c
 +++ b/payloads/emmc_server.c
 @@ -163,8 +163,10 @@ static int send_cmd(u32 cmd_val, u32 argument) {
@@ -2977,7 +3050,7 @@ index 41601b7..802c7aa 100644
  #define MMC_CMD12   0x0C1B  /* STOP_TRANSMISSION: R1b, no data, CRC+index check */
  #define MMC_CMD16   0x101A  /* SET_BLOCKLEN: R1, CRC+index check */
  #define MMC_CMD18   0x123A  /* READ_MULTIPLE_BLOCK: R1, data, CRC+index check */
-@@ -174,6 +176,49 @@ static int send_cmd(u32 cmd_val, u32 argument) {
+@@ -174,6 +176,53 @@ static int send_cmd(u32 cmd_val, u32 argument) {
  #define MMC_CMD36   0x243A  /* ERASE_GROUP_END: R1, CRC+index check */
  #define MMC_CMD38   0x263B  /* ERASE: R1b, CRC+index check */
  
@@ -3023,25 +3096,40 @@ index 41601b7..802c7aa 100644
 +
 +static struct emmc_ext_csd_stable_s emmc_8bit_baseline;
 +static u32 boot0_ext_csd_scratch[128];
++static u32 boot0_csd_requested = 0;
++static u32 boot0_csd_read_bl_len = 0xffffffffU;
++static u32 boot0_csd_cmd_error = 0;
++static u32 boot0_csd_int_status = 0;
 +
  static u32 sdmmc4_initialized = 0;
  static u32 init_error = 0;
  
-@@ -663,6 +708,312 @@ static int read_ext_csd(u32 *buffer) {
+@@ -457,6 +506,20 @@ static void init_sdmmc4(void) {
+     cmd_ret = send_cmd(MMC_CMD3, 0x00010000);
+     if (cmd_ret < 0) { init_error = 0xE0000005; diag[33] = (u32)(-cmd_ret); diag[34] = last_cmd_int_status; return; }
+ 
++    /* CMD9 SEND_CSD is valid in Stand-by, before CMD7 selects Transfer state.
++     * Keep it conditional so normal reads retain their existing init path. */
++    if (boot0_csd_requested) {
++        last_cmd_int_status = 0;
++        cmd_ret = send_cmd(MMC_CMD9, 0x00010000);
++        if (cmd_ret < 0) {
++            boot0_csd_cmd_error = emmc_boot0_csd_command_error(cmd_ret);
++            boot0_csd_int_status = last_cmd_int_status;
++        } else {
++            boot0_csd_read_bl_len = emmc_csd_read_bl_len_from_response_word2(
++                read32(SDMMC4_BASE + SDHCI_RESPONSE + 8));
++        }
++    }
++
+     cmd_ret = send_cmd(MMC_CMD7, 0x00010000);
+     if (cmd_ret < 0) { init_error = 0xE0000006; diag[33] = (u32)(-cmd_ret); diag[34] = last_cmd_int_status; return; }
+ 
+@@ -663,6 +726,310 @@ static int read_ext_csd(u32 *buffer) {
      return 0;
  }
  
 +static int wait_card_ready_status(void);
-+
-+/* Return the raw CSD READ_BL_LEN exponent. U-Boot's T124-compatible MMC
-+ * decoder reads the same field from response word 1 bits [19:16]. */
-+static int read_csd_read_bl_len(u32 *read_bl_len) {
-+    if (send_cmd(MMC_CMD9, 0x00010000) < 0)
-+        return -1;
-+    *read_bl_len = emmc_csd_read_bl_len_from_response_word2(
-+        read32(SDMMC4_BASE + SDHCI_RESPONSE + 8));
-+    return 0;
-+}
 +
 +/* PARTITION_ACCESS is the low three bits of EXT_CSD[179]. Preserve the
 + * remaining boot configuration bits on every switch. */
@@ -3070,9 +3158,11 @@ index 41601b7..802c7aa 100644
 +    u8 *ext_csd = (u8 *)boot0_ext_csd_scratch;
 +    u8 original = 0;
 +    u8 selected = 0;
-+    u8 restored = 0xff;
++    u32 restored = 0xffffffffU;
++    u8 observed = 0xff;
 +    u32 read_bl_len = 0xffffffffU;
 +    u32 boot_size_mult = 0;
++    int partconf_known = 0;
 +    int result = EMMC_BOOT0_RESULT_INIT;
 +    int read_result = -1;
 +    int restore_result = -1;
@@ -3085,6 +3175,7 @@ index 41601b7..802c7aa 100644
 +        goto finish;
 +    }
 +    original = ext_csd[MMC_EXT_CSD_PARTITION_CONFIG];
++    partconf_known = 1;
 +    boot_size_mult = ext_csd[MMC_EXT_CSD_BOOT_SIZE_MULT];
 +    selected = (u8)emmc_boot0_selected_partconf(original);
 +
@@ -3094,7 +3185,8 @@ index 41601b7..802c7aa 100644
 +        result = EMMC_BOOT0_RESULT_NO_BOOT0;
 +        goto finish;
 +    }
-+    if (read_csd_read_bl_len(&read_bl_len) < 0) {
++    read_bl_len = boot0_csd_read_bl_len;
++    if (boot0_csd_cmd_error != 0 || read_bl_len > 15U) {
 +        result = EMMC_BOOT0_RESULT_CSD;
 +        goto finish;
 +    }
@@ -3103,7 +3195,7 @@ index 41601b7..802c7aa 100644
 +        result = EMMC_BOOT0_RESULT_SWITCH;
 +        goto restore;
 +    }
-+    if (verify_partition_config(selected, &restored,
++    if (verify_partition_config(selected, &observed,
 +                                boot0_ext_csd_scratch) < 0) {
 +        result = EMMC_BOOT0_RESULT_VERIFY_SELECT;
 +        goto restore;
@@ -3120,9 +3212,11 @@ index 41601b7..802c7aa 100644
 +     * accepted the switch before the host observed a transport failure. */
 +    int switch_back = switch_partition_config(original);
 +    if (switch_back == 0 &&
-+        verify_partition_config(original, &restored,
-+                                boot0_ext_csd_scratch) == 0)
++        verify_partition_config(original, &observed,
++                                boot0_ext_csd_scratch) == 0) {
++        restored = observed;
 +        restore_result = 0;
++    }
 +    if (restore_result < 0)
 +        result = EMMC_BOOT0_RESULT_RESTORE;
 +
@@ -3130,11 +3224,13 @@ index 41601b7..802c7aa 100644
 +    report->version = EMMC_BOOT0_REPORT_VERSION;
 +    report->result = (u32)result;
 +    report->size = EMMC_BOOT0_BCT_PREFIX_SIZE;
-+    report->partconf_original = original;
-+    report->partconf_selected = selected;
++    report->partconf_original = partconf_known ? original : 0xffffffffU;
++    report->partconf_selected = partconf_known ? selected : 0xffffffffU;
 +    report->partconf_restored = restored;
 +    report->boot_size_mult = boot_size_mult;
 +    report->read_bl_len = read_bl_len;
++    report->csd_cmd_error = boot0_csd_cmd_error;
++    report->csd_int_status = boot0_csd_int_status;
 +    if (result != EMMC_BOOT0_RESULT_OK || restore_result < 0 ||
 +        read_result < 0)
 +        report->size = 0;
@@ -3340,7 +3436,7 @@ index 41601b7..802c7aa 100644
  /* Erase a range of sectors - tells eMMC controller data can be discarded/reallocated */
  static int erase_emmc_sectors(u32 start_sector, u32 end_sector) {
      u32 status;
-@@ -719,6 +1070,7 @@ __attribute__((section(".init")))
+@@ -719,6 +1086,7 @@ __attribute__((section(".init")))
  void entry() {
  
      u32 num_xfer;
@@ -3348,7 +3444,7 @@ index 41601b7..802c7aa 100644
      struct emmc_cmd_s cmd;
      u8 *buffer = (u8*)0x40020000;
  
-@@ -732,6 +1084,14 @@ void entry() {
+@@ -732,6 +1100,14 @@ void entry() {
              break;
          }
  
@@ -3363,7 +3459,7 @@ index 41601b7..802c7aa 100644
          if (cmd.op == EMMC_CMD_STATUS) {
              u32 regs[128];
  
-@@ -774,13 +1134,21 @@ void entry() {
+@@ -774,13 +1150,21 @@ void entry() {
              continue;
          }
  
@@ -3387,7 +3483,7 @@ index 41601b7..802c7aa 100644
                  u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int result = read_emmc_sectors(sector, batch, (u32*)buffer);
-@@ -790,11 +1158,20 @@ void entry() {
+@@ -790,11 +1174,20 @@ void entry() {
                      for (u32 j = 1; j < batch * 128; j++) err[j] = 0xDEADDEAD;
                  }
  
@@ -3408,7 +3504,7 @@ index 41601b7..802c7aa 100644
              continue;
          }
  
-@@ -805,7 +1182,7 @@ void entry() {
+@@ -805,7 +1198,7 @@ void entry() {
              u32 write_result = 0;
  
              while (remaining > 0) {
@@ -3417,7 +3513,7 @@ index 41601b7..802c7aa 100644
                  u32 batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  ep1_out_read_imm(buffer, batch_bytes, &num_xfer);
-@@ -844,6 +1221,39 @@ void entry() {
+@@ -844,6 +1237,54 @@ void entry() {
              continue;
          }
  
@@ -3436,9 +3532,24 @@ index 41601b7..802c7aa 100644
 +            report.partconf_restored = 0xffffffffU;
 +            report.boot_size_mult = 0;
 +            report.read_bl_len = 0xffffffffU;
++            report.csd_cmd_error = 0;
++            report.csd_int_status = 0;
 +
 +            if (cmd.start_sector == 0 && cmd.num_sectors == 0) {
++                boot0_csd_read_bl_len = 0xffffffffU;
++                boot0_csd_cmd_error = 0;
++                boot0_csd_int_status = 0;
++                if (sdmmc4_initialized) {
++                    /* CMD9 must run before CMD7; that opportunity has passed. */
++                    boot0_csd_cmd_error = EMMC_BOOT0_CSD_CMD_NOT_RUN;
++                } else {
++                    boot0_csd_requested = 1;
++                }
 +                init_sdmmc4();
++                boot0_csd_requested = 0;
++                if (boot0_csd_read_bl_len > 15U &&
++                    boot0_csd_cmd_error == 0 && sdmmc4_initialized)
++                    boot0_csd_cmd_error = EMMC_BOOT0_CSD_CMD_NOT_RUN;
 +                read_boot0_bct_prefix(&report, (u32 *)buffer);
 +            }
 +
@@ -12741,10 +12852,10 @@ index 0000000..1f35081
 +        sys.exit(1)
 diff --git a/tests/test_emmc_boot0_protocol.c b/tests/test_emmc_boot0_protocol.c
 new file mode 100644
-index 0000000..9b2e25e
+index 0000000..a7fecf3
 --- /dev/null
 +++ b/tests/test_emmc_boot0_protocol.c
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,42 @@
 +#include <stdio.h>
 +
 +#include "emmc_server.h"
@@ -12769,8 +12880,18 @@ index 0000000..9b2e25e
 +    if (EMMC_CMD_READ_BOOT0_BCT != 0x07U ||
 +        EMMC_BOOT0_BCT_PREFIX_SIZE != 16384U ||
 +        EMMC_BOOT0_BCT_SECTORS != 32U ||
-+        sizeof(struct emmc_boot0_report_s) != 36U) {
++        EMMC_BOOT0_REPORT_VERSION != 2U ||
++        sizeof(struct emmc_boot0_report_s) != 44U) {
 +        fprintf(stderr, "boot0 wire-protocol layout changed unexpectedly\n");
++        return 1;
++    }
++
++    if (emmc_boot0_csd_command_error(0) != 0U ||
++        emmc_boot0_csd_command_error(-1) != EMMC_BOOT0_CSD_CMD_INHIBIT_TIMEOUT ||
++        emmc_boot0_csd_command_error(-2) != EMMC_BOOT0_CSD_CMD_INT_ERROR ||
++        emmc_boot0_csd_command_error(-3) != EMMC_BOOT0_CSD_CMD_COMPLETE_TIMEOUT ||
++        emmc_boot0_csd_command_error(-4) != EMMC_BOOT0_CSD_DAT_INHIBIT_TIMEOUT) {
++        fprintf(stderr, "boot0 CMD9 error diagnostic mapping failed\n");
 +        return 1;
 +    }
 +
