@@ -73,12 +73,14 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refr
 | Check partition layout | Reads the 17 KiB read-only GPT marker into memory and checks the Jibo partition sizes. No backup or eMMC write. The check can be repeated in the same DFU session. |
 | Back up var | Reads the 500 MiB `var` partition and saves a SHA-256 manifest. Reuses a verified existing backup for the same DFU device unless refreshed. |
 | Inspect or edit a local var image | Views mode and Wi-Fi presence, or creates an edited copy without changing the robot. |
-| Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; reads current `var`, saves one rollback backup, writes the edit, then reads it back. |
+| Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; saves or reuses one rollback backup, writes the change, then checks the result. |
 | Configure Wi-Fi | Adds a chosen network through the same backup, write, and readback workflow. |
 | Write an edited var image | Writes an offline image after backup and confirmation, then verifies its readback. |
 | Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, saves or reuses one `var` rollback backup, expands package images to their final partition sizes offline, and verifies each write by readback. `rootfsA`, `rootfsB`, `services`, and `skills` are restored from the package if needed; they are not backed up first. |
 
 The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transfer resets the loader's read cursor, so another check or an update can run without restarting DFU.
+
+With the included loader, mode and Wi-Fi changes transfer the 500 MiB `var` image. If a loader exposes the file-level capability, those same menu actions edit the existing `mode.json` or Wi-Fi file directly after saving or reusing the partition backup. Later edits can avoid the full-image transfer. The file-level loader is currently an opt-in source candidate; see [the file-level protocol](firmware/file-level-protocol.md) and [loader build notes](docs/loader-build.md). It has not yet been tested on hardware.
 
 For scripts, the corresponding commands are:
 
