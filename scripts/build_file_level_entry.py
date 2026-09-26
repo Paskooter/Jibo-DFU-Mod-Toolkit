@@ -61,20 +61,24 @@ def main():
         parser.error("candidate loader does not match its file-RPC build manifest")
     if not 0 < size < 4 * 1024 * 1024:
         parser.error("candidate loader size is outside the stage-2 DRAM range")
+    replace_existing = False
     if out.exists():
         manifest_path = out / "candidate-entry-manifest.json"
         try:
             built = json.loads(manifest_path.read_text())
             files = built["files_sha256"]
-            if (built["loader_sha256"] == sha and built["loader_size"] == size and
-                    built["shofel_commit"] == SHOFEL_COMMIT and
-                    all(digest(out / name) == files[name]
-                        for name in ("shofel2_t124", "intermezzo.bin", "dfu_stage2.bin"))):
-                print("Reusing the matching ShofEL entry helper:", out)
-                return
+            generated = (built["shofel_commit"] == SHOFEL_COMMIT and
+                         all(digest(out / name) == files[name]
+                             for name in ("shofel2_t124", "intermezzo.bin",
+                                          "dfu_stage2.bin")))
         except (OSError, KeyError, ValueError, TypeError):
-            pass
-        parser.error("existing ShofEL entry helper does not match this loader: " + str(out))
+            generated = False
+        if not generated:
+            parser.error("existing ShofEL entry helper is not an intact generated build: " + str(out))
+        if built.get("loader_sha256") == sha and built.get("loader_size") == size:
+            print("Reusing the matching ShofEL entry helper:", out)
+            return
+        replace_existing = True
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".shofel-entry-", dir=out.parent) as temp:
@@ -133,7 +137,16 @@ def main():
             json.dumps({"loader_sha256": sha, "loader_size": size,
                         "shofel_commit": SHOFEL_COMMIT, "files_sha256": files},
                        indent=2) + "\n")
-        shutil.move(str(work), str(out))
+        if replace_existing:
+            previous = Path(temp) / "previous-entry"
+            out.rename(previous)
+            try:
+                work.rename(out)
+            except OSError:
+                previous.rename(out)
+                raise
+        else:
+            shutil.move(str(work), str(out))
     print("Candidate entry pair built:", out)
     print("Loader:", loader)
     print("Loader SHA-256:", sha)

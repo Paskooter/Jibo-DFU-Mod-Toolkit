@@ -20,14 +20,16 @@ class CachedPackageTests(unittest.TestCase):
             (self.source / name).write_bytes(("content of " + name).encode())
 
     def create_package(self, capability="1"):
+        loader_hash = bytes.fromhex(check_package.PINNED_LOADER_SHA256)
         with zipfile.ZipFile(self.package, "w") as archive:
             for name in check_package.SOURCES:
                 archive.write(self.source / name, name)
             archive.write(check_package.ROOT / "assets/loader.bin", "loader.bin")
             archive.writestr("tools/shofel2_t124",
-                             "#!/bin/sh\nprintf 'dfu-stage-launch={}\\n'\n".format(capability))
+                             ("#!/bin/sh\nprintf 'dfu-stage-launch={}\\n'\nexit 0\n"
+                              .format(capability).encode() + loader_hash))
             archive.writestr("tools/intermezzo.bin", b"intermezzo")
-            archive.writestr("tools/dfu_stage2.bin", b"stage")
+            archive.writestr("tools/dfu_stage2.bin", b"stage" + loader_hash)
             archive.writestr("tools/dfu-util", b"dfu-util")
 
     def test_valid_package_is_accepted(self):
