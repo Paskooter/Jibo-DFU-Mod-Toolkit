@@ -63,6 +63,14 @@ class UpdatePackage:
         return bool(self.archive_members)
 
 
+@dataclass(frozen=True)
+class CompactImageSet:
+    """Official ext4 prefixes and the package's stock first-boot script."""
+
+    images: Mapping[str, Path]
+    resize_script: bytes
+
+
 def _image_set(directory: Path) -> dict[str, Path] | None:
     if directory.is_symlink() or not directory.is_dir():
         return None
@@ -386,6 +394,19 @@ def _filesystem_geometry(image: Path) -> tuple[int, int]:
     return block_size, block_count
 
 
+def _read_ext4_file(image: Path, internal_path: str, description: str) -> bytes:
+    try:
+        result = subprocess.run(["debugfs", "-R", "cat " + internal_path, str(image)],
+                                capture_output=True, check=False)
+    except OSError as exc:
+        raise UpdateError("Could not read " + description + " from the package image: " + str(exc)) from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise UpdateError("Could not read " + description + " from the package image" +
+                          (": " + detail if detail else "."))
+    return result.stdout
+
+
 def _restore_ext4_write_time(source: Path, output: Path) -> None:
     """Remove resize2fs's wall-clock stamp from classic 1 KiB ext4 images.
 
@@ -678,6 +699,94 @@ def prepare_images(
             if not preserve_var:
                 result["var"] = prepared["var.ext4"]
             return result
+        except BaseException:
+            for output in created:
+                output.unlink(missing_ok=True)
+            raise
+
+
+def prepare_compact_images(
+    package: UpdatePackage | str | os.PathLike[str],
+    preserve_var: bool,
+    capacities: Mapping[str, int],
+    workdir: str | os.PathLike[str],
+) -> CompactImageSet:
+    """Copy the stock ext4 prefixes without expanding them to GPT capacity.
+
+    Raw DFU writes are sector bounded.  The target release's init hook grows
+    these filesystems on first boot; a preserved var needs the package's stock
+    resize script so the caller can safely rearm that hook after the writes.
+    """
+
+    if not isinstance(package, UpdatePackage):
+        package = validate_package(package)
+    targets = _required_capacities(capacities, False)
+    selected_destination = Path(workdir).expanduser()
+    if selected_destination.is_symlink():
+        raise UpdateError("Prepared image work directory cannot be a symbolic link.")
+    destination = selected_destination.resolve()
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination.is_symlink() or not destination.is_dir():
+        raise UpdateError("Prepared image work directory must be a real directory.")
+
+    selected_filenames = ["rootfs.ext4", "services.ext4", "skills.ext4", "var.ext4"]
+    with _package_images(package) as image_paths:
+        missing = [filename for filename in selected_filenames if filename not in image_paths]
+        if missing:
+            raise UpdateError("The package cannot perform a compact first-boot update; missing: " +
+                              ", ".join(missing) + ".")
+        file_targets = {
+            "rootfs.ext4": targets["rootfsA"],
+            "services.ext4": targets["services"],
+            "skills.ext4": targets["skills"],
+            "var.ext4": targets["var"],
+        }
+        prepared: dict[str, Path] = {}
+        created: list[Path] = []
+        try:
+            for filename in selected_filenames:
+                source = Path(image_paths[filename])
+                if source.is_symlink() or not source.is_file():
+                    raise UpdateError("Update image is missing or is a symbolic link: " + filename)
+                source_size = source.stat().st_size
+                capacity = file_targets[filename]
+                if source_size <= 0 or source_size > capacity:
+                    raise UpdateError(filename + " is " + str(source_size) + " bytes; target partition has " +
+                                      str(capacity) + " bytes.")
+                if source_size % 512:
+                    raise UpdateError(filename + " is not aligned to the 512-byte DFU write sector.")
+                _run_checked(["e2fsck", "-f", "-n", str(source)], "Read-only ext4 check for " + filename)
+                _filesystem_geometry(source)
+                output = destination / filename
+                if output.exists() or output.is_symlink():
+                    raise UpdateError("Prepared image already exists; use an empty work directory: " + str(output))
+                created.append(output)
+                shutil.copyfile(source, output)
+                if output.stat().st_size != source_size:
+                    raise UpdateError("Compact image copy has an unexpected size: " + filename)
+                if filename != "var.ext4" or not preserve_var:
+                    prepared[filename] = output
+
+            stock_script = _read_ext4_file(Path(image_paths["var.ext4"]),
+                                           "/etc/first_boot_resize",
+                                           "the stock first-boot resize script")
+            if not stock_script.startswith(b"#!/bin/sh\n"):
+                raise UpdateError("The package var image has no readable /etc/first_boot_resize script.")
+            inittab = _read_ext4_file(Path(image_paths["rootfs.ext4"]), "/etc/inittab",
+                                      "the target rootfs /etc/inittab")
+            if not re.search(rb"(?m)^\s*::sysinit:/var/etc/first_boot_resize\s*$", inittab):
+                raise UpdateError("The target rootfs does not run /var/etc/first_boot_resize during sysinit; "
+                                  "compact filesystems would not be expanded on boot.")
+
+            files = {
+                "rootfsA": prepared["rootfs.ext4"],
+                "rootfsB": prepared["rootfs.ext4"],
+                "services": prepared["services.ext4"],
+                "skills": prepared["skills.ext4"],
+            }
+            if not preserve_var:
+                files["var"] = prepared["var.ext4"]
+            return CompactImageSet(files, stock_script)
         except BaseException:
             for output in created:
                 output.unlink(missing_ok=True)

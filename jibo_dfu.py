@@ -1060,6 +1060,30 @@ def _upload_skills_partition(dfu_util, port, capacity, chunks, destination=None,
         raise
 
 
+def _upload_skills_prefix(dfu_util, port, transfer_size, chunks, workdir=None):
+    """Hash only the written skills prefix through bounded chunk alternatives."""
+    if transfer_size <= 0 or transfer_size % SKILLS_SECTOR_SIZE:
+        raise DfuError("The skills readback prefix is not a positive whole number of sectors.")
+    selected_chunks = []
+    for chunk in chunks:
+        if chunk["offset_bytes"] >= transfer_size:
+            break
+        selected_chunks.append({**chunk, "transfer_bytes": min(
+            chunk["size_bytes"], transfer_size - chunk["offset_bytes"])})
+    if not selected_chunks or sum(item["transfer_bytes"] for item in selected_chunks) != transfer_size:
+        raise DfuError("The bounded skills alternatives do not cover the readback prefix.")
+    workdir = Path(workdir or tempfile.gettempdir())
+    digest = hashlib.sha256()
+    with tempfile.TemporaryDirectory(prefix="skills-prefix-readback-", dir=workdir) as temporary:
+        destination = Path(temporary) / "chunk.img"
+        for chunk in selected_chunks:
+            _upload_partition(dfu_util, port, chunk["name"],
+                              chunk["transfer_bytes"], destination)
+            with destination.open("rb") as stream:
+                _copy_exact(stream, _NullWriter(), chunk["transfer_bytes"], digest)
+    return digest.hexdigest()
+
+
 class _NullWriter:
     def write(self, data):
         return len(data)
@@ -1111,25 +1135,38 @@ def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, 
 
 def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                          operation_directory, record_path, record, write_entry,
-                         verify_readback=True):
+                         verify_readback=True, transfer_size=None):
     candidate = Path(candidate)
-    if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size != capacity:
-        raise DfuError("The prepared skills image does not match the GPT partition size.")
+    if transfer_size is None:
+        transfer_size = capacity
+    if candidate.is_symlink() or not candidate.is_file() or \
+            candidate.stat().st_size != transfer_size or transfer_size <= 0 or \
+            transfer_size > capacity or transfer_size % SKILLS_SECTOR_SIZE:
+        raise DfuError("The prepared skills prefix does not match its 512-byte-aligned transfer size.")
     candidate_hash = _sha256_file(candidate)
     readback_hash = hashlib.sha256()
+    selected_chunks = []
+    for chunk in chunks:
+        if chunk["offset_bytes"] >= transfer_size:
+            break
+        selected_chunks.append({**chunk, "transfer_bytes": min(
+            chunk["size_bytes"], transfer_size - chunk["offset_bytes"])})
+    if not selected_chunks or sum(item["transfer_bytes"] for item in selected_chunks) != transfer_size:
+        raise DfuError("The bounded skills alternatives do not cover the compact source prefix.")
     write_entry["chunks"] = []
+    write_entry["transfer_bytes"] = transfer_size
     write_entry["status"] = "writing bounded skills chunks"
     _private_write(record_path, record)
     try:
         with tempfile.TemporaryDirectory(prefix="skills-write-", dir=operation_directory) as temporary:
             temporary = Path(temporary)
-            for index, chunk in enumerate(chunks, 1):
+            for index, chunk in enumerate(selected_chunks, 1):
                 candidate_piece = temporary / "candidate.img"
                 expected_hash = _copy_file_slice(candidate, chunk["offset_bytes"],
-                                                 chunk["size_bytes"], candidate_piece)
+                                                 chunk["transfer_bytes"], candidate_piece)
                 chunk_record = {"alternative": chunk["name"],
                                 "offset_bytes": chunk["offset_bytes"],
-                                "size_bytes": chunk["size_bytes"],
+                                "size_bytes": chunk["transfer_bytes"],
                                 "candidate_sha256": expected_hash,
                                 "status": "write started"}
                 write_entry["chunks"].append(chunk_record)
@@ -1138,14 +1175,14 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                     [dfu_util, "-d", "0955:701a", "--path", port,
                      "-a", chunk["name"], "-D", str(candidate_piece)],
                     timeout=14400,
-                    download_size=chunk["size_bytes"],
+                    download_size=chunk["transfer_bytes"],
                     allow_progress_completion=True,
                     label="Writing skills chunk {}/{} ({})".format(
-                        index, len(chunks), chunk["name"]))
+                        index, len(selected_chunks), chunk["name"]))
                 if verify_readback:
                     readback = temporary / "readback.img"
                     actual_hash = _upload_partition(dfu_util, port, chunk["name"],
-                                                    chunk["size_bytes"], readback)
+                                                    chunk["transfer_bytes"], readback)
                     chunk_record["readback_sha256"] = actual_hash
                     if actual_hash != expected_hash:
                         chunk_record["status"] = "readback mismatch"
@@ -1153,7 +1190,7 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                         raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(
                             chunk["name"]))
                     with readback.open("rb") as stream:
-                        _copy_exact(stream, _NullWriter(), chunk["size_bytes"], readback_hash)
+                        _copy_exact(stream, _NullWriter(), chunk["transfer_bytes"], readback_hash)
                 chunk_record["status"] = "verified" if verify_readback else "transfer complete"
                 _private_write(record_path, record)
         if verify_readback and readback_hash.hexdigest() != candidate_hash:
@@ -1250,6 +1287,12 @@ def _validate_resume_manifest(manifest_path, package, preserve_var,
             raise DfuError("The failed update record has invalid size or status for " + name + ".")
         clean = {"partition": name, "candidate_sha256": candidate_hash,
                  "size_bytes": capacities[name], "status": entry["status"]}
+        if old.get("image_strategy") == "compact-prefix-v1":
+            transfer_bytes = entry.get("transfer_bytes")
+            if not isinstance(transfer_bytes, int) or transfer_bytes <= 0 or \
+                    transfer_bytes > capacities[name] or transfer_bytes % SKILLS_SECTOR_SIZE:
+                raise DfuError("The failed compact update record has an invalid transfer size for " + name + ".")
+            clean["transfer_bytes"] = transfer_bytes
         readback_hash = entry.get("readback_sha256")
         if readback_hash is not None:
             if not isinstance(readback_hash, str) or not _SHA256_RE.fullmatch(readback_hash):
@@ -1296,7 +1339,96 @@ def _validate_resume_manifest(manifest_path, package, preserve_var,
                                   "manifest": str(backup_manifest.resolve()),
                                   "sha256": backup_hash}}
     result["_manifest_path"] = str(supplied.resolve())
+    result["_legacy_full_image_resume"] = old.get("image_strategy") != "compact-prefix-v1"
     return result
+
+
+_STOCK_13_RESIZE_COMMANDS = [
+    '#!/bin/sh',
+    'if [ -f /var/etc/first_boot_resize.done ]',
+    'then',
+    'echo "First boot filesystem configuration already complete"',
+    'else',
+    'echo "First boot filesystem configuration"',
+    '/usr/sbin/resize2fs /dev/mmcblk0p1',
+    '/bin/sync',
+    '/usr/sbin/resize2fs /dev/mmcblk0p2',
+    '/bin/umount /var',
+    '/usr/sbin/e2fsck -f /dev/mmcblk0p5',
+    '/usr/sbin/resize2fs /dev/mmcblk0p5',
+    '/bin/umount /usr/local',
+    '/usr/sbin/e2fsck -f /dev/mmcblk0p4',
+    '/usr/sbin/resize2fs /dev/mmcblk0p4',
+    '/bin/umount /opt',
+    '/usr/sbin/e2fsck -f /dev/mmcblk0p6',
+    '/usr/sbin/resize2fs /dev/mmcblk0p6',
+    '/bin/mount -a',
+    'touch /var/etc/first_boot_resize.done',
+    'fi',
+]
+
+
+def _rearm_preserved_var_resize_script(stock_script, resize_tag):
+    """Tag the stock 13 resize body while leaving preserved var data intact."""
+    if not isinstance(resize_tag, str) or not re.fullmatch(r"[0-9a-f]{32}", resize_tag):
+        raise DfuError("The first-boot resize tag is invalid.")
+    try:
+        source = stock_script.decode("ascii")
+    except (AttributeError, UnicodeDecodeError) as exc:
+        raise DfuError("The package first-boot resize script is not plain ASCII.") from exc
+    commands = [line.strip() for line in source.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    if not source.startswith("#!/bin/sh\n") or commands != _STOCK_13_RESIZE_COMMANDS[1:]:
+        raise DfuError("Compact preserve-var mode supports only the known safe 13.0 stock resize script; "
+                       "this package's script differs or may format a partition.")
+
+    # The robot's var partition is preserved, so do not unmount or fsck it.
+    # The target release stock body is retained for the four filesystems this
+    # update writes: active/inactive rootfs, services, and skills.
+    body = [line for line in commands[5:-2]
+            if line not in ("/bin/umount /var",
+                            "/usr/sbin/e2fsck -f /dev/mmcblk0p5",
+                            "/usr/sbin/resize2fs /dev/mmcblk0p5")]
+    body = [line.replace("e2fsck -f ", "e2fsck -f -p ") + ' || [ "$?" -eq 1 ]'
+            if line in ("/usr/sbin/e2fsck -f /dev/mmcblk0p4",
+                        "/usr/sbin/e2fsck -f /dev/mmcblk0p6") else line
+            for line in body]
+    lines = [
+        "#!/bin/sh",
+        "tag=" + resize_tag,
+        "marker=/var/etc/first_boot_resize.done",
+        'if [ "$(cat "$marker" 2>/dev/null)" = "$tag" ]',
+        "then",
+        '    echo "First boot filesystem configuration already complete"',
+        "    exit 0",
+        "fi",
+        "set -e",
+        *body,
+        'printf \'%s\\n\' "$tag" > "$marker"',
+        "",
+    ]
+    replacement = ("\n".join(lines)).encode("ascii")
+    if len(replacement) > FILE_LEVEL_MAX_BYTES:
+        raise DfuError("The rearmed first-boot resize script exceeds the file mailbox limit.")
+    return replacement
+
+
+def _preflight_resize_script_write(dfu_util, port, replacement, workdir):
+    """Confirm the file loader and current var script can accept this replacement."""
+    _file_loader_context(port, dfu_util, ("var",), True)
+    metadata = _stat_partition_file_rpc(dfu_util, port, "var", "/etc/first_boot_resize",
+                                        workdir, quiet=True)
+    current = _read_partition_file_rpc(dfu_util, port, "var", "/etc/first_boot_resize",
+                                       workdir, quiet=True)
+    if len(current) != metadata["size_bytes"]:
+        raise DfuError("The current first-boot resize script changed during preflight.")
+    if not current.startswith(b"#!/bin/sh\n") or b"/var/etc/first_boot_resize.done" not in current or \
+            b"resize2fs" not in current:
+        raise DfuError("The preserved var /etc/first_boot_resize file is not a recognized shell resize script.")
+    if len(replacement) > metadata["allocated_bytes"]:
+        raise DfuError("The rearmed first-boot resize script needs {} bytes but the preserved file has only {} "
+                       "bytes allocated.".format(len(replacement), metadata["allocated_bytes"]))
+    return metadata
 
 
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
@@ -1620,7 +1752,7 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, resume_from=None,
                  verify_readback=False):
-    """Install an official full-flash package using named DFU alternatives."""
+    """Install compact official ext4 prefixes and resize them on first boot."""
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
@@ -1643,34 +1775,42 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         capacities["skills"], names, alt_output)
     resume_record = None
     resume_path = None
+    legacy_resume = False
     if resume_from is not None:
         if not preserve_var:
             raise DfuError("Resume currently requires --preserve-var.")
         resume_path = Path(resume_from).expanduser().resolve()
         resume_record = _validate_resume_manifest(
             resume_from, package, preserve_var, capacities, partitions)
+        legacy_resume = resume_record.get("_legacy_full_image_resume", False)
     plan = {"package": str(package.source), "version": package.version,
             "usb_port": port, "var_policy": "preserve current configuration" if preserve_var else
             "replace with package var image (fresh setup and lost local settings)",
+            "image_strategy": "compact-prefix-v1",
+            "filesystem_resize": ("Transfer compact stock image prefixes; first boot expands rootfs, services, and skills while var data is preserved." if preserve_var else
+                                   "Transfer compact stock image prefixes; target init expands the filesystems at first boot."),
             "rollback_backup": "var only; other partitions are restored from the package",
             "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
-            "skills_transfer": ("{} GPT-bounded DFU chunks".format(len(skills_chunks))
-                                if skills_chunks else "single named DFU alternative"),
-            "readback_policy": "full partition readback" if verify_readback else "DFU transfer completion",
+            "skills_transfer": ("compact official image prefix through bounded DFU writes"
+                                if skills_chunks else "compact official image prefix through its named DFU alternative"),
+            "readback_policy": "source image prefix readback" if verify_readback else "DFU transfer completion",
             "status": "plan only" if dry_run else "awaiting confirmation"}
     if resume_record is not None:
         plan["resume_from"] = str(resume_path)
         plan["previously_attempted_partitions"] = [entry["partition"]
                                                     for entry in resume_record["writes"]]
-        plan["resume_check"] = "check prior partition writes; skip only on candidate hash match"
+        plan["resume_check"] = ("reflash compact prefixes from the beginning; prior full-partition hashes are not comparable"
+                                 if legacy_resume else
+                                 "check prior compact prefixes; skip only on candidate hash match")
     if dry_run:
         return plan
     print("\nOfficial full-flash update plan:")
     print(json.dumps(plan, indent=2))
-    print("This writes the listed partitions, then requests a reset.")
+    print("This writes compact stock image prefixes; first boot expands the flashed filesystems, then the robot resets.")
     if verify_readback:
-        print("Each partition will be read back in full and compared with the prepared image.")
-    print("A preserved var keeps its current mode, identity, network settings, and first-boot resize marker.")
+        print("Each written source prefix will be read back and compared with the package image.")
+    if preserve_var:
+        print("Var data stays in place; first boot expands rootfs, services, and skills.")
     if resume_record is None:
         print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
     else:
@@ -1688,6 +1828,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     record_path = directory / "update-manifest.json"
     record = {"schema": 1, "kind": "jibo-full-flash-update", "created_utc": _utc_now(),
               **plan, "status": "preparing", "backups": {}, "writes": []}
+    if preserve_var:
+        record["resize_tag"] = ((resume_record.get("resize_tag") if resume_record and not legacy_resume else None)
+                                or secrets.token_hex(16))
     try:
         record["package_sha256"] = _package_content_sha256(package)
         if resume_record is not None:
@@ -1697,7 +1840,11 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 raise DfuError("The selected package content does not match the failed update record.")
             record["resumed_from"] = str(resume_path)
             record["backups"] = resume_record["backups"]
-            record["writes"] = resume_record["writes"]
+            if legacy_resume:
+                record["legacy_full_image_attempts"] = resume_record["writes"]
+                record["legacy_resume_reflashed_compact"] = True
+            else:
+                record["writes"] = resume_record["writes"]
             record["resume_started_utc"] = _utc_now()
     except (DfuError, OSError) as exc:
         try:
@@ -1708,19 +1855,37 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     _private_write(record_path, record)
     try:
         with tempfile.TemporaryDirectory(prefix="prepared-", dir=directory) as prepared_dir:
-            prepared = _call_with_progress(
-                lambda: updates.prepare_images(package, preserve_var, capacities, prepared_dir),
-                "Preparing partition images on this computer")
-            if resume_record is not None:
-                missing_candidates = [name for name in partitions if name not in prepared]
-                if missing_candidates:
-                    raise DfuError("The update package did not prepare: " + ", ".join(missing_candidates))
-                for name in partitions:
-                    candidate_path = Path(prepared[name])
-                    if candidate_path.is_symlink() or not candidate_path.is_file() or \
-                            candidate_path.stat().st_size != capacities[name]:
-                        raise DfuError("Prepared {} image does not match the live GPT size.".format(name))
+            compact_images = _call_with_progress(
+                lambda: updates.prepare_compact_images(package, preserve_var, capacities, prepared_dir),
+                "Preparing compact partition images on this computer")
+            prepared = compact_images.images
+            missing_candidates = [name for name in partitions if name not in prepared]
+            if missing_candidates:
+                raise DfuError("The update package did not prepare: " + ", ".join(missing_candidates))
+            transfer_sizes = {}
+            for name in partitions:
+                candidate_path = Path(prepared[name])
+                if candidate_path.is_symlink() or not candidate_path.is_file():
+                    raise DfuError("Prepared {} image is missing or is a symbolic link.".format(name))
+                transfer_size = candidate_path.stat().st_size
+                if transfer_size <= 0 or transfer_size > capacities[name] or \
+                        transfer_size % SKILLS_SECTOR_SIZE:
+                    raise DfuError("Prepared {} prefix does not fit the GPT partition or 512-byte DFU sectors."
+                                   .format(name))
+                transfer_sizes[name] = transfer_size
             candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
+            resize_script = None
+            if preserve_var:
+                resize_script = _rearm_preserved_var_resize_script(
+                    compact_images.resize_script, record["resize_tag"])
+                preflight_dir = Path(directory) / "resize-preflight"
+                preflight_dir.mkdir(mode=0o700)
+                try:
+                    record["resize_script_preflight"] = _preflight_resize_script_write(
+                        dfu_util, port, resize_script, preflight_dir)
+                finally:
+                    shutil.rmtree(preflight_dir, ignore_errors=True)
+                _private_write(record_path, record)
             if resume_record is not None:
                 backup = record["backups"]["var"]
                 record["status"] = "checking saved var"
@@ -1743,19 +1908,21 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 if name == "skills" and skills_chunks:
                     actual = _write_skills_chunks(
                         dfu_util, port, candidate, capacities[name], skills_chunks,
-                        directory, record_path, record, entry, verify_readback)
+                        directory, record_path, record, entry, verify_readback,
+                        transfer_size=transfer_sizes[name])
                 else:
                     run_with_progress(
                         [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
                          "-D", str(candidate)], timeout=14400,
-                        download_size=capacities[name],
+                        download_size=transfer_sizes[name],
                         allow_progress_completion=True,
-                        label="Writing {} ({} bytes)".format(name, capacities[name]))
+                        label="Writing {} prefix ({} bytes)".format(name, transfer_sizes[name]))
                     actual = None
                     if verify_readback:
                         with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
                             readback = Path(readback_dir) / "partition.img"
-                            actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
+                            actual = _upload_partition(dfu_util, port, name,
+                                                       transfer_sizes[name], readback)
                 if verify_readback:
                     entry["readback_sha256"] = actual
                     if actual != digest:
@@ -1772,32 +1939,26 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 if index < previous_count:
                     entry = record["writes"][index]
                     if entry["status"] in ("verified", "transfer complete") and \
-                            entry["candidate_sha256"] == digest:
+                            entry["candidate_sha256"] == digest and \
+                            entry.get("transfer_bytes") == transfer_sizes[name]:
                         entry["resumed_without_write"] = True
                         _private_write(record_path, record)
                         continue
                     record["status"] = "checking previous write"
                     _private_write(record_path, record)
-                    timestamp_equivalent = False
                     if name == "skills" and skills_chunks:
-                        actual = _upload_skills_partition(
-                            dfu_util, port, capacities[name], skills_chunks,
-                            destination=None, workdir=directory)["sha256"]
+                        actual = _upload_skills_prefix(
+                            dfu_util, port, transfer_sizes[name], skills_chunks,
+                            workdir=directory)
                     else:
                         with tempfile.TemporaryDirectory(prefix="resume-readback-", dir=directory) as readback_dir:
                             readback = Path(readback_dir) / "partition.img"
                             actual = _upload_partition(
-                                dfu_util, port, name, capacities[name], readback)
-                            if actual == entry["candidate_sha256"] and actual != digest:
-                                timestamp_equivalent = updates.equivalent_except_ext4_write_time(
-                                    candidate, readback)
+                                dfu_util, port, name, transfer_sizes[name], readback)
                     entry["resume_readback_sha256"] = actual
-                    if actual == digest or timestamp_equivalent:
-                        if timestamp_equivalent:
-                            entry["prepared_sha256"] = digest
-                            entry["equivalence"] = "ext4 write timestamp only"
-                        else:
-                            entry["candidate_sha256"] = digest
+                    if actual == digest:
+                        entry["candidate_sha256"] = digest
+                        entry["transfer_bytes"] = transfer_sizes[name]
                         entry["readback_sha256"] = actual
                         entry["status"] = "verified"
                         entry["resumed_without_write"] = True
@@ -1805,14 +1966,33 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         continue
                     entry["previous_candidate_sha256"] = entry["candidate_sha256"]
                     entry["candidate_sha256"] = digest
+                    entry["transfer_bytes"] = transfer_sizes[name]
                     entry["status"] = "write started"
                     _private_write(record_path, record)
                     write_and_verify(name, candidate, digest, entry)
                 else:
                     entry = {"partition": name, "candidate_sha256": digest,
-                             "size_bytes": capacities[name], "status": "write started"}
+                             "size_bytes": capacities[name],
+                             "transfer_bytes": transfer_sizes[name],
+                             "status": "write started"}
                     record["writes"].append(entry)
                     write_and_verify(name, candidate, digest, entry)
+            if preserve_var:
+                file_transaction = write_partition_file_live(
+                    "var", "/etc/first_boot_resize", resize_script,
+                    description="rearm first-boot filesystem resize", port=port,
+                    dfu_util=dfu_util,
+                    out=Path(directory) / "resize-file-transaction",
+                    confirmation=True, guided=True)
+                if file_transaction.get("status") not in ("verified", "already current"):
+                    raise DfuError("The first-boot resize script was not safely armed; the robot remains in DFU and was not reset.")
+                record["first_boot_resize_rearm"] = {
+                    "status": file_transaction["status"],
+                    "tag": record["resize_tag"],
+                    "file_transaction": file_transaction.get("operation_directory"),
+                    "preserved_var_data": True,
+                }
+                _private_write(record_path, record)
         record["status"] = "verified; reset pending" if verify_readback else "transferred; reset pending"
         _private_write(record_path, record)
         try:
@@ -1835,8 +2015,8 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
 
 def verify_update_write(manifest, partition, port=None, dfu_util=None):
     """Read back one direct DFU update target and compare it with its record."""
-    if partition not in ("rootfsA", "rootfsB", "services", "var"):
-        raise DfuError("Readback comparison supports rootfsA, rootfsB, services, and var.")
+    if partition not in ("rootfsA", "rootfsB", "services", "skills", "var"):
+        raise DfuError("Readback comparison supports rootfsA, rootfsB, services, skills, and var.")
     manifest = Path(manifest).expanduser()
     if manifest.is_symlink() or not manifest.is_file():
         raise DfuError("Update record is missing or is a symbolic link: " + str(manifest))
@@ -1851,23 +2031,32 @@ def verify_update_write(manifest, partition, port=None, dfu_util=None):
     if len(entries) != 1:
         raise DfuError("The update record does not contain exactly one write for " + partition + ".")
     expected_hash = entries[0].get("candidate_sha256")
-    expected_size = entries[0].get("size_bytes")
+    expected_capacity = entries[0].get("size_bytes")
+    transfer_size = entries[0].get("transfer_bytes", expected_capacity)
     if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or \
-            not isinstance(expected_size, int) or expected_size <= 0:
+            not isinstance(expected_capacity, int) or expected_capacity <= 0 or \
+            not isinstance(transfer_size, int) or transfer_size <= 0 or \
+            transfer_size > expected_capacity or transfer_size % SKILLS_SECTOR_SIZE:
         raise DfuError("The update record has an invalid size or hash for " + partition + ".")
 
     dfu_util = dfu_util or tool("dfu-util")
-    port, names, _ = _dfu_context(port, dfu_util)
+    port, names, device_tag, alt_output = _dfu_context(port, dfu_util, include_output=True)
     if partition not in names:
-        raise DfuError("The DFU loader does not expose " + partition + ".")
+        if partition != "skills" or not any(name.startswith("skills-") for name in names):
+            raise DfuError("The DFU loader does not expose " + partition + ".")
     capacities = _read_gpt_capacities(dfu_util, port, names)
-    if capacities.get(partition) != expected_size:
+    if capacities.get(partition) != expected_capacity:
         raise DfuError("The live " + partition + " size does not match the saved update record.")
-    with tempfile.TemporaryDirectory(prefix="jibo-verify-update-") as temporary:
-        actual_hash = _upload_partition(dfu_util, port, partition, expected_size,
-                                        Path(temporary) / "readback.img")
+    if partition == "skills" and "skills" not in names:
+        chunks = _validate_skills_chunk_alternatives(expected_capacity, names, alt_output)
+        actual_hash = _upload_skills_prefix(dfu_util, port, transfer_size, chunks)
+    else:
+        with tempfile.TemporaryDirectory(prefix="jibo-verify-update-") as temporary:
+            actual_hash = _upload_partition(dfu_util, port, partition, transfer_size,
+                                            Path(temporary) / "readback.img")
     return {"status": "match" if actual_hash == expected_hash else "mismatch",
-            "partition": partition, "size_bytes": expected_size,
+            "partition": partition, "size_bytes": transfer_size,
+            "partition_capacity_bytes": expected_capacity,
             "expected_sha256": expected_hash, "readback_sha256": actual_hash,
             "temporary_readback_removed": True}
 
@@ -2610,11 +2799,12 @@ def main(argv=None):
     flash.add_argument("--resume-from", type=Path,
                        help="Resume an incomplete preserve-var update from its update-manifest.json")
     flash.add_argument("--verify-readback", action="store_true",
-                       help="Read back every written partition in full and compare it with the package image")
+                       help="Read back each transferred package-image prefix and compare its SHA-256")
     verify = sub.add_parser("verify-update-write",
                             help="Read back one update partition and compare it with a saved operation record")
     verify.add_argument("manifest", type=Path, help="Saved update-manifest.json from a flash attempt")
-    verify.add_argument("--partition", required=True, choices=("rootfsA", "rootfsB", "services", "var"))
+    verify.add_argument("--partition", required=True,
+                        choices=("rootfsA", "rootfsB", "services", "skills", "var"))
     _add_device_arguments(verify)
     _add_dfu_argument(verify)
     args = parser.parse_args(argv)

@@ -14,6 +14,41 @@ from unittest.mock import patch
 
 import jibo_updates as updates
 import jibo_dfu as toolkit
+REAL_RESIZE_PREFLIGHT = toolkit._preflight_resize_script_write
+
+
+STOCK_13_RESIZE_SCRIPT = b'''#!/bin/sh
+
+if [ -f /var/etc/first_boot_resize.done ]
+then
+    echo "First boot filesystem configuration already complete"
+else
+    echo "First boot filesystem configuration"
+    # On-line resize the initial rootfs first
+    /usr/sbin/resize2fs /dev/mmcblk0p1
+    /bin/sync
+    # Resize the secondary rootfs
+    /usr/sbin/resize2fs /dev/mmcblk0p2
+    # Resize the file systems the first time
+    /bin/umount /var
+    /usr/sbin/e2fsck -f /dev/mmcblk0p5
+    /usr/sbin/resize2fs /dev/mmcblk0p5
+    /bin/umount /usr/local
+    /usr/sbin/e2fsck -f /dev/mmcblk0p4
+    /usr/sbin/resize2fs /dev/mmcblk0p4
+    /bin/umount /opt
+    /usr/sbin/e2fsck -f /dev/mmcblk0p6
+    /usr/sbin/resize2fs /dev/mmcblk0p6
+
+    # Remount everything once we're done.
+    /bin/mount -a
+    touch /var/etc/first_boot_resize.done
+fi
+'''
+
+
+def compact_set(images):
+    return updates.CompactImageSet(images, STOCK_13_RESIZE_SCRIPT)
 
 
 def make_gpt_prefix(skills_size=10_991_139_328):
@@ -64,12 +99,23 @@ def add_image_files(archive, prefix="release/flash_jibo/output/images", skip=())
 
 
 class UpdatePackageTests(unittest.TestCase):
+    def setUp(self):
+        self._resize_preflight = patch.object(
+            toolkit, "_preflight_resize_script_write", return_value={"allocated_bytes": 1024})
+        self._resize_write = patch.object(
+            toolkit, "write_partition_file_live",
+            return_value={"status": "verified", "operation_directory": "/tmp/file-transaction"})
+        self._resize_preflight.start()
+        self._resize_write.start()
+        self.addCleanup(self._resize_write.stop)
+        self.addCleanup(self._resize_preflight.stop)
+
     def _resume_fixture(self, root, first_candidate_hash=None):
         package_path = root / "jibo-13.0.0-update.tar.bz2"
         with tarfile.open(package_path, "w:bz2") as archive:
             add_image_files(archive)
-        contents = {"rootfsA": b"A001", "rootfsB": b"B001",
-                    "services": b"S001", "skills": b"K001"}
+        contents = {"rootfsA": b"A" * 512, "rootfsB": b"B" * 512,
+                    "services": b"S" * 512, "skills": b"K" * 512}
         candidates = {}
         hashes = {}
         for name, payload in contents.items():
@@ -85,8 +131,8 @@ class UpdatePackageTests(unittest.TestCase):
             "size_bytes": 8, "sha256": var_hash, "image": var_image.name,
             "device_tag": "usb-identity-unavailable",
         }))
-        capacities = {"rootfsA": 4, "rootfsB": 4, "services": 4,
-                      "skills": 4, "var": 8}
+        capacities = {"rootfsA": 1024, "rootfsB": 1024, "services": 1024,
+                      "skills": 1024, "var": 8}
         partitions = [
             {"name": name, "bytes": capacities[name]}
             for name in ("rootfsA", "rootfsB", "services", "skills")
@@ -97,13 +143,15 @@ class UpdatePackageTests(unittest.TestCase):
             "schema": 1, "kind": "jibo-full-flash-update",
             "created_utc": "2026-09-25T00:00:00Z", "status": "failed",
             "package": str(package_path.resolve()), "version": package_path.name,
+            "image_strategy": "compact-prefix-v1", "resize_tag": "a" * 32,
             "usb_port": "1-1", "var_policy": "preserve current configuration",
             "partitions": partitions,
             "backups": {"var": {"status": "backup complete",
                                   "image": str(var_image), "manifest": str(backup_manifest),
                                   "size_bytes": 8, "sha256": var_hash}},
             "writes": [{"partition": "rootfsA", "candidate_sha256": first_hash,
-                        "size_bytes": 4, "status": "write started"}],
+                        "size_bytes": 1024, "transfer_bytes": 512,
+                        "status": "write started"}],
         }))
         package = updates.validate_package(package_path)
         names = ["rootfsA", "rootfsB", "services", "skills", "var", toolkit.MARKER]
@@ -123,7 +171,8 @@ class UpdatePackageTests(unittest.TestCase):
                          return_value=("1-1", names, "usb-identity-unavailable", alt_output)),
             patch.object(toolkit, "_read_gpt_capacities", return_value=capacities),
             patch.object(toolkit, "_new_operation_dir", return_value=operation),
-            patch.object(toolkit.updates, "prepare_images", return_value=candidates),
+            patch.object(toolkit.updates, "prepare_compact_images",
+                         return_value=compact_set(candidates)),
             patch.object(toolkit, "_upload_var", return_value=var_hash),
             patch.object(toolkit, "_upload_partition", side_effect=upload_side_effect),
             patch.object(toolkit, "run_with_progress"),
@@ -265,14 +314,12 @@ class UpdatePackageTests(unittest.TestCase):
             with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
                 with patches[0], patches[1], patches[2], patches[3], patches[4], \
                         patches[5], patches[6] as live_var, patches[7] as readback, \
-                        patches[8] as transfer, patches[9] as reset, \
-                        patch.object(updates, "equivalent_except_ext4_write_time", return_value=False) as equivalent:
+                        patches[8] as transfer, patches[9] as reset:
                     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                         result = toolkit.flash_update(
                             package_path, True, "1-1", "dfu-util", None,
                             "FLASH UPDATE", False, manifest)
             live_var.assert_not_called()
-            equivalent.assert_called_once()
             self.assertEqual(calls["rootfsA"], 1)
             self.assertEqual([args[0][args[0].index("-a") + 1]
                               for args, _kwargs in transfer.call_args_list if "-D" in args[0]],
@@ -281,13 +328,17 @@ class UpdatePackageTests(unittest.TestCase):
             saved = json.loads(Path(result["manifest"]).read_text())
             self.assertEqual(saved["writes"][0]["candidate_sha256"], hashes["rootfsA"])
 
-    def test_resume_skips_legacy_write_when_only_ext4_timestamp_differs(self):
+    def test_legacy_full_image_resume_reflashes_compact_prefixes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             old_hash = hashlib.sha256(b"older timestamped candidate").hexdigest()
             (package_path, package, candidates, hashes, var_hash, capacities,
              manifest, names, alt_output, operation) = self._resume_fixture(
                  root, first_candidate_hash=old_hash)
+            legacy = json.loads(manifest.read_text())
+            legacy.pop("image_strategy")
+            legacy.pop("resize_tag")
+            manifest.write_text(json.dumps(legacy))
 
             def upload(_tool, _port, name, _size, _destination):
                 return old_hash if name == "rootfsA" else hashes[name]
@@ -297,19 +348,17 @@ class UpdatePackageTests(unittest.TestCase):
                 var_hash, upload)
             with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
                 with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                        patches[5], patches[6], patches[7], patches[8] as transfer, patches[9], \
-                        patch.object(updates, "equivalent_except_ext4_write_time", return_value=True) as equivalent:
+                        patches[5], patches[6], patches[7], patches[8] as transfer, patches[9]:
                     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                         result = toolkit.flash_update(
                             package_path, True, "1-1", "dfu-util", None,
                             "FLASH UPDATE", False, manifest)
-            equivalent.assert_called_once()
             self.assertEqual([args[0][args[0].index("-a") + 1]
                               for args, _kwargs in transfer.call_args_list if "-D" in args[0]],
-                             ["rootfsB", "services", "skills"])
+                             ["rootfsA", "rootfsB", "services", "skills"])
             saved = json.loads(Path(result["manifest"]).read_text())
-            self.assertTrue(saved["writes"][0]["resumed_without_write"])
-            self.assertEqual(saved["writes"][0]["equivalence"], "ext4 write timestamp only")
+            self.assertTrue(saved["legacy_resume_reflashed_compact"])
+            self.assertEqual(len(saved["legacy_full_image_attempts"]), 1)
 
     def test_resume_rejects_noncontiguous_or_malformed_prior_write_records(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -327,12 +376,13 @@ class UpdatePackageTests(unittest.TestCase):
     def test_verify_update_write_reads_only_and_removes_temporary_image(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            payload = b"services readback"
+            payload = b"S" * 512
             expected_hash = hashlib.sha256(payload).hexdigest()
             manifest = root / "update-manifest.json"
             manifest.write_text(json.dumps({
                 "kind": "jibo-full-flash-update", "writes": [{
-                    "partition": "services", "size_bytes": len(payload),
+                    "partition": "services", "size_bytes": 1024,
+                    "transfer_bytes": len(payload),
                     "candidate_sha256": expected_hash, "status": "write started"}]}))
             readback_paths = []
 
@@ -342,9 +392,9 @@ class UpdatePackageTests(unittest.TestCase):
                 return hashlib.sha256(payload).hexdigest()
 
             with patch.object(toolkit, "_dfu_context",
-                              return_value=("1-1", ["var", "services"], "device")), \
+                              return_value=("1-1", ["var", "services"], "device", "listing")), \
                     patch.object(toolkit, "_read_gpt_capacities",
-                                 return_value={"services": len(payload)}), \
+                                 return_value={"services": 1024}), \
                     patch.object(toolkit, "_upload_partition", side_effect=upload) as read:
                 result = toolkit.verify_update_write(manifest, "services", "1-1", "dfu-util")
             self.assertEqual(result["status"], "match")
@@ -356,15 +406,50 @@ class UpdatePackageTests(unittest.TestCase):
             manifest = Path(temp) / "update-manifest.json"
             manifest.write_text(json.dumps({
                 "kind": "jibo-full-flash-update", "writes": [{
-                    "partition": "services", "size_bytes": 16,
+                    "partition": "services", "size_bytes": 512,
                     "candidate_sha256": "a" * 64}]}))
             with patch.object(toolkit, "_dfu_context",
-                              return_value=("1-1", ["var", "services"], "device")), \
-                    patch.object(toolkit, "_read_gpt_capacities", return_value={"services": 32}), \
+                              return_value=("1-1", ["var", "services"], "device", "listing")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value={"services": 1024}), \
                     patch.object(toolkit, "_upload_partition") as read:
                 with self.assertRaisesRegex(toolkit.DfuError, "does not match"):
                     toolkit.verify_update_write(manifest, "services", "1-1", "dfu-util")
             read.assert_not_called()
+
+    def test_verify_update_write_reads_only_compact_skills_prefix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = b"K" * 1536
+            manifest = root / "update-manifest.json"
+            manifest.write_text(json.dumps({
+                "kind": "jibo-full-flash-update", "image_strategy": "compact-prefix-v1",
+                "writes": [{"partition": "skills", "size_bytes": 4096,
+                            "transfer_bytes": len(payload),
+                            "candidate_sha256": hashlib.sha256(payload).hexdigest()}]}))
+            names = ["skills-000", "skills-001", "skills-002", "skills-003",
+                     "var", toolkit.MARKER]
+            listing = "\n".join('Found DFU: alt={}, name="{}"'.format(index, name)
+                                for index, name in enumerate(names))
+            chunks = {"skills-000": payload[:1024], "skills-001": payload[1024:]}
+            reads = []
+
+            def upload(_tool, _port, alternative, size, destination):
+                reads.append((alternative, size))
+                piece = chunks[alternative]
+                self.assertEqual(len(piece), size)
+                Path(destination).write_bytes(piece)
+                return hashlib.sha256(piece).hexdigest()
+
+            with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024), \
+                    patch.object(toolkit, "_dfu_context",
+                                 return_value=("1-1", names, "device", listing)), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value={"skills": 4096}), \
+                    patch.object(toolkit, "_upload_partition", side_effect=upload):
+                result = toolkit.verify_update_write(manifest, "skills", "1-1", "dfu-util")
+            self.assertEqual(result["status"], "match")
+            self.assertEqual(result["size_bytes"], 1536)
+            self.assertEqual(result["partition_capacity_bytes"], 4096)
+            self.assertEqual(reads, [("skills-000", 1024), ("skills-001", 512)])
 
     def test_gpt_layout_parser_returns_exact_partition_extents(self):
         layout = updates.parse_gpt_layout_prefix(make_gpt_prefix())
@@ -387,7 +472,7 @@ class UpdatePackageTests(unittest.TestCase):
             for filename in updates.IMAGE_NAMES:
                 (images_dir / filename).write_bytes(b"package placeholder")
             candidate = root / "prepared.img"
-            candidate.write_bytes(b"prepared")
+            candidate.write_bytes(b"P" * 512)
             operation = root / "operation"
             operation.mkdir()
             capacities = {name: size for name, size in updates.KNOWN_CAPACITIES.items()}
@@ -411,7 +496,8 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}) as var_backup, \
                     patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
                     patch.object(toolkit, "_backup_skills_partition_once") as skills_backup, \
-                    patch.object(toolkit.updates, "prepare_images", return_value={name: candidate for name in ("rootfsA", "rootfsB", "services", "skills")}), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: candidate for name in ("rootfsA", "rootfsB", "services", "skills")})), \
                     patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
                     patch.object(toolkit, "run_with_progress", side_effect=transfer), \
                     patch.object(toolkit, "run", return_value=""):
@@ -420,8 +506,7 @@ class UpdatePackageTests(unittest.TestCase):
                                                   confirmation="FLASH UPDATE")
             written = [argv[argv.index("-a") + 1] for argv in transfers if "-D" in argv]
             self.assertEqual(written, ["rootfsA", "rootfsB", "services", "skills"])
-            self.assertEqual(download_sizes,
-                             {name: capacities[name] for name in written})
+            self.assertEqual(download_sizes, {name: 512 for name in written})
             var_backup.assert_called_once_with("1-1", "dfu-util")
             backup.assert_not_called()
             skills_backup.assert_not_called()
@@ -437,7 +522,7 @@ class UpdatePackageTests(unittest.TestCase):
             for filename in updates.IMAGE_NAMES:
                 (images_dir / filename).write_bytes(b"package placeholder")
             candidate = root / "prepared.img"
-            candidate.write_bytes(b"prepared")
+            candidate.write_bytes(b"P" * 512)
             operation = root / "operation"
             operation.mkdir()
             capacities = dict(updates.KNOWN_CAPACITIES)
@@ -451,8 +536,8 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}) as var_backup, \
                     patch.object(toolkit, "_backup_partition_once") as other_backup, \
                     patch.object(toolkit, "_backup_skills_partition_once") as skills_backup, \
-                    patch.object(toolkit.updates, "prepare_images",
-                                 return_value={name: candidate for name in toolkit.UPDATE_ORDER}), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: candidate for name in toolkit.UPDATE_ORDER})), \
                     patch.object(toolkit, "_upload_partition", return_value=toolkit._sha256_file(candidate)) as upload, \
                     patch.object(toolkit, "run_with_progress", side_effect=lambda argv, **_kwargs: transfers.append(argv)), \
                     patch.object(toolkit, "run", return_value=""):
@@ -479,15 +564,15 @@ class UpdatePackageTests(unittest.TestCase):
             rootfs = root / "rootfs.prepared"
             services = root / "services.prepared"
             skills = root / "skills.prepared"
-            rootfs.write_bytes(b"root")
-            services.write_bytes(b"serv")
+            rootfs.write_bytes(b"R" * 512)
+            services.write_bytes(b"S" * 512)
             skills_payload = bytes(range(256)) * 10
             skills.write_bytes(skills_payload)
             operation = root / "operation"
             operation.mkdir()
-            capacities = {"rootfsA": 4, "rootfsB": 4, "services": 4,
-                          "var": toolkit.EXPECTED_VAR_SIZE, "skills": len(skills_payload)}
-            chunk_names = ("skills-000", "skills-001", "skills-002")
+            capacities = {"rootfsA": 1024, "rootfsB": 1024, "services": 1024,
+                          "var": toolkit.EXPECTED_VAR_SIZE, "skills": 4096}
+            chunk_names = ("skills-000", "skills-001", "skills-002", "skills-003")
             names = ["rootfsA", "rootfsB", "services", "var", "emmc-000", *chunk_names]
             # Standard dfu-util -l output identifies alternatives but has no
             # size field; chunk coverage is derived from the live GPT table.
@@ -525,7 +610,8 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "_backup_partition_once", return_value={"image": "saved.img"}) as backup, \
                     patch.object(toolkit, "_backup_skills_partition_once",
                                  return_value={"image": "saved-skills.img"}) as skills_backup, \
-                    patch.object(toolkit.updates, "prepare_images", return_value=prepared), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set(prepared)), \
                     patch.object(toolkit, "_upload_partition", side_effect=upload), \
                     patch.object(toolkit, "run_with_progress", side_effect=transfer), \
                     patch.object(toolkit, "run", return_value=""):
@@ -536,13 +622,16 @@ class UpdatePackageTests(unittest.TestCase):
             var_backup.assert_called_once_with("1-1", "dfu-util")
             skills_backup.assert_not_called()
             backup.assert_not_called()
-            self.assertEqual([written[name] for name in chunk_names],
+            self.assertEqual([written[name] for name in chunk_names[:3]],
                              [skills_payload[:1024], skills_payload[1024:2048], skills_payload[2048:]])
-            self.assertEqual([download_sizes[name] for name in chunk_names], [1024, 1024, 512])
+            self.assertEqual([download_sizes[name] for name in chunk_names[:3]], [1024, 1024, 512])
+            self.assertNotIn("skills-003", written)
             self.assertEqual(result["status"], "transferred; reset requested")
             manifest = json.loads((operation / "update-manifest.json").read_text())
             skills_write = next(item for item in manifest["writes"] if item["partition"] == "skills")
-            self.assertEqual([item["alternative"] for item in skills_write["chunks"]], list(chunk_names))
+            self.assertEqual([item["alternative"] for item in skills_write["chunks"]], list(chunk_names[:3]))
+            self.assertEqual(skills_write["transfer_bytes"], len(skills_payload))
+            self.assertEqual(skills_write["size_bytes"], capacities["skills"])
             self.assertTrue(all(item["status"] == "transfer complete" for item in skills_write["chunks"]))
 
     def test_skills_chunk_map_must_match_gpt_capacity_and_reported_sizes(self):
@@ -646,6 +735,103 @@ class UpdatePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(updates.UpdateError, "not a regular file"):
                 updates.validate_package(archive_path)
 
+    @unittest.skipUnless(all(shutil.which(name) for name in
+                             ("mke2fs", "e2fsck", "dumpe2fs", "resize2fs", "debugfs")),
+                         "e2fsprogs is required for the compact image rehearsal")
+    def test_compact_prefixes_expand_cleanly_over_a_stale_skills_tail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                image = images_dir / filename
+                with image.open("wb") as stream:
+                    stream.truncate(4 * 1024 * 1024)
+                subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", "-b", "1024",
+                                str(image)], check=True, capture_output=True)
+            script_path = root / "first_boot_resize"
+            script_path.write_bytes(STOCK_13_RESIZE_SCRIPT)
+            inittab_path = root / "inittab"
+            inittab_path.write_text("::sysinit:/var/etc/first_boot_resize\n")
+            for image, internal_path, host_path in (
+                    (images_dir / "var.ext4", "/etc/first_boot_resize", script_path),
+                    (images_dir / "rootfs.ext4", "/etc/inittab", inittab_path)):
+                subprocess.run(["debugfs", "-w", "-R", "mkdir /etc", str(image)],
+                               check=True, capture_output=True)
+                subprocess.run(["debugfs", "-w", "-R",
+                                "write {} {}".format(host_path, internal_path), str(image)],
+                               check=True, capture_output=True)
+
+            package = updates.validate_package(root)
+            skills_capacity = 8 * 1024 * 1024 + 512
+            capacities = {"rootfsA": 8 * 1024 * 1024, "rootfsB": 8 * 1024 * 1024,
+                          "services": 8 * 1024 * 1024, "skills": skills_capacity,
+                          "var": 4 * 1024 * 1024}
+            known = {name: capacities[name] for name in
+                     ("rootfsA", "rootfsB", "services", "skills", "var")}
+            with patch.dict(updates.KNOWN_CAPACITIES, known, clear=True):
+                compact = updates.prepare_compact_images(package, True, capacities,
+                                                         root / "compact")
+            self.assertNotIn("var", compact.images)
+            for partition, candidate in compact.images.items():
+                self.assertEqual(candidate.stat().st_size, 4 * 1024 * 1024)
+            self.assertEqual(compact.resize_script, STOCK_13_RESIZE_SCRIPT)
+
+            target = root / "skills-with-stale-tail.img"
+            with target.open("wb") as stream:
+                remaining = skills_capacity
+                block = b"\xa5" * (1024 * 1024)
+                while remaining:
+                    piece = block[:min(len(block), remaining)]
+                    stream.write(piece)
+                    remaining -= len(piece)
+            with target.open("r+b") as stream, compact.images["skills"].open("rb") as source:
+                shutil.copyfileobj(source, stream)
+            check = subprocess.run(["e2fsck", "-f", "-p", str(target)],
+                                   text=True, capture_output=True)
+            self.assertIn(check.returncode, (0, 1), check.stdout + check.stderr)
+            subprocess.run(["resize2fs", "-f", str(target)], check=True, capture_output=True)
+            final_check = subprocess.run(["e2fsck", "-f", "-n", str(target)],
+                                         text=True, capture_output=True)
+            self.assertEqual(final_check.returncode, 0, final_check.stdout + final_check.stderr)
+            self.assertEqual(updates._filesystem_geometry(target), (1024, skills_capacity // 1024))
+
+    def test_preserved_var_resize_script_is_tagged_and_skips_var_fsck(self):
+        tag = "0123456789abcdef0123456789abcdef"
+        script = toolkit._rearm_preserved_var_resize_script(STOCK_13_RESIZE_SCRIPT, tag)
+        self.assertIn(b'"$tag"', script)
+        self.assertIn(b'printf \'%s\\n\' "$tag" > "$marker"', script)
+        self.assertIn(b"resize2fs /dev/mmcblk0p1", script)
+        self.assertIn(b"resize2fs /dev/mmcblk0p2", script)
+        self.assertIn(b"resize2fs /dev/mmcblk0p4", script)
+        self.assertIn(b"resize2fs /dev/mmcblk0p6", script)
+        self.assertNotIn(b"mmcblk0p5", script)
+        self.assertIn(b'e2fsck -f -p /dev/mmcblk0p4 || [ "$?" -eq 1 ]', script)
+        script_path = Path(tempfile.gettempdir()) / "jibo-rearmed-resize-test.sh"
+        try:
+            script_path.write_bytes(script)
+            subprocess.run(["sh", "-n", str(script_path)], check=True, capture_output=True)
+        finally:
+            script_path.unlink(missing_ok=True)
+        unsafe = STOCK_13_RESIZE_SCRIPT.replace(
+            b"/usr/sbin/resize2fs /dev/mmcblk0p2",
+            b"/sbin/mkfs.ext4 /dev/mmcblk0p2")
+        with self.assertRaisesRegex(toolkit.DfuError, "known safe 13.0 stock resize script"):
+            toolkit._rearm_preserved_var_resize_script(unsafe, tag)
+
+    def test_resize_script_preflight_rejects_insufficient_existing_allocation(self):
+        current = (b"#!/bin/sh\n/var/etc/first_boot_resize.done\n"
+                   b"/usr/sbin/resize2fs /dev/mmcblk0p1\n")
+        replacement = toolkit._rearm_preserved_var_resize_script(
+            STOCK_13_RESIZE_SCRIPT, "0123456789abcdef0123456789abcdef")
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(toolkit, "_file_loader_context"), \
+                patch.object(toolkit, "_stat_partition_file_rpc", return_value={
+                    "size_bytes": len(current), "allocated_bytes": 512}), \
+                patch.object(toolkit, "_read_partition_file_rpc", return_value=current):
+            with self.assertRaisesRegex(toolkit.DfuError, "has only 512 bytes allocated"):
+                REAL_RESIZE_PREFLIGHT("dfu-util", "1-1", replacement, temp)
+
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "e2fsck", "dumpe2fs", "resize2fs")),
                          "e2fsprogs is required for the offline resize check")
     def test_prepare_expands_ext4_offline_and_omits_var_when_preserving(self):
@@ -731,6 +917,71 @@ class UpdatePackageTests(unittest.TestCase):
                 stream.seek(4096)
                 stream.write(b"\xff")
             self.assertFalse(updates.equivalent_except_ext4_write_time(copies[0], copies[1]))
+
+
+class CompactFlashIntegrationTests(unittest.TestCase):
+    def test_preserved_var_rearm_happens_after_prefix_writes_and_before_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (images_dir / filename).write_bytes(b"package placeholder")
+            candidate = root / "compact.ext4"
+            candidate.write_bytes(b"P" * 512)
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = {name: size for name, size in updates.KNOWN_CAPACITIES.items()}
+            capacities["skills"] = 10_991_139_328
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000",
+                     toolkit.MARKER]
+            listing = "\n".join('Found DFU: alt={}, name="{}"'.format(index, name)
+                                for index, name in enumerate(names))
+            events = []
+
+            def transfer(argv, **_kwargs):
+                if "-D" in argv:
+                    events.append("write-" + argv[argv.index("-a") + 1])
+
+            def rearm(*args, **_kwargs):
+                events.append("rearm")
+                self.assertEqual(args[0], "var")
+                self.assertEqual(args[1], "/etc/first_boot_resize")
+                self.assertNotIn(b"mmcblk0p5", args[2])
+                self.assertIn(b"printf '%s\\n'", args[2])
+                return {"status": "verified", "operation_directory": "/tmp/file-transaction"}
+
+            def reset(argv, **_kwargs):
+                self.assertIn("-R", argv)
+                events.append("reset")
+                return ""
+
+            with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context",
+                                 return_value=("1-1", names, "serial-sha256:" + "a" * 64, listing)), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value={"image": "saved-var.img"}), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: candidate for name in
+                                                           ("rootfsA", "rootfsB", "services", "skills")})), \
+                    patch.object(toolkit, "_preflight_resize_script_write",
+                                 side_effect=lambda *_args, **_kwargs: events.append("preflight") or
+                                 {"allocated_bytes": 1024}), \
+                    patch.object(toolkit, "write_partition_file_live", side_effect=rearm), \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", side_effect=reset):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = toolkit.flash_update(root / "release", True, port="1-1",
+                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE")
+
+            self.assertEqual(events, ["preflight", "write-rootfsA", "write-rootfsB",
+                                      "write-services", "write-skills", "rearm", "reset"])
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertEqual(saved["image_strategy"], "compact-prefix-v1")
+            self.assertEqual(saved["writes"][-1]["size_bytes"], capacities["skills"])
+            self.assertEqual(saved["writes"][-1]["transfer_bytes"], 512)
+            self.assertEqual(saved["first_boot_resize_rearm"]["status"], "verified")
 
 
 if __name__ == "__main__":

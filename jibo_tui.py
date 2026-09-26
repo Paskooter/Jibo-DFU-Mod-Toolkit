@@ -742,6 +742,7 @@ def _confirmation_details(plan, introduction):
         ("version", "Version"),
         ("usb_port", "USB port"),
         ("var_policy", "Var policy"),
+        ("filesystem_resize", "Filesystem resize"),
         ("rollback_backup", "Rollback backup"),
         ("partition", "Partition"),
         ("size_bytes", "Size (bytes)"),
