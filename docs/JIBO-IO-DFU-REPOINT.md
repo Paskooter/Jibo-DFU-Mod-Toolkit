@@ -10,9 +10,10 @@ itself. Run the jibo.io OTA immediately after setup/reboot; that OTA installs th
 permanent trust store and remaining cloud-service changes.
 
 The helper currently recognizes the exact official 3.3.4 RTM, 5.4.0 EFT,
-5.4.2 production, [12.10.0 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-12.10.0-20180823-production.tar.bz2),
-and 13.0.0 production file layouts checked offline. 12.10.0 shares the checked
-13.0.0 OTA file hashes. It
+5.4.2 production, [8.19.0 production](https://pvindex.org/repository/platformos/builds/release-production/jibo-pvt-flash-build-8.19.0-20171018.tar.bz2),
+[12.10.0 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-12.10.0-20180823-production.tar.bz2),
+and 13.0.0 production file layouts checked offline. The checked 8.19.0 and
+12.10.0 OTA files share the 13.0.0 input hashes. It
 detects each rootfs slot separately and probes the known nested client copies
 when present. It also probes four optional client copies seen in an archived
 3.3.0 skills package.
