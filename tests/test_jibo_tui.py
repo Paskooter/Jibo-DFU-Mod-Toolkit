@@ -457,11 +457,29 @@ class CursesPromptTests(unittest.TestCase):
         readiness = jibo_tui.Readiness(
             "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
         with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "select_option", return_value="full"), \
                 patch.object(jibo_tui, "confirm_action", return_value=True) as confirm:
             result = jibo_tui.execute_action(api, "set-mode", readiness)
         self.assertEqual(calls, ["file", "full"])
         self.assertEqual(result["new_mode"], "int-developer")
         self.assertIn("Review the var write plan", confirm.call_args.args[1])
+
+    def test_mode_action_defaults_to_cancel_when_fast_edit_is_unavailable(self):
+        class UnsupportedFileLayout(Exception):
+            status = 3
+
+        api = SimpleNamespace(
+            FileRpcStatusError=UnsupportedFileLayout,
+            set_mode_file_live=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                UnsupportedFileLayout()),
+            set_mode_live=lambda *_args, **_kwargs: self.fail("full var edit was not selected"))
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "select_option", return_value="cancel") as select:
+            result = jibo_tui.execute_action(api, "set-mode", readiness)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(select.call_args.kwargs["initial"], "cancel")
 
     def test_wifi_action_uses_file_edit_when_loader_exposes_it(self):
         calls = {}
@@ -497,7 +515,7 @@ class CursesPromptTests(unittest.TestCase):
         readiness = jibo_tui.Readiness(
             "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
         with patch.object(jibo_tui, "text_input", return_value="Test Wi-Fi"), \
-                patch.object(jibo_tui, "select_option", return_value="open"):
+                patch.object(jibo_tui, "select_option", side_effect=("open", "full")):
             result = jibo_tui.execute_action(api, "configure-wifi", readiness)
         self.assertEqual(calls, ["file", "full"])
         self.assertEqual(result["status"], "verified")

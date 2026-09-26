@@ -47,6 +47,16 @@ def _legacy_file_layout(api, error):
             error.status == 3)
 
 
+def _offer_full_var_edit():
+    return select_option(
+        "Fast file edit unavailable",
+        (("cancel", "Cancel without changing the robot"),
+         ("full", "Use full var transfer (slower)")),
+        prompt="This file's ext4 layout cannot be edited by the current RAM loader.",
+        detail="The full transfer reads and writes 500 MiB of var, then checks the result.",
+        initial="cancel") == "full"
+
+
 def inspect_readiness(api, found=None):
     """Read USB state and, for DFU, check for the toolkit's loader marker."""
     found = tuple(api.devices()) if found is None else tuple(found)
@@ -866,7 +876,8 @@ def execute_action(api, key, readiness):
             except Exception as exc:
                 if not _legacy_file_layout(api, exc):
                     raise
-                print("The mode file uses a legacy layout; switching to a full var edit.", flush=True)
+                if not _offer_full_var_edit():
+                    return {"status": "cancelled", "message": "The mode was not changed."}
         return api.set_mode_live(mode, port=readiness.port,
                                  confirmation=confirmation)
     if key == "configure-wifi":
@@ -901,7 +912,8 @@ def execute_action(api, key, readiness):
                 except Exception as exc:
                     if not _legacy_file_layout(api, exc):
                         raise
-                    print("The Wi-Fi file uses a legacy layout; switching to a full var edit.", flush=True)
+                    if not _offer_full_var_edit():
+                        return {"status": "cancelled", "message": "Wi-Fi was not changed."}
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
         finally:
