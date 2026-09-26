@@ -104,6 +104,8 @@ sudo python3 dist/jibo-dfu-linux-x86_64.pyz list-updates
 
 Use `--out /path/to/new/directory` with `backup-var` to force a fresh read for comparison. The default reuses one verified baseline for the same robot; `--refresh` reads the current state and discards the new copy if it is byte-identical to the saved baseline. Use `--partition NAME` more than once with `backup-partitions` or `restore-partitions` to pick several partitions. The update workflow saves or reuses a `var` rollback backup. Its reads of other partitions occur after writing to verify that the result matches the selected package.
 
+If an update stops mid-flash, leave the robot in DFU. `flash-update PACKAGE --preserve-var --resume-from /path/to/update-manifest.json --yes` checks the saved `var` backup against the connected robot and fully reads each previously attempted partition. It skips a write only when that partition already matches the freshly prepared package image, then verifies every remaining write.
+
 ## Hardware results and remaining work
 
 On Moth, ShofEL started the RAM loader and the robot entered DFU on the same USB port. Two consecutive 17 KiB GPT marker reads in one DFU session validated the partition layout. A full DFU read of `var` took 116.9 seconds and produced exactly 524,288,000 bytes with SHA-256 `4a58631e0c6eb0559bef7d2827676a1bce7965886f2887afbdc65dedce18416b`. That matched Moth's September read-only ShofEL `var` backup byte for byte. The temporary comparison copy was removed; neither validation wrote eMMC. An older full eMMC dump from June has different `var` contents, so it is not the matching reference for this test.
