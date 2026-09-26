@@ -82,6 +82,11 @@ class FileRpcStatusError(DfuError):
         self.status = status
         if status == 3:
             message = "The file or ext4 filesystem uses a layout the RAM loader does not support (file mailbox status 3)."
+        elif status == 4:
+            message = ("The ext4 journal needs recovery or could not be verified cleanly "
+                       "(file mailbox status 4). The loader refused to read the target file or "
+                       "write the partition. Boot normally to let Linux recover var, then "
+                       "re-enter DFU and retry; the guided menu also offers a full-var transfer.")
         else:
             message = "The file mailbox rejected the request with status {}.".format(status)
         super().__init__(message)

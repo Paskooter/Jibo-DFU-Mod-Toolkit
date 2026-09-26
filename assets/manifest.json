@@ -1,8 +1,8 @@
 {
   "kind": "experimental-file-rpc-loader",
-  "source_commit": "29c8cb0b60a3425954c1518c47443eaceb3c0afe",
+  "source_commit": "a0a3fcff642cd7a5bbc4513657332e690c4ef16b",
   "size_bytes": 432000,
-  "sha256": "19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43",
+  "sha256": "fd5fc5b1759ddbdbb0da88ac89c425ab95eb0bc494917cfe27daf71e55a31095",
   "hardware_tested": false,
-  "hardware_test": "Direct-block support is compile-validated only; the updated loader has not been tested on hardware."
+  "hardware_test": "Dirty-journal status-4 handling is compile-validated only; fast journal recovery remains unsupported."
 }

@@ -464,6 +464,48 @@ class CursesPromptTests(unittest.TestCase):
         self.assertEqual(result["new_mode"], "int-developer")
         self.assertIn("Review the var write plan", confirm.call_args.args[1])
 
+    def test_mode_action_falls_back_for_dirty_journal(self):
+        class DirtyJournal(Exception):
+            status = 4
+
+        calls = []
+        def file_edit(*_args, **_kwargs):
+            calls.append("file")
+            raise DirtyJournal()
+        def full_edit(mode, port=None, confirmation=None):
+            calls.append("full")
+            self.assertTrue(confirmation({"partition": "var", "usb_port": port}))
+            return {"status": "verified", "new_mode": mode}
+        api = SimpleNamespace(FileRpcStatusError=DirtyJournal,
+                              set_mode_file_live=file_edit, set_mode_live=full_edit)
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "select_option", return_value="full") as select, \
+                patch.object(jibo_tui, "confirm_action", return_value=True):
+            result = jibo_tui.execute_action(api, "set-mode", readiness)
+        self.assertEqual(calls, ["file", "full"])
+        self.assertEqual(result["new_mode"], "int-developer")
+        self.assertEqual(select.call_args.kwargs["initial"], "cancel")
+        self.assertIn("journal", select.call_args.kwargs["prompt"].lower())
+        self.assertIn("500 MiB", select.call_args.kwargs["detail"])
+
+    def test_mode_action_cancels_dirty_journal_fallback_by_default(self):
+        class DirtyJournal(Exception):
+            status = 4
+
+        api = SimpleNamespace(
+            FileRpcStatusError=DirtyJournal,
+            set_mode_file_live=lambda *_args, **_kwargs: (_ for _ in ()).throw(DirtyJournal()),
+            set_mode_live=lambda *_args, **_kwargs: self.fail("full var edit was not selected"))
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "select_option", return_value="cancel") as select:
+            result = jibo_tui.execute_action(api, "set-mode", readiness)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(select.call_args.kwargs["initial"], "cancel")
+
     def test_mode_action_defaults_to_cancel_when_fast_edit_is_unavailable(self):
         class UnsupportedFileLayout(Exception):
             status = 3

@@ -789,7 +789,7 @@
 +#endif
 --- /dev/null
 +++ b/fs/ext4/jibo_file_rpc.c
-@@ -0,0 +1,1128 @@
+@@ -0,0 +1,1131 @@
 +/* SPDX-License-Identifier: GPL-2.0+ */
 +/*
 + * Bounded Jibo file mailbox.  This intentionally does not call ext4fs_init(),
@@ -1828,11 +1828,14 @@
 +		    get_unaligned_le32(super + 8) > block_count ||
 +		    get_unaligned_le32(super + 16) > inode_count ||
 +		    fs_sectors > part->size ||
-+		    get_unaligned_le16(super + 58) != 1 ||
-+		    (get_unaligned_le32(super + 96) & JIBO_EXT4_RECOVER)) {
++		    get_unaligned_le16(super + 58) != 1) {
 +			status = JIBO_STATUS_UNSUPPORTED;
 +			goto respond;
 +		}
++	}
++	if (get_unaligned_le32(super + 96) & JIBO_EXT4_RECOVER) {
++		status = JIBO_STATUS_UNCLEAN;
++		goto respond;
 +	}
 +	if (!ext4fs_mount(part->size)) {
 +		status = JIBO_STATUS_METADATA;

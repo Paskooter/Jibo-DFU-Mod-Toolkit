@@ -41,20 +41,25 @@ def _can_edit_var_files(readiness):
             FILE_LEVEL_VAR_ALTS.issubset(readiness.alt_names))
 
 
-def _legacy_file_layout(api, error):
+def _needs_full_var_fallback(api, error):
     status_error = getattr(api, "FileRpcStatusError", None)
     return (status_error is not None and isinstance(error, status_error) and
-            error.status == 3)
+            error.status in (3, 4))
 
 
-def _offer_full_var_edit():
+def _offer_full_var_edit(error):
+    if getattr(error, "status", 3) == 4:
+        prompt = "The ext4 journal needs recovery, so the RAM loader refused this file request."
+        detail = ("Cancel to boot normally, let Linux recover var, then re-enter DFU and retry. "
+                  "Or choose the full transfer, which reads and writes 500 MiB of var.")
+    else:
+        prompt = "This file's ext4 layout cannot be edited by the current RAM loader."
+        detail = "The full transfer reads and writes 500 MiB of var, then checks the result."
     return select_option(
         "Fast file edit unavailable",
         (("cancel", "Cancel without changing the robot"),
          ("full", "Use full var transfer (slower)")),
-        prompt="This file's ext4 layout cannot be edited by the current RAM loader.",
-        detail="The full transfer reads and writes 500 MiB of var, then checks the result.",
-        initial="cancel") == "full"
+        prompt=prompt, detail=detail, initial="cancel") == "full"
 
 
 def inspect_readiness(api, found=None):
@@ -874,9 +879,9 @@ def execute_action(api, key, readiness):
                 return api.set_mode_file_live(mode, port=readiness.port,
                                               confirmation=confirmation, guided=True)
             except Exception as exc:
-                if not _legacy_file_layout(api, exc):
+                if not _needs_full_var_fallback(api, exc):
                     raise
-                if not _offer_full_var_edit():
+                if not _offer_full_var_edit(exc):
                     return {"status": "cancelled", "message": "The mode was not changed."}
         return api.set_mode_live(mode, port=readiness.port,
                                  confirmation=confirmation)
@@ -910,9 +915,9 @@ def execute_action(api, key, readiness):
                         ssid, password, open_network, port=readiness.port,
                         confirmation=confirmation, guided=True)
                 except Exception as exc:
-                    if not _legacy_file_layout(api, exc):
+                    if not _needs_full_var_fallback(api, exc):
                         raise
-                    if not _offer_full_var_edit():
+                    if not _offer_full_var_edit(exc):
                         return {"status": "cancelled", "message": "Wi-Fi was not changed."}
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)

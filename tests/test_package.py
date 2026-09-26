@@ -179,7 +179,7 @@ class PackageTests(unittest.TestCase):
     def test_pinned_file_loader_hash(self):
         self.assertEqual(package.PINNED_LOADER_SIZE, 432_000)
         self.assertEqual(package.PINNED_LOADER_SHA256,
-                         "19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43")
+                         "fd5fc5b1759ddbdbb0da88ac89c425ab95eb0bc494917cfe27daf71e55a31095")
 
 
 if __name__ == "__main__":

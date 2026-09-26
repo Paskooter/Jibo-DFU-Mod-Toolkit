@@ -78,6 +78,25 @@ class FileDfuTests(unittest.TestCase):
         with self.assertRaisesRegex(j.DfuError, "SHA-256"):
             j._decode_file_response(response[:-1] + b"!", request_id)
 
+    def test_needs_recovery_flag_returns_unclean_before_mount(self):
+        patch = (Path(j.ROOT) / "firmware/file-level.patch").read_text()
+        gate = "if (get_unaligned_le32(super + 96) & JIBO_EXT4_RECOVER) {"
+        gate_offset = patch.index(gate)
+        status_offset = patch.index("status = JIBO_STATUS_UNCLEAN;", gate_offset)
+        response_offset = patch.index("goto respond;", status_offset)
+        mount_offset = patch.index("if (!ext4fs_mount(part->size))", gate_offset)
+        self.assertLess(gate_offset, status_offset)
+        self.assertLess(status_offset, response_offset)
+        self.assertLess(response_offset, mount_offset)
+
+    def test_unclean_filesystem_status_explains_recovery_and_no_write(self):
+        failure = j.FileRpcStatusError(4)
+        message = str(failure)
+        self.assertIn("status 4", message)
+        self.assertIn("Boot normally", message)
+        self.assertIn("full-var transfer", message)
+        self.assertIn("write the partition", message)
+
     def test_write_request_requires_compare_and_write_precondition(self):
         with self.assertRaisesRegex(j.DfuError, "precondition"):
             j._file_request("/jibo/mode.json", j.FILE_RPC_WRITE, b"{}")

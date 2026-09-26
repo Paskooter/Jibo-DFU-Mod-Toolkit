@@ -4,7 +4,8 @@ The file RPC uses paired MMC/ext4 DFU alternatives. `jibo-file-<partition>-in`
 accepts a request; the matching `jibo-file-<partition>-out` uploads its
 response. The read-only `jibo-file-v1` raw alternate advertises the protocol
 to the host. No request data is interpreted as a shell command or a U-Boot
-filename, and the existing packaged loader does not advertise this capability.
+filename. File-level support is experimental and is available only in the
+candidate loader build described in [the loader build guide](../docs/loader-build.md).
 
 All multi-byte wire fields are little-endian unless marked `digest`. Fixed
 integers have no native-C padding; the implementation parses and writes the
@@ -38,8 +39,11 @@ precondition followed by 1–4096 replacement bytes:
 
 The response has a 61-byte header followed by its body: 8-byte magic
 `JIBOR1\0\0`, the 16-byte request nonce, 1-byte status, 4-byte body length,
-and a 32-byte SHA-256 digest of the body. A successful read body contains file
-bytes; a successful stat body contains the 52-byte packed values
+and a 32-byte SHA-256 digest of the body. Status 4 means the filesystem has
+`needs_recovery` set or the journal could not be verified as clean; the loader
+rejects the request before target-file access or any partition write. It does
+not replay the journal. A successful read body contains file bytes; a successful
+stat body contains the 52-byte packed values
 `<QIIIIIII16s` (inode, size, allocated bytes, UID, GID, mode, link count,
 mapping count, UUID). The mapping count is one for supported files, whether
 the block is described by an extent or a legacy direct pointer. A successful
