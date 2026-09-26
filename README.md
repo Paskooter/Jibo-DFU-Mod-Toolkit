@@ -59,7 +59,7 @@ python3 scripts/package.py \
 sudo python3 dist/jibo-dfu-linux-x86_64.pyz
 ```
 
-To rebuild the loader itself, extract `vendor/jibo-ram-dfu-v1-source.tar.gz` and follow [the loader build notes](docs/loader-build.md) with `--file-level-candidate`. That separate build needs the matching Buildroot host toolchain. To run the Python source directly instead of a `.pyz`, place the matching image at `./loader.bin`, place `shofel2_t124`, `intermezzo.bin`, and `dfu_stage2.bin` together in `./tools/`, then run `sudo python3 jibo_dfu.py`.
+To build the separate v2 file-level candidate, extract `vendor/jibo-ram-dfu-v1-source.tar.gz` and follow [the loader build notes](docs/loader-build.md). That build needs the matching Buildroot host toolchain; it does not replace the bundled, hardware-tested v1 loader. To run the Python source directly instead of a `.pyz`, place the matching image at `./loader.bin`, place `shofel2_t124`, `intermezzo.bin`, and `dfu_stage2.bin` together in `./tools/`, then run `sudo python3 jibo_dfu.py`.
 
 ## Using the menu
 
@@ -82,6 +82,13 @@ The included loader supports bounded changes to existing files. It reads the tar
 Jibo's archived `PlatformTeam/system-manager` starts `wpa_supplicant` using `/var/etc/wpa_supplicant.conf`. The archived `jiborobot/jibo-wifi` saves networks with `SAVE_CONFIG`; its separate `/var/etc/networks.conf` stores optional static IP settings for those SSIDs, not a second credentials database. This menu adds a DHCP Wi-Fi network to the supplicant file and preserves existing network blocks. It does not configure static IP addresses or test association while the robot is in DFU.
 
 For advanced file inspection, `stat-partition-file /jibo/mode.json --partition var` reads the file's UID, GID, permissions, and inode. `set-mode` and `configure-wifi` use the quick file path when the active loader advertises it; `set-mode-file` and `configure-wifi-file` require that path explicitly.
+
+For a recognized stock robot that must reach jibo.io for its first OTA,
+see the [experimental DFU repoint guide](docs/JIBO-IO-DFU-REPOINT.md). This
+uses the separate, unvalidated `jibo-file-v2` candidate and is not part of
+the pinned loader. When v2 is active, **More tools** offers a read-only
+compatibility check and the guided OTA preparation action. The repoint is only a bridge: install
+the offered OTA before treating the robot as fully migrated.
 
 For scripts, the corresponding commands are:
 

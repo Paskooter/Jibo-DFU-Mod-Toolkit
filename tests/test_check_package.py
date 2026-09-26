@@ -17,7 +17,9 @@ class CachedPackageTests(unittest.TestCase):
         self.source = self.root / "source"
         self.source.mkdir()
         for name in check_package.SOURCES:
-            (self.source / name).write_bytes(("content of " + name).encode())
+            target = self.source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(("content of " + name).encode())
 
     def create_package(self, capability="1"):
         with zipfile.ZipFile(self.package, "w") as archive:

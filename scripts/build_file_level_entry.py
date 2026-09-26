@@ -47,17 +47,21 @@ def main():
     out = args.out.resolve()
     if not loader.is_file():
         parser.error("candidate loader is missing: " + str(loader))
+    size = loader.stat().st_size
+    sha = digest(loader)
+    pinned = sha == digest(ROOT / "assets/loader.bin")
     candidate_manifest = loader.parent / "manifest.json"
     if (not candidate_manifest.is_file() and
-            sha == digest(ROOT / "assets/loader.bin")):
+            pinned):
         candidate_manifest = ROOT / "assets/manifest.json"
     if not candidate_manifest.is_file():
         parser.error("candidate manifest is missing: " + str(candidate_manifest))
     candidate = json.loads(candidate_manifest.read_text())
-    size = loader.stat().st_size
-    sha = digest(loader)
+    patch_sha = hashlib.sha256((ROOT / "firmware/file-level.patch").read_bytes()).hexdigest()
     if (candidate.get("kind") != "experimental-file-rpc-loader" or
-            candidate.get("size_bytes") != size or candidate.get("sha256") != sha):
+            candidate.get("size_bytes") != size or candidate.get("sha256") != sha or
+            (not pinned and (candidate.get("protocol") != "jibo-file-v2" or
+                             candidate.get("source_file_level_patch_sha256") != patch_sha))):
         parser.error("candidate loader does not match its file-RPC build manifest")
     if not 0 < size < 4 * 1024 * 1024:
         parser.error("candidate loader size is outside the stage-2 DRAM range")

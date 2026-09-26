@@ -64,6 +64,29 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertEqual(lines, ["Robot mode set to developer.",
                                  "Operation record: /tmp/record"])
 
+    def test_repoint_result_uses_a_short_guided_summary(self):
+        lines = jibo_tui._result_summary("repoint-jibo-io", {
+            "status": "plan", "files_to_change": 12,
+            "rootfs_profiles": {"rootfsA": "5.4", "rootfsB": "13.0"},
+            "paths": [{"path": "/large/technical/path", "sha256": "hash"}]})
+        self.assertIn("Compatibility check passed; no files were changed.", lines)
+        self.assertIn("Rootfs layouts: A 5.4, B 13.0.", lines)
+        self.assertNotIn("/large/technical/path", " ".join(lines))
+
+    def test_repoint_menu_does_not_send_credentials_by_default(self):
+        calls = {}
+        api = SimpleNamespace(repoint_jibo_io=lambda **kwargs: (
+            calls.update(kwargs) or {"status": "repointed-for-ota", "files_to_change": 12}))
+        readiness = jibo_tui.Readiness("dfu-ready", (), port="1-1",
+                                        alt_names=("jibo-file-v2",))
+        with patch.object(jibo_tui, "select_option", side_effect=("apply", "keep")), \
+                patch.object(jibo_tui, "confirm_action", return_value=True):
+            result = jibo_tui.execute_action(api, "repoint-jibo-io", readiness)
+            self.assertTrue(calls["confirmation"]({"changes": [], "usb_port": "1-1"}))
+        self.assertEqual(result["display_action"], "repoint-jibo-io")
+        self.assertFalse(calls["adopt_existing"])
+        self.assertTrue(calls["guided"])
+
     def test_partition_checklist_uses_shared_arrow_key_menu(self):
         screen = FakeScreen([ord("a"), curses.KEY_DOWN, curses.KEY_DOWN,
                              curses.KEY_ENTER])

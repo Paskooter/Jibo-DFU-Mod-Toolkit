@@ -94,6 +94,8 @@ def main():
         "jibo_images.py": ROOT / "jibo_images.py",
         "jibo_updates.py": ROOT / "jibo_updates.py",
         "jibo_tui.py": ROOT / "jibo_tui.py",
+        "jibo_repoint.py": ROOT / "jibo_repoint.py",
+        "assets/isrg-root-x1.pem": ROOT / "assets/isrg-root-x1.pem",
         "README.md": ROOT / "README.md",
     }
     for name, path in sources.items():

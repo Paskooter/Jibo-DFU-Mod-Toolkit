@@ -38,7 +38,9 @@ FILE_LEVEL_VAR_ALTS = frozenset(("jibo-file-v1", "jibo-file-var-in",
 
 def _can_edit_var_files(readiness):
     return (readiness.state == "dfu-ready" and
-            FILE_LEVEL_VAR_ALTS.issubset(readiness.alt_names))
+            {"jibo-file-var-in", "jibo-file-var-out"}.issubset(readiness.alt_names) and
+            ("jibo-file-v1" in readiness.alt_names or
+             "jibo-file-v2" in readiness.alt_names))
 
 
 def inspect_readiness(api, found=None):
@@ -506,6 +508,19 @@ def _result_summary(action, result):
                  ", ".join(names) + ".", "Record: " + str(result["manifest"])]
     elif action == "flash-update":
         lines = ["Official update: {}.".format(status)]
+    elif action == "repoint-jibo-io":
+        if status == "plan":
+            lines = ["Compatibility check passed; no files were changed.",
+                     "Files to update: {}.".format(result.get("files_to_change", 0))]
+        else:
+            lines = ["OTA server files prepared for jibo.io.",
+                     "Files changed: {}.".format(result.get("files_to_change", 0))]
+            if result.get("adoption"):
+                lines.append(result["adoption"])
+        profiles = result.get("rootfs_profiles", {})
+        if profiles:
+            lines.append("Rootfs layouts: A {}, B {}.".format(
+                profiles.get("rootfsA", "?"), profiles.get("rootfsB", "?")))
     elif action == "probe-dfu-gpt" or "partition_sizes_bytes" in result:
         lines = ["Partition layout checked."]
     elif action == "write-var":
@@ -898,6 +913,10 @@ def execute_action(api, key, readiness):
                             ("backup-partitions", "Back up selected partitions"),
                             ("restore-partitions", "Restore selected partitions"),
                             ("write-var", "Write an edited var image")))
+            options.append(MenuItem(
+                "repoint-jibo-io", "Prepare a stock robot for jibo.io OTA",
+                "jibo-file-v2" in readiness.alt_names,
+                "This action requires the opt-in v2 file loader."))
         options.extend((("inspect-backup", "Inspect a local var backup"),
                         ("edit-backup", "Edit a local var backup")))
         selected = select_option("More tools", options,
@@ -916,6 +935,31 @@ def execute_action(api, key, readiness):
         if selected is None:
             return {"status": "cancelled", "message": "No backup was started."}
         return api.backup_partitions(selected, port=readiness.port)
+    if key == "repoint-jibo-io":
+        choice = select_option(
+            "Prepare for jibo.io OTA",
+            (("check", "Check this robot (read only)"),
+             ("apply", "Prepare OTA server files")),
+            prompt="Check compatibility before changing files.", initial="check")
+        if choice is None:
+            return {"status": "cancelled", "message": "No repoint action was started."}
+        if choice == "check":
+            result = api.repoint_jibo_io(port=readiness.port, dry_run=True, guided=True)
+            return {**result, "display_action": "repoint-jibo-io"}
+        adoption = select_option(
+            "Existing robot credentials",
+            (("keep", "Do not send credentials"),
+             ("adopt", "Send credentials to jibo.io after the file changes")),
+            prompt="Choose whether to register existing credentials with jibo.io.",
+            initial="keep")
+        if adoption is None:
+            return {"status": "cancelled", "message": "No repoint action was started."}
+        confirmation = lambda plan: confirm_action(
+            "Confirm OTA preparation",
+            _confirmation_details(plan, "The listed files will be replaced in place."))
+        result = api.repoint_jibo_io(port=readiness.port, confirmation=confirmation,
+                                     adopt_existing=(adoption == "adopt"), guided=True)
+        return {**result, "display_action": "repoint-jibo-io"}
     if key == "restore-partitions":
         source = text_input("Restore partitions", "Path to backup-set.json or its folder:")
         if source is None or not source.strip():
@@ -1013,9 +1057,12 @@ def run(api_module):
         label = next(item.label for item in app.items if item.key == action)
         try:
             result = execute_action(api_module, action, app.readiness)
+            display_action = result.get("display_action", action) if isinstance(result, dict) else action
+            display_label = ("Prepare for jibo.io OTA" if display_action == "repoint-jibo-io"
+                             else label)
             if action != "enter-dfu-shofel" or not (
                     isinstance(result, dict) and result.get("state") == "dfu"):
-                show_screen(label, _result_summary(action, result))
+                show_screen(display_label, _result_summary(display_action, result))
         except KeyboardInterrupt:
             show_screen(label, "Cancelled.")
         except Exception as exc:
