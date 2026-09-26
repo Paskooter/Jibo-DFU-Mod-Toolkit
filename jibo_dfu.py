@@ -77,6 +77,16 @@ class DfuError(Exception):
     pass
 
 
+class FileRpcStatusError(DfuError):
+    def __init__(self, status):
+        self.status = status
+        if status == 3:
+            message = "The file or ext4 filesystem uses a layout the RAM loader does not support (file mailbox status 3)."
+        else:
+            message = "The file mailbox rejected the request with status {}.".format(status)
+        super().__init__(message)
+
+
 def devices(root=Path("/sys/bus/usb/devices")):
     found = []
     for path in sorted(root.glob("*")):
@@ -1431,6 +1441,41 @@ def _preflight_resize_script_write(dfu_util, port, replacement, workdir):
     return metadata
 
 
+def _prepare_preserved_var_resize_image(dfu_util, port, replacement, workdir,
+                                        current_image=None):
+    """Patch the live var image when its legacy file layout cannot use file RPC."""
+    workdir = Path(workdir)
+    candidate = workdir / "preserved-var.img"
+    if current_image is None:
+        before_hash = _upload_partition(dfu_util, port, "var", EXPECTED_VAR_SIZE, candidate)
+    else:
+        source = Path(current_image)
+        if source.is_symlink() or not source.is_file() or source.stat().st_size != EXPECTED_VAR_SIZE:
+            raise DfuError("The saved current var image is missing or has the wrong size.")
+        shutil.copyfile(source, candidate)
+        before_hash = _sha256_file(candidate)
+    try:
+        images._replay_journal_on_copy(candidate)
+        before_metadata = images._file_metadata(candidate, "/etc/first_boot_resize")
+        current = images._extract(candidate, "/etc/first_boot_resize",
+                                  workdir / "current-resize-script")
+        if not current.startswith(b"#!/bin/sh\n") or \
+                b"/var/etc/first_boot_resize.done" not in current or b"resize2fs" not in current:
+            raise DfuError("The preserved var resize script is not recognized; var was not changed.")
+        images._replace_file(candidate, "/etc/first_boot_resize", replacement, workdir)
+        images._check_ext4(candidate)
+        after_metadata = images._file_metadata(candidate, "/etc/first_boot_resize")
+        if after_metadata != before_metadata:
+            raise DfuError("The offline resize script edit changed its ownership or permissions.")
+        return {"image": str(candidate), "size_bytes": EXPECTED_VAR_SIZE,
+                "before_sha256": before_hash, "candidate_sha256": _sha256_file(candidate),
+                "script_sha256": hashlib.sha256(replacement).hexdigest(),
+                "permissions": after_metadata}
+    except (DfuError, images.ImageError, OSError):
+        candidate.unlink(missing_ok=True)
+        raise
+
+
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
                      transport="USB DFU upload", usb_state="DFU (0955:701a)",
                      profile="Jibo RAM DFU loader", partition_identity=None):
@@ -1875,14 +1920,23 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 transfer_sizes[name] = transfer_size
             candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
             resize_script = None
+            resize_method = "file-rpc"
             if preserve_var:
                 resize_script = _rearm_preserved_var_resize_script(
                     compact_images.resize_script, record["resize_tag"])
                 preflight_dir = Path(directory) / "resize-preflight"
                 preflight_dir.mkdir(mode=0o700)
                 try:
-                    record["resize_script_preflight"] = _preflight_resize_script_write(
-                        dfu_util, port, resize_script, preflight_dir)
+                    try:
+                        record["resize_script_preflight"] = _preflight_resize_script_write(
+                            dfu_util, port, resize_script, preflight_dir)
+                    except FileRpcStatusError as exc:
+                        if exc.status != 3:
+                            raise
+                        resize_method = "full-var-image"
+                        record["resize_script_preflight"] = {
+                            "method": resize_method,
+                            "reason": "existing resize script uses an ext4 layout outside the file mailbox limits"}
                 finally:
                     shutil.rmtree(preflight_dir, ignore_errors=True)
                 _private_write(record_path, record)
@@ -1898,6 +1952,24 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 # Even a preserve-var update gets one reusable rollback image of var.
                 var_backup = backup_var(port, dfu_util)
                 record["backups"]["var"] = var_backup
+                _private_write(record_path, record)
+
+            var_resize_image = None
+            if preserve_var and resize_method == "full-var-image":
+                current_backup = (record["backups"]["var"].get("image")
+                                  if resume_record is None and
+                                  record["backups"]["var"].get("status") == "backup complete"
+                                  else None)
+                print("The existing resize script uses a legacy file layout. " +
+                      ("Preparing the newly saved var image" if current_backup else
+                       "Reading the current var image") +
+                      " to keep its data and update that script.", flush=True)
+                record["status"] = "preparing preserved var resize image"
+                _private_write(record_path, record)
+                var_resize_image = _prepare_preserved_var_resize_image(
+                    dfu_util, port, resize_script, Path(prepared_dir), current_backup)
+                record["preserved_var_resize_image"] = {
+                    key: value for key, value in var_resize_image.items() if key != "image"}
                 _private_write(record_path, record)
 
             def write_and_verify(name, candidate, digest, entry):
@@ -1978,20 +2050,68 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     record["writes"].append(entry)
                     write_and_verify(name, candidate, digest, entry)
             if preserve_var:
-                file_transaction = write_partition_file_live(
-                    "var", "/etc/first_boot_resize", resize_script,
-                    description="rearm first-boot filesystem resize", port=port,
-                    dfu_util=dfu_util,
-                    out=Path(directory) / "resize-file-transaction",
-                    confirmation=True, guided=True)
-                if file_transaction.get("status") not in ("verified", "already current"):
-                    raise DfuError("The first-boot resize script was not safely armed; the robot remains in DFU and was not reset.")
-                record["first_boot_resize_rearm"] = {
-                    "status": file_transaction["status"],
-                    "tag": record["resize_tag"],
-                    "file_transaction": file_transaction.get("operation_directory"),
-                    "preserved_var_data": True,
-                }
+                if resize_method == "file-rpc":
+                    file_transaction = write_partition_file_live(
+                        "var", "/etc/first_boot_resize", resize_script,
+                        port=port, dfu_util=dfu_util,
+                        out=Path(directory) / "resize-file-transaction",
+                        confirmation=True, guided=True)
+                    if file_transaction.get("status") not in ("verified", "already current"):
+                        raise DfuError("The first-boot resize script was not safely armed; the robot remains in DFU and was not reset.")
+                    record["first_boot_resize_rearm"] = {
+                        "status": file_transaction["status"],
+                        "method": resize_method,
+                        "tag": record["resize_tag"],
+                        "file_transaction": file_transaction.get("operation_directory"),
+                        "preserved_var_data": True,
+                    }
+                else:
+                    record["status"] = "writing preserved var resize image"
+                    record["preserved_var_resize_write"] = {
+                        "size_bytes": EXPECTED_VAR_SIZE,
+                        "candidate_sha256": var_resize_image["candidate_sha256"],
+                        "status": "write started"}
+                    _private_write(record_path, record)
+                    run_with_progress(
+                        [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var",
+                         "-D", var_resize_image["image"]], timeout=14400,
+                        download_size=EXPECTED_VAR_SIZE,
+                        allow_progress_completion=True,
+                        label="Writing preserved var with first-boot resize script")
+                    record["preserved_var_resize_write"]["status"] = "transfer complete"
+                    _private_write(record_path, record)
+                    if verify_readback:
+                        with tempfile.TemporaryDirectory(prefix="var-readback-", dir=directory) as readback_dir:
+                            actual_hash = _upload_partition(
+                                dfu_util, port, "var", EXPECTED_VAR_SIZE,
+                                Path(readback_dir) / "var.img")
+                        record["preserved_var_resize_write"]["readback_sha256"] = actual_hash
+                        if actual_hash != var_resize_image["candidate_sha256"]:
+                            raise DfuError("The preserved var image did not match its full readback; "
+                                           "the robot remains in DFU and was not reset.")
+                    check_dir = Path(prepared_dir) / "resize-readback"
+                    check_dir.mkdir(mode=0o700)
+                    try:
+                        actual_script = _read_partition_file_rpc(
+                            dfu_util, port, "var", "/etc/first_boot_resize",
+                            check_dir, quiet=True)
+                        actual_stat = _stat_partition_file_rpc(
+                            dfu_util, port, "var", "/etc/first_boot_resize",
+                            check_dir, quiet=True)
+                    finally:
+                        shutil.rmtree(check_dir, ignore_errors=True)
+                    expected_permissions = int(var_resize_image["permissions"]["mode"], 8)
+                    if actual_script != resize_script or actual_stat["mode"] != expected_permissions or \
+                            actual_stat["uid"] != int(var_resize_image["permissions"]["uid"]) or \
+                            actual_stat["gid"] != int(var_resize_image["permissions"]["gid"]):
+                        raise DfuError("The preserved var resize script did not match its file readback; "
+                                       "the robot remains in DFU and was not reset.")
+                    record["first_boot_resize_rearm"] = {
+                        "status": "verified", "method": resize_method,
+                        "tag": record["resize_tag"], "preserved_var_data": True,
+                        "script_sha256": var_resize_image["script_sha256"]}
+                    record["preserved_var_resize_write"]["status"] = (
+                        "verified" if verify_readback else "script checked")
                 _private_write(record_path, record)
         record["status"] = "verified; reset pending" if verify_readback else "transferred; reset pending"
         _private_write(record_path, record)
@@ -2004,11 +2124,12 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         _private_write(record_path, record)
         return {"status": record["status"], "package": str(package.source),
                 "var_policy": plan["var_policy"],
-                "transferred_partitions": partitions,
-                "verified_partitions": partitions if verify_readback else [],
+                "transferred_partitions": partitions + (["var"] if var_resize_image else []),
+                "verified_partitions": (partitions + (["var"] if var_resize_image else [])
+                                        if verify_readback else []),
                 "manifest": str(record_path), "backups": record["backups"],
                 "resumed_from": str(resume_path) if resume_record is not None else None}
-    except (DfuError, updates.UpdateError, OSError) as exc:
+    except (DfuError, updates.UpdateError, images.ImageError, OSError) as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
         _private_write(record_path, record)
@@ -2144,7 +2265,7 @@ def _decode_file_response(response, request_id):
     if magic != FILE_RPC_RESPONSE_MAGIC or response_id != request_id:
         raise DfuError("The file mailbox response does not match the current request.")
     if status != 0:
-        raise DfuError("The file mailbox rejected the request with status {}.".format(status))
+        raise FileRpcStatusError(status)
     if data_size != len(data) or data_size > FILE_LEVEL_MAX_BYTES:
         raise DfuError("The file mailbox response has an invalid byte count.")
     if hashlib.sha256(data).digest() != digest:

@@ -920,6 +920,47 @@ class UpdatePackageTests(unittest.TestCase):
 
 
 class CompactFlashIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
+                         "e2fsprogs is required for the preserved-var rehearsal")
+    def test_legacy_resize_script_is_patched_on_a_copy_with_permissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "live-var.img"
+            size = 16 * 1024 * 1024
+            with source.open("wb") as stream:
+                stream.truncate(size)
+            subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", "-O", "^extent,^64bit",
+                            str(source)], check=True, capture_output=True)
+            original = root / "old-resize.sh"
+            original.write_bytes(
+                b"#!/bin/sh\n/usr/sbin/resize2fs /dev/mmcblk0p1\n"
+                b"touch /var/etc/first_boot_resize.done\n")
+            subprocess.run(["debugfs", "-w", "-R", "mkdir /etc", str(source)],
+                           check=True, capture_output=True)
+            subprocess.run(["debugfs", "-w", "-R",
+                            "write {} /etc/first_boot_resize".format(original), str(source)],
+                           check=True, capture_output=True)
+            subprocess.run(["debugfs", "-w", "-R",
+                            "set_inode_field /etc/first_boot_resize mode 0100755", str(source)],
+                           check=True, capture_output=True)
+            before = toolkit.images._file_metadata(source, "/etc/first_boot_resize")
+            replacement = toolkit._rearm_preserved_var_resize_script(
+                STOCK_13_RESIZE_SCRIPT, "0" * 32)
+            output = root / "working"
+            output.mkdir()
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", size):
+                result = toolkit._prepare_preserved_var_resize_image(
+                    "dfu-util", "1-1", replacement, output, source)
+            candidate = Path(result["image"])
+            self.assertEqual(toolkit.images._extract(
+                candidate, "/etc/first_boot_resize", root / "readback"), replacement)
+            self.assertEqual(toolkit.images._file_metadata(
+                candidate, "/etc/first_boot_resize"), before)
+            self.assertEqual(toolkit.images._extract(
+                source, "/etc/first_boot_resize", root / "original-readback"),
+                original.read_bytes())
+            toolkit.images._check_ext4(candidate)
+
     def test_preserved_var_rearm_happens_after_prefix_writes_and_before_reset(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -981,6 +1022,72 @@ class CompactFlashIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["image_strategy"], "compact-prefix-v1")
             self.assertEqual(saved["writes"][-1]["size_bytes"], capacities["skills"])
             self.assertEqual(saved["writes"][-1]["transfer_bytes"], 512)
+            self.assertEqual(saved["first_boot_resize_rearm"]["status"], "verified")
+
+    def test_unsupported_file_layout_uses_live_var_image_after_compact_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images_dir = root / "release" / "flash_jibo" / "output" / "images"
+            images_dir.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (images_dir / filename).write_bytes(b"package placeholder")
+            candidate = root / "compact.ext4"
+            candidate.write_bytes(b"P" * 512)
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = {name: size for name, size in updates.KNOWN_CAPACITIES.items()}
+            capacities["skills"] = 10_991_139_328
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000",
+                     toolkit.MARKER]
+            listing = "\n".join('Found DFU: alt={}, name="{}"'.format(index, name)
+                                for index, name in enumerate(names))
+            events = []
+            prepared_var = root / "preserved-var.img"
+            prepared_var.write_bytes(b"V")
+            resize = toolkit._rearm_preserved_var_resize_script(
+                STOCK_13_RESIZE_SCRIPT, "0" * 32)
+
+            def transfer(argv, **_kwargs):
+                if "-D" in argv:
+                    events.append("write-" + argv[argv.index("-a") + 1])
+
+            def prepare_var(*_args, **_kwargs):
+                events.append("prepare-var")
+                return {"image": str(prepared_var), "candidate_sha256": "a" * 64,
+                        "script_sha256": hashlib.sha256(resize).hexdigest(),
+                        "permissions": {"mode": "0100755", "uid": "0", "gid": "0"}}
+
+            def reset(argv, **_kwargs):
+                events.append("reset")
+                return ""
+
+            with patch.object(toolkit.secrets, "token_hex", return_value="0" * 32), \
+                    patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context",
+                                 return_value=("1-1", names, "serial-sha256:" + "a" * 64, listing)), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value={
+                        "status": "existing verified backup reused", "image": "saved-var.img"}), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: candidate for name in
+                                                           ("rootfsA", "rootfsB", "services", "skills")})), \
+                    patch.object(toolkit, "_preflight_resize_script_write",
+                                 side_effect=toolkit.FileRpcStatusError(3)), \
+                    patch.object(toolkit, "_prepare_preserved_var_resize_image",
+                                 side_effect=prepare_var), \
+                    patch.object(toolkit, "_read_partition_file_rpc", return_value=resize), \
+                    patch.object(toolkit, "_stat_partition_file_rpc", return_value={
+                        "mode": 0o100755, "uid": 0, "gid": 0}), \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", side_effect=reset):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = toolkit.flash_update(root / "release", True, port="1-1",
+                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE")
+            self.assertEqual(events, ["prepare-var", "write-rootfsA", "write-rootfsB",
+                                      "write-services", "write-skills", "write-var", "reset"])
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertEqual(saved["first_boot_resize_rearm"]["method"], "full-var-image")
             self.assertEqual(saved["first_boot_resize_rearm"]["status"], "verified")
 
 
