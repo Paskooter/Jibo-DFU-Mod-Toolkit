@@ -50,7 +50,7 @@ EARLY_SKILL_CLIENTS = tuple(
 )
 
 
-def patch_manifest(rootfs_profiles=None):
+def patch_manifest():
     """Return known OTA file paths; the extra client copies are probed if present."""
     files = []
     for partition in ("rootfsA", "rootfsB"):
@@ -127,7 +127,7 @@ def plan(dfu_util, port, names, quiet=False):
             optional.add(("skills", base + "/lib/region_config.json"))
             optional.add(("skills", base + "/lib/http/node.js"))
         optional_found = set()
-        targets = patch_manifest(rootfs_profiles)
+        targets = patch_manifest()
         for index, (partition, path, kind) in enumerate(targets, 1):
             if quiet:
                 filled = int(20 * (index - 1) / len(targets))
@@ -220,9 +220,9 @@ def _rootfs_profile(dfu_util, port, partition, directory, quiet=False):
     current_client = client_digest in (STOCK_SHA256["client"], PATCHED_SHA256["client"])
     early_client = client_digest in (STOCK_33_SHA256["client"], PATCHED_33_SHA256["client"])
     if digest in (STOCK_SHA256["downloader"], PATCHED_SHA256["downloader"]):
-        profile = "13.0" if current_client else "3.3" if early_client else None
+        profile = "later stock client" if current_client else "earlier stock client" if early_client else None
     elif digest in (STOCK_54_SHA256["downloader"], PATCHED_54_SHA256["downloader"]):
-        profile = "5.4" if current_client else None
+        profile = "earlier stock downloader" if current_client else None
     else:
         profile = None
     if profile is None:

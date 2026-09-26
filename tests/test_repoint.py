@@ -22,8 +22,8 @@ class RepointTests(unittest.TestCase):
         self.assertIn(("services", repoint.SERVICE_CLIENT + "/lib/http/node.js", "client"), files)
         self.assertIn(("skills", repoint.OOBE_CLIENT + "/lib/region_config.json", "region"), files)
 
-    def test_54_layout_probes_later_nested_rootfs_clients(self):
-        files = repoint.patch_manifest({"rootfsA": "5.4", "rootfsB": "5.4"})
+    def test_manifest_probes_later_nested_rootfs_clients(self):
+        files = repoint.patch_manifest()
         self.assertEqual(len(files), 28)
         self.assertIn(("rootfsA", repoint.ROOT_CLIENTS[1] + "/lib/http/node.js", "client"), files)
         self.assertEqual(repoint._pinned_output("downloader", repoint.STOCK_54_SHA256["downloader"]),
