@@ -135,7 +135,9 @@ class UpdatePackageTests(unittest.TestCase):
             transfers = []
             download_sizes = {}
 
-            def transfer(argv, timeout, label, download_size=None):
+            def transfer(argv, timeout, label, download_size=None,
+                         allow_progress_completion=False):
+                self.assertTrue(allow_progress_completion)
                 transfers.append(argv)
                 download_sizes[argv[argv.index("-a") + 1]] = download_size
 
@@ -235,7 +237,9 @@ class UpdatePackageTests(unittest.TestCase):
             written = {}
             download_sizes = {}
 
-            def transfer(argv, timeout, label, download_size=None):
+            def transfer(argv, timeout, label, download_size=None,
+                         allow_progress_completion=False):
+                self.assertTrue(allow_progress_completion)
                 if "-D" in argv:
                     alternative = argv[argv.index("-a") + 1]
                     written[alternative] = Path(argv[argv.index("-D") + 1]).read_bytes()

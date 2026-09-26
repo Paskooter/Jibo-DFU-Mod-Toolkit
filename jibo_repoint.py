@@ -1,4 +1,4 @@
-"""Hash-pinned, in-place first-OTA bridge for stock Jibo Release 13.0.0.
+"""Hash-pinned, in-place first-OTA bridge for recognized stock Jibo images.
 
 This is intentionally an experimental DFU workflow, not a complete firmware
 repoint. The OTA image supplies the permanent trust store and all services.
@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -23,8 +24,15 @@ STOCK_SHA256 = {
     "region": "f1514e59a030b87da7aac8ac5e9b56f5fc0e4dd034e12ad2f1eadb1cca904bcb",
     "client": "c3511dbc55c8a9ec3ac74a675a1245306b55c67fab65a3ecfe896ed01689997a",
     "downloader": "33f6db1496baa3abd506a2ba9dad9b5cdf7567341e3e292e42cb3ed6f016003c",
-    "backup": "d17fbf4150dee58a988fe5ee72071d4515ef74f29876215bf66de2601e33e522",
-    "restore": "b5e7ec06c4ea72b641b8738b789a389575e250b152b3b6ecddd952d593e05ee6",
+}
+
+# Hashes are from the official 5.4.0 EFT and 5.4.2 production images. The
+# common client, region and CA files are byte-identical to Release 13.0.0.
+STOCK_54_SHA256 = {
+    "downloader": "447a2a5598ec13ea46367207ea594efd6774d785c97d5322200e5809d6d9acb2",
+}
+STOCK_33_SHA256 = {
+    "client": "81533de391dfba88fc40bedfc63ea30a77f8d032f9a8c23196db4cb3a44fa89b",
 }
 
 # Each path is inside its named partition, not its runtime mount point.
@@ -35,22 +43,30 @@ ROOT_CLIENTS = (
 )
 SERVICE_CLIENT = "/bin/jibo-ssm/node_modules/@jibo/jibo-server-client"
 OOBE_CLIENT = "/jibo/Jibo/Skills/oobe-config/node_modules/@jibo/jibo-server-client"
+EARLY_SKILL_CLIENTS = tuple(
+    "/jibo/Jibo/Skills/@be/be/node_modules/" + nested + "@jibo/jibo-server-client"
+    for nested in ("", "@be/ifttt/node_modules/", "@be/settings/node_modules/",
+                   "@be/surprises-ota/node_modules/")
+)
 
 
-def patch_manifest():
-    """Return all existing files that must be patched on both rootfs slots."""
+def patch_manifest(rootfs_profiles=None):
+    """Return the exact paths required by the detected rootfs layouts."""
+    rootfs_profiles = rootfs_profiles or {"rootfsA": "13.0", "rootfsB": "13.0"}
     files = []
     for partition in ("rootfsA", "rootfsB"):
         files.append((partition, CA_PATH, "ca"))
-        for base in ROOT_CLIENTS:
+        clients = ROOT_CLIENTS if rootfs_profiles[partition] == "13.0" else ROOT_CLIENTS[:1]
+        for base in clients:
             files.append((partition, base + "/lib/region_config.json", "region"))
             files.append((partition, base + "/lib/http/node.js", "client"))
         files.append((partition, "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js", "downloader"))
     for partition, base in (("services", SERVICE_CLIENT), ("skills", OOBE_CLIENT)):
         files.append((partition, base + "/lib/region_config.json", "region"))
         files.append((partition, base + "/lib/http/node.js", "client"))
-    files.extend((("services", "/bin/jibo-system-backup", "backup"),
-                  ("services", "/bin/jibo-system-restore", "restore")))
+    for base in EARLY_SKILL_CLIENTS:
+        files.append(("skills", base + "/lib/region_config.json", "region"))
+        files.append(("skills", base + "/lib/http/node.js", "client"))
     return tuple(files)
 
 
@@ -74,25 +90,13 @@ def patched_bytes(kind, source):
     if kind == "client":
         return _replace_once(source,
             b"new https.Agent({rejectUnauthorized: true});",
-            b'new https.Agent({rejectUnauthorized: true, ca: fs.readFileSync("' +
+            b'new https.Agent({rejectUnauthorized: true, ca: require("fs").readFileSync("' +
             CA_PATH.encode() + b'")});')
     if kind == "downloader":
         return _replace_once(source,
             b"http.get(argv.url, function(res) {",
-            b'http.get(argv.url.startsWith("https:") ? Object.assign(require("url").parse(argv.url), {ca: fs.readFileSync("' +
+            b'http.get(argv.url.startsWith("https:") && /(^|\\.)jibo\\.io$/.test(require("url").parse(argv.url).hostname || "") ? Object.assign(require("url").parse(argv.url), {ca: fs.readFileSync("' +
             CA_PATH.encode() + b'")}) : argv.url, function(res) {')
-    if kind == "backup":
-        source = _replace_once(source, b"            method: 'PUT',\n",
-            b"            method: 'PUT',\n            ca: fs.readFileSync('" + CA_PATH.encode() + b"'),\n")
-        return _replace_once(source,
-            b'        throw new Error("Missing argument: keydir not specified");\n    }',
-            b'        throw new Error("Missing argument: keydir not specified");\n    }\n'
-            b'    if (!fs.existsSync(argv.keydir)) fs.mkdirSync(argv.keydir, 0o700);')
-    if kind == "restore":
-        return _replace_once(source,
-            b"https.get(downloadUrl, callbackDownload)",
-            b"https.get(Object.assign(require('url').parse(downloadUrl), {ca: fs.readFileSync('" +
-            CA_PATH.encode() + b"')}), callbackDownload)")
     raise dfu.DfuError("Unknown repoint patch kind: " + kind)
 
 
@@ -100,42 +104,123 @@ def _sha(content):
     return hashlib.sha256(content).hexdigest()
 
 
-def plan(dfu_util, port, names):
-    """Read all targets and reject an unknown build before any device write."""
+def plan(dfu_util, port, names, quiet=False):
+    """Detect known layouts and reject an unknown build before any device write."""
     if dfu.FILE_LEVEL_MARKER_V2 not in names:
-        raise dfu.DfuError("Stock 13.0.0 uses multi-block direct pointers; repoint requires the opt-in jibo-file-v2 loader.")
+        raise dfu.DfuError("Repoint requires the opt-in jibo-file-v2 loader for stock client scripts.")
     changes = []
     with tempfile.TemporaryDirectory(prefix="jibo-repoint-read-") as directory:
-        for partition, path, kind in patch_manifest():
-            source = dfu._read_partition_file_rpc(dfu_util, port, partition, path, directory)
+        rootfs_profiles = {}
+        observed = {}
+        for partition in ("rootfsA", "rootfsB"):
+            profile, source, client = _rootfs_profile(dfu_util, port, partition, directory, quiet)
+            rootfs_profiles[partition] = profile
+            observed[(partition, "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js")] = source
+            observed[(partition, ROOT_CLIENTS[0] + "/lib/http/node.js")] = client
+        optional = set()
+        for base in EARLY_SKILL_CLIENTS:
+            optional.add(("skills", base + "/lib/region_config.json"))
+            optional.add(("skills", base + "/lib/http/node.js"))
+        optional_found = set()
+        targets = patch_manifest(rootfs_profiles)
+        for index, (partition, path, kind) in enumerate(targets, 1):
+            if quiet:
+                filled = int(20 * (index - 1) / len(targets))
+                print("\rChecking OTA files [{}{}] {}/{}".format(
+                    "#" * filled, "-" * (20 - filled), index - 1, len(targets)),
+                    end="", file=sys.stderr, flush=True)
+            source = observed.get((partition, path))
+            if source is None:
+                try:
+                    source = dfu._read_partition_file_rpc(dfu_util, port, partition, path, directory,
+                                                          quiet=quiet)
+                except dfu.FileRpcStatusError as exc:
+                    if exc.status == 2 and (partition, path) in optional:
+                        continue
+                    raise
+            if (partition, path) in optional:
+                optional_found.add((partition, path))
             current_sha = _sha(source)
-            if current_sha == STOCK_SHA256[kind]:
+            output_sha = _pinned_output(kind, current_sha)
+            if output_sha is not None:
                 candidate = patched_bytes(kind, source)
-                if _sha(candidate) != PATCHED_SHA256[kind]:
+                if _sha(candidate) != output_sha:
                     raise dfu.DfuError("The {} transform did not match its pinned output at {}:{}; no writes attempted."
                                        .format(kind, partition, path))
-                stat = dfu._stat_partition_file_rpc(dfu_util, port, partition, path, directory)
+                stat = dfu._stat_partition_file_rpc(dfu_util, port, partition, path, directory,
+                                                    quiet=quiet)
                 if len(candidate) > stat["allocated_bytes"]:
                     raise dfu.DfuError("{} would need {} bytes but has only {} allocated; no writes attempted."
                                        .format(path, len(candidate), stat["allocated_bytes"]))
                 changes.append((partition, path, candidate))
-            elif current_sha == PATCHED_SHA256[kind]:
+            elif _already_patched(kind, current_sha):
                 continue
             else:
                 raise dfu.DfuError("Unsupported {} file at {}:{} (SHA-256 {}). No writes attempted."
                                    .format(kind, partition, path, current_sha))
-    return changes
+        if quiet:
+            print("\rChecking OTA files [{}] {}/{}".format(
+                "#" * 20, len(targets), len(targets)), file=sys.stderr, flush=True)
+        for base in EARLY_SKILL_CLIENTS:
+            pair = {("skills", base + "/lib/region_config.json"),
+                    ("skills", base + "/lib/http/node.js")}
+            if len(pair & optional_found) == 1:
+                raise dfu.DfuError("An archived skills client is only partly present at {}. No writes attempted."
+                                   .format(base))
+    return {"changes": changes, "rootfs_profiles": rootfs_profiles}
 
 
 # Exact output hashes were verified offline against the official 13.0.0 images.
 PATCHED_SHA256 = {
     "ca": CA_SHA256,
     "region": "d0a5b081b05a0ff717e4e57623505d88b83fce053b438f5b5e364a3e534d278e",
-    "client": "fa2ae92ca9b2113129017c29b592e13e3376db326cb2e5d083642fd60633d935",
-    "downloader": "e71832017a349e898bb32739b645ce8ccfdbc753bac086e8dfc2d71731ef0ee5",
-    "backup": "77a8bca57d3c4a70ee15ef4d874cef3ec1329219eed4485f3509d3ee1b790a2f",
-    "restore": "3b210563f128a9c8f8834be717b4b5605bd3aa61f39a0d1c2b47073f2629c5ed",
+    "client": "108afb13770d68d66595c13447df9ab2f6354a7ab02c49b657ec663b8b10e987",
+    "downloader": "71716f3a0e9f5f17e30db67193cb46776ca2c4e0cc2f1a32d0540bd8de497338",
 }
+PATCHED_54_SHA256 = {
+    "downloader": "bc8342a66662d981067a6a6688ac6147c0bca628cd37fc9a61161139acae2ed0",
+}
+PATCHED_33_SHA256 = {
+    "client": "af2f0c5ca122ff9c39fba6aa2630d22f649402842767e1614eea6cf14b0fd20d",
+}
+
+
+def _pinned_output(kind, stock_hash):
+    if stock_hash == STOCK_SHA256[kind]:
+        return PATCHED_SHA256[kind]
+    if stock_hash == STOCK_54_SHA256.get(kind):
+        return PATCHED_54_SHA256[kind]
+    if stock_hash == STOCK_33_SHA256.get(kind):
+        return PATCHED_33_SHA256[kind]
+    return None
+
+
+def _already_patched(kind, current_hash):
+    return current_hash in (PATCHED_SHA256[kind], PATCHED_54_SHA256.get(kind),
+                            PATCHED_33_SHA256.get(kind))
+
+
+def _rootfs_profile(dfu_util, port, partition, directory, quiet=False):
+    path = "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js"
+    source = dfu._read_partition_file_rpc(dfu_util, port, partition, path, directory,
+                                          quiet=quiet)
+    digest = _sha(source)
+    client_path = ROOT_CLIENTS[0] + "/lib/http/node.js"
+    client = dfu._read_partition_file_rpc(dfu_util, port, partition, client_path, directory,
+                                          quiet=quiet)
+    client_digest = _sha(client)
+    current_client = client_digest in (STOCK_SHA256["client"], PATCHED_SHA256["client"])
+    early_client = client_digest in (STOCK_33_SHA256["client"], PATCHED_33_SHA256["client"])
+    if digest in (STOCK_SHA256["downloader"], PATCHED_SHA256["downloader"]):
+        profile = "13.0" if current_client else "3.3" if early_client else None
+    elif digest in (STOCK_54_SHA256["downloader"], PATCHED_54_SHA256["downloader"]):
+        profile = "5.4" if current_client else None
+    else:
+        profile = None
+    if profile is None:
+        raise dfu.DfuError("Unsupported OTA client/downloader pair in {} (SHA-256 {}, {}). No writes attempted."
+                           .format(partition, client_digest, digest))
+    return profile, source, client
 
 
 def _existing_credentials(dfu_util, port):
@@ -144,8 +229,8 @@ def _existing_credentials(dfu_util, port):
         with tempfile.TemporaryDirectory(prefix="jibo-repoint-credentials-") as directory:
             payload = dfu._read_partition_file_rpc(dfu_util, port, "var",
                                                    "/jibo/credentials.json", directory)
-    except dfu.DfuError as exc:
-        if "status 2" in str(exc):
+    except dfu.FileRpcStatusError as exc:
+        if exc.status == 2:
             return None
         raise
     try:
@@ -192,23 +277,33 @@ def _adopt_existing(credentials, claim_code=None):
     return "Existing robot credentials adopted" + (" and linked to your account." if claim_code else "; claim it in the portal if needed.")
 
 
-def repoint_jibo_io(port=None, dfu_util=None, out=None, confirmation=None, claim_code=None, dry_run=False):
+def repoint_jibo_io(port=None, dfu_util=None, out=None, confirmation=None,
+                   claim_code=None, dry_run=False, adopt_existing=False, guided=False):
     dfu_util = dfu_util or dfu.tool("dfu-util")
     partitions = ("rootfsA", "rootfsB", "services", "skills", "var")
     port, names, _, _ = dfu._file_loader_context(port, dfu_util, partitions, not dry_run)
-    changes = plan(dfu_util, port, names)
-    credentials = _existing_credentials(dfu_util, port)
+    if guided:
+        print("Checking installed OTA files and available space…", flush=True)
+    try:
+        preflight = plan(dfu_util, port, names, quiet=guided)
+    except Exception:
+        if guided:
+            print(file=sys.stderr, flush=True)
+        raise
+    changes = preflight["changes"]
+    credentials = _existing_credentials(dfu_util, port) if adopt_existing or claim_code else None
     if claim_code and credentials is None:
         raise dfu.DfuError("This robot has no existing credentials; use the portal QR/OOBE flow instead of a claim code.")
     summary = {"status": "plan" if dry_run else "pending", "files_to_change": len(changes),
-               "existing_credentials": credentials is not None,
+               "adoption_requested": bool(adopt_existing or claim_code),
+               "rootfs_profiles": preflight["rootfs_profiles"],
                "paths": [{"partition": part, "path": path, "sha256": _sha(content)}
                          for part, path, content in changes]}
     if dry_run:
         return summary
     if changes:
         transaction = dfu.FileTransaction(tuple(dict.fromkeys(part for part, _, _ in changes)),
-                                          port, dfu_util, out)
+                                          port, dfu_util, out, guided=guided)
         for part, path, content in changes:
             transaction.replace(part, path, content)
         result = transaction.commit(confirmation)
@@ -216,10 +311,11 @@ def repoint_jibo_io(port=None, dfu_util=None, out=None, confirmation=None, claim
             return result
         summary["transaction"] = result["operation_directory"]
     summary["status"] = "repointed-for-ota"
-    try:
-        summary["adoption"] = _adopt_existing(credentials, claim_code)
-    except dfu.DfuError as exc:
-        raise dfu.DfuError("{} Transaction record: {}".format(
-            exc, summary.get("transaction", "no new writes"))) from exc
+    if adopt_existing or claim_code:
+        try:
+            summary["adoption"] = _adopt_existing(credentials, claim_code)
+        except dfu.DfuError as exc:
+            raise dfu.DfuError("{} Transaction record: {}".format(
+                exc, summary.get("transaction", "no new writes"))) from exc
     summary["next_step"] = "Exit DFU, complete QR setup if needed, then install the jibo.io OTA immediately; this bridge alone is not a complete migration."
     return summary

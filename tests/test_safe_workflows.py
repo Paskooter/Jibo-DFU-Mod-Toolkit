@@ -80,6 +80,19 @@ class SafeWorkflowTests(unittest.TestCase):
                                 timeout=5, label="Selecting file for read", download_size=46,
                                 allow_progress_completion=True)
 
+    def test_large_partition_accepts_exact_dfu_util_09_completion(self):
+        size = 1_048_576_000
+        output = ("Download [=========================] 100%   1048576000 bytes\n"
+                  "Download done.\n"
+                  "state(7) = dfuMANIFEST, status(0) = No error condition is present\n"
+                  "state(2) = dfuIDLE, status(0) = No error condition is present\n"
+                  "Done!\n")
+        self.assertEqual(j._dfu_download_final_count(output, True), size)
+        with patch.object(j.sys, "stderr", io.StringIO()):
+            j.run_with_progress([sys.executable, "-c", "print(" + repr(output) + ", end='')"],
+                                timeout=5, label="Writing rootfsA", download_size=size,
+                                allow_progress_completion=True)
+
     def test_small_mailbox_rejects_short_or_unfinished_completion(self):
         output = ("Download [=========================] 100%           45 bytes\n"
                   "Download done.\nstate(2) = dfuIDLE, status(0) = No error condition is present\nDone!\n")

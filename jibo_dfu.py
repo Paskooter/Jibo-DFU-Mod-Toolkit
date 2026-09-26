@@ -79,6 +79,14 @@ class DfuError(Exception):
     pass
 
 
+class FileRpcStatusError(DfuError):
+    """A valid file-mailbox response rejected the request with a status code."""
+
+    def __init__(self, status):
+        self.status = status
+        super().__init__("The file mailbox rejected the request with status {}.".format(status))
+
+
 def devices(root=Path("/sys/bus/usb/devices")):
     found = []
     for path in sorted(root.glob("*")):
@@ -892,7 +900,8 @@ def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
                 run_with_progress([dfu_util, "-d", "0955:701a", "--path", port,
                                    "-a", name, "-D", entry["image"]],
                                   timeout=14400, label="Restoring " + name,
-                                  download_size=size)
+                                  download_size=size,
+                                  allow_progress_completion=True)
                 with tempfile.TemporaryDirectory(prefix="restore-readback-", dir=directory) as temp:
                     readback = Path(temp) / "partition.img"
                     actual = (_upload_var(dfu_util, port, readback) if name == "var" else
@@ -1139,6 +1148,7 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                      "-a", chunk["name"], "-D", str(candidate_piece)],
                     timeout=14400,
                     download_size=chunk["size_bytes"],
+                    allow_progress_completion=True,
                     label="Writing skills chunk {}/{} ({})".format(
                         index, len(chunks), chunk["name"]))
                 readback = temporary / "readback.img"
@@ -1448,7 +1458,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
         run_with_progress(
             [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-D", str(candidate)],
             timeout=900, label="Writing the edited 500 MiB var partition over USB",
-            download_size=EXPECTED_VAR_SIZE)
+            download_size=EXPECTED_VAR_SIZE, allow_progress_completion=True)
         readback = Path(directory) / "readback-var.img"
         readback_hash = _upload_var(dfu_util, port, readback)
         record["readback_sha256"] = readback_hash
@@ -1574,6 +1584,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
                          "-D", str(candidate)], timeout=14400,
                         download_size=capacities[name],
+                        allow_progress_completion=True,
                         label="Writing {} ({} bytes)".format(name, capacities[name]))
                     with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
                         readback = Path(readback_dir) / "partition.img"
@@ -1725,7 +1736,7 @@ def _decode_file_response(response, request_id):
     if magic != FILE_RPC_RESPONSE_MAGIC or response_id != request_id:
         raise DfuError("The file mailbox response does not match the current request.")
     if status != 0:
-        raise DfuError("The file mailbox rejected the request with status {}.".format(status))
+        raise FileRpcStatusError(status)
     if data_size != len(data) or data_size > FILE_LEVEL_MAX_BYTES:
         raise DfuError("The file mailbox response has an invalid byte count.")
     if hashlib.sha256(data).digest() != digest:
@@ -2102,6 +2113,13 @@ def write_partition_file_live(partition, path, content, port=None, dfu_util=None
     return transaction.commit(confirmation)
 
 
+def repoint_jibo_io(port=None, dfu_util=None, out=None, confirmation=None,
+                   claim_code=None, dry_run=False, adopt_existing=False, guided=False):
+    import jibo_repoint
+    return jibo_repoint.repoint_jibo_io(
+        port, dfu_util, out, confirmation, claim_code, dry_run, adopt_existing, guided)
+
+
 def set_mode_file_live(mode, partition="var", port=None, dfu_util=None,
                        out=None, confirmation=None, guided=False):
     if mode not in images.MODE_VALUES:
@@ -2368,12 +2386,14 @@ def main(argv=None):
     _add_operation_argument(wifi_file)
     wifi_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
     repoint = sub.add_parser("repoint-jibo-io",
-                             help="Prepare stock Release 13.0.0 for its first jibo.io OTA using the experimental v2 file loader")
+                             help="Prepare a recognized stock image for its first jibo.io OTA using the experimental v2 file loader")
     _add_device_arguments(repoint)
     _add_dfu_argument(repoint)
     _add_operation_argument(repoint)
     repoint.add_argument("--dry-run", action="store_true", help="Read and validate every stock file without writing")
     repoint.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
+    repoint.add_argument("--adopt-existing", action="store_true",
+                         help="After verified file writes, send existing robot credentials to jibo.io over HTTPS")
     repoint.add_argument("--claim-code-stdin", action="store_true",
                          help="Read one portal claim code from stdin, without exposing it in process arguments")
     write = sub.add_parser("write-var", help="Back up var, write an edited image, and verify its readback")
@@ -2509,15 +2529,15 @@ def main(argv=None):
                 True if args.yes else None)
             password = None
         elif args.command == "repoint-jibo-io":
-            import jibo_repoint
             claim_code = None
             if args.claim_code_stdin:
                 claim_code = sys.stdin.readline(256).strip()
                 if not re.fullmatch(r"[A-Za-z0-9_-]{43}", claim_code):
                     raise DfuError("The portal claim code is missing or invalid.")
-            result = jibo_repoint.repoint_jibo_io(
+            result = repoint_jibo_io(
                 args.port, tool("dfu-util", args.dfu_util), args.operation_dir,
-                True if args.yes else None, claim_code, args.dry_run)
+                True if args.yes else None, claim_code, args.dry_run,
+                args.adopt_existing or args.claim_code_stdin)
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
                       for path in _update_candidates(args.directory)]

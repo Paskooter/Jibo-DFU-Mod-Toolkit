@@ -13,14 +13,21 @@ import jibo_repoint as repoint
 class RepointTests(unittest.TestCase):
     def test_manifest_covers_both_slots_and_separate_services(self):
         files = repoint.patch_manifest()
-        self.assertEqual(len(files), 22)
+        self.assertEqual(len(files), 28)
         self.assertEqual(len({(part, path) for part, path, _ in files}), len(files))
         for part in ("rootfsA", "rootfsB"):
             self.assertIn((part, repoint.CA_PATH, "ca"), files)
             self.assertIn((part, "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js",
                            "downloader"), files)
-        self.assertIn(("services", "/bin/jibo-system-backup", "backup"), files)
+        self.assertIn(("services", repoint.SERVICE_CLIENT + "/lib/http/node.js", "client"), files)
         self.assertIn(("skills", repoint.OOBE_CLIENT + "/lib/region_config.json", "region"), files)
+
+    def test_54_layout_omits_later_nested_rootfs_clients(self):
+        files = repoint.patch_manifest({"rootfsA": "5.4", "rootfsB": "5.4"})
+        self.assertEqual(len(files), 20)
+        self.assertNotIn(("rootfsA", repoint.ROOT_CLIENTS[1] + "/lib/http/node.js", "client"), files)
+        self.assertEqual(repoint._pinned_output("downloader", repoint.STOCK_54_SHA256["downloader"]),
+                         repoint.PATCHED_54_SHA256["downloader"])
 
     def test_public_root_is_pinned(self):
         self.assertEqual(hashlib.sha256(repoint.CA_ASSET.read_bytes()).hexdigest(),
@@ -29,22 +36,17 @@ class RepointTests(unittest.TestCase):
     def test_transforms_keep_tls_verification_enabled(self):
         region = b"jibo.com/" * 5
         self.assertEqual(repoint.patched_bytes("region", region), b"jibo.io/" * 5)
-        client = b"var fs = require('fs');\nnew https.Agent({rejectUnauthorized: true});"
+        client = b"new https.Agent({rejectUnauthorized: true});"
         result = repoint.patched_bytes("client", client)
         self.assertIn(b"rejectUnauthorized: true", result)
+        self.assertIn(b'require("fs").readFileSync', result)
         self.assertIn(repoint.CA_PATH.encode(), result)
         self.assertNotIn(b"rejectUnauthorized: false", result)
         downloader = b"let req = http.get(argv.url, function(res) {"
         result = repoint.patched_bytes("downloader", downloader)
         self.assertIn(b"fs.readFileSync", result)
         self.assertIn(b"argv.url.startsWith", result)
-        backup = (b'        throw new Error("Missing argument: keydir not specified");\n    }'
-                  b"\n            method: 'PUT',\n")
-        result = repoint.patched_bytes("backup", backup)
-        self.assertIn(b"fs.mkdirSync(argv.keydir, 0o700)", result)
-        self.assertIn(b"ca: fs.readFileSync", result)
-        restore = repoint.patched_bytes("restore", b"https.get(downloadUrl, callbackDownload)")
-        self.assertIn(b"ca: fs.readFileSync", restore)
+        self.assertIn(b"jibo\\.io", result)
 
     def test_v1_cannot_repoint_stock_or_write_multiblock_file(self):
         with self.assertRaisesRegex(dfu.DfuError, "jibo-file-v2"):
@@ -57,7 +59,9 @@ class RepointTests(unittest.TestCase):
                 transaction.commit(True)
 
     def test_unknown_stock_file_aborts_before_stat_or_write(self):
-        with patch.object(dfu, "_read_partition_file_rpc", return_value=b"unknown"), \
+        with patch.object(repoint, "_rootfs_profile", return_value=("13.0", b"known", b"known")), \
+                patch.object(repoint, "patch_manifest", return_value=(("rootfsA", "/ca", "ca"),)), \
+                patch.object(dfu, "_read_partition_file_rpc", return_value=b"unknown"), \
                 patch.object(dfu, "_stat_partition_file_rpc") as stat, \
                 patch.object(dfu, "_file_request_transfer") as transfer:
             with self.assertRaisesRegex(dfu.DfuError, "Unsupported ca file"):
@@ -67,13 +71,29 @@ class RepointTests(unittest.TestCase):
 
     def test_transform_must_match_pinned_output_before_write(self):
         stock = b"jibo.com/" * 5
-        with patch.object(repoint, "patch_manifest", return_value=(("rootfsA", "/region", "region"),)), \
+        with patch.object(repoint, "_rootfs_profile", return_value=("13.0", b"known", b"known")), \
+                patch.object(repoint, "patch_manifest", return_value=(("rootfsA", "/region", "region"),)), \
                 patch.dict(repoint.STOCK_SHA256, {"region": hashlib.sha256(stock).hexdigest()}), \
                 patch.object(dfu, "_read_partition_file_rpc", return_value=stock), \
                 patch.object(dfu, "_stat_partition_file_rpc") as stat:
             with self.assertRaisesRegex(dfu.DfuError, "pinned output"):
                 repoint.plan("dfu-util", "1-2", [dfu.FILE_LEVEL_MARKER_V2])
         stat.assert_not_called()
+
+    def test_partial_optional_client_aborts_before_write(self):
+        base = repoint.EARLY_SKILL_CLIENTS[0]
+        paths = (("skills", base + "/lib/region_config.json", "region"),
+                 ("skills", base + "/lib/http/node.js", "client"))
+        with patch.object(repoint, "_rootfs_profile", return_value=("13.0", b"known", b"known")), \
+                patch.object(repoint, "patch_manifest", return_value=paths), \
+                patch.object(dfu, "_read_partition_file_rpc",
+                             side_effect=(b"patched", dfu.FileRpcStatusError(2))), \
+                patch.object(repoint, "_pinned_output", return_value=None), \
+                patch.object(repoint, "_already_patched", return_value=True), \
+                patch.object(dfu, "_file_request_transfer") as transfer:
+            with self.assertRaisesRegex(dfu.DfuError, "only partly present"):
+                repoint.plan("dfu-util", "1-2", [dfu.FILE_LEVEL_MARKER_V2])
+        transfer.assert_not_called()
 
     def test_existing_credentials_are_validated_and_adopted_only_to_jibo_io(self):
         credentials = {"accessKeyId": "A" * 20, "secretAccessKey": "s" * 40,
@@ -94,6 +114,18 @@ class RepointTests(unittest.TestCase):
                           return_value=json.dumps({**credentials, "region": "evil.example"}).encode()):
             with self.assertRaisesRegex(dfu.DfuError, "not an approved"):
                 repoint._existing_credentials("dfu-util", "1-2")
+
+    def test_repoint_does_not_access_credentials_without_adoption_request(self):
+        with patch.object(dfu, "_file_loader_context", return_value=(
+                "1-2", [dfu.FILE_LEVEL_MARKER_V2], "serial-sha256:robot", "")), \
+                patch.object(repoint, "plan", return_value={"changes": [], "rootfs_profiles": {}}), \
+                patch.object(repoint, "_existing_credentials") as credentials, \
+                patch.object(repoint, "_adopt_existing") as adopt:
+            result = repoint.repoint_jibo_io(port="1-2", dfu_util="dfu-util")
+        self.assertEqual(result["status"], "repointed-for-ota")
+        self.assertFalse(result["adoption_requested"])
+        credentials.assert_not_called()
+        adopt.assert_not_called()
 
 
 if __name__ == "__main__":

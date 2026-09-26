@@ -83,10 +83,11 @@ Jibo's archived `PlatformTeam/system-manager` starts `wpa_supplicant` using `/va
 
 For advanced file inspection, `stat-partition-file /jibo/mode.json --partition var` reads the file's UID, GID, permissions, and inode. `set-mode` and `configure-wifi` use the quick file path when the active loader advertises it; `set-mode-file` and `configure-wifi-file` require that path explicitly.
 
-For a stock Release 13.0.0 robot that must reach jibo.io for its first OTA,
+For a recognized stock robot that must reach jibo.io for its first OTA,
 see the [experimental DFU repoint guide](docs/JIBO-IO-DFU-REPOINT.md). This
 uses the separate, unvalidated `jibo-file-v2` candidate and is not part of
-the pinned loader or the ordinary menu. The repoint is only a bridge: install
+the pinned loader. When v2 is active, **More tools** offers a read-only
+compatibility check and the guided OTA preparation action. The repoint is only a bridge: install
 the offered OTA before treating the robot as fully migrated.
 
 For scripts, the corresponding commands are:

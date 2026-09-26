@@ -62,8 +62,8 @@ supported feature bits and a clean superblock/journal. The writer bypasses
 ext4's journal entirely. It writes the existing data blocks and inode-size field directly
 with checked block I/O, preserving the rest of the inode; host readback
 checks content and metadata after each write. This has a power-loss window
-between the data and inode writes. Recover by restoring the transaction's
-pre-operation partition baseline. The host transaction saves or reuses one
+between the data and inode writes. Recover by restoring an explicitly saved
+partition image or reflashing the matching official system image. The host transaction saves or reuses one
 verified `var` baseline if `var` is touched. Other partitions are backed up
 only when explicitly selected with `backup-partitions`.
 
