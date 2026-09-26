@@ -79,6 +79,22 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.assertIn("unrecognized arguments: --bundle", errors.getvalue())
 
+    def test_flash_update_cli_passes_resume_manifest_to_backend(self):
+        manifest = self.root / "update-manifest.json"
+        manifest.write_text("{}")
+        with patch.object(j, "tool", return_value="/usr/bin/dfu-util"), \
+                patch.object(j, "flash_update", return_value={"status": "verified"}) as flash, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(j.main([
+                "flash-update", str(self.root / "package.tar.bz2"), "--preserve-var",
+                "--port", "1-1", "--resume-from", str(manifest),
+                "--yes",
+            ]), 0)
+        flash.assert_called_once_with(
+            Path(self.root / "package.tar.bz2"), True, "1-1", "/usr/bin/dfu-util",
+            None, "FLASH UPDATE", False, manifest,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

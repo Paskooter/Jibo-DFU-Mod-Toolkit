@@ -64,6 +64,197 @@ def add_image_files(archive, prefix="release/flash_jibo/output/images", skip=())
 
 
 class UpdatePackageTests(unittest.TestCase):
+    def _resume_fixture(self, root, first_candidate_hash=None):
+        package_path = root / "jibo-13.0.0-update.tar.bz2"
+        with tarfile.open(package_path, "w:bz2") as archive:
+            add_image_files(archive)
+        contents = {"rootfsA": b"A001", "rootfsB": b"B001",
+                    "services": b"S001", "skills": b"K001"}
+        candidates = {}
+        hashes = {}
+        for name, payload in contents.items():
+            candidates[name] = root / (name + ".prepared")
+            candidates[name].write_bytes(payload)
+            hashes[name] = hashlib.sha256(payload).hexdigest()
+        var_image = root / "var.img"
+        var_image.write_bytes(b"safe-var")
+        var_hash = hashlib.sha256(b"safe-var").hexdigest()
+        backup_manifest = root / "backup-manifest.json"
+        backup_manifest.write_text(json.dumps({
+            "schema": 1, "kind": "jibo-var-backup", "partition": "var",
+            "size_bytes": 8, "sha256": var_hash, "image": var_image.name,
+            "device_tag": "usb-identity-unavailable",
+        }))
+        capacities = {"rootfsA": 4, "rootfsB": 4, "services": 4,
+                      "skills": 4, "var": 8}
+        partitions = [
+            {"name": name, "bytes": capacities[name]}
+            for name in ("rootfsA", "rootfsB", "services", "skills")
+        ]
+        manifest = root / "old-update-manifest.json"
+        first_hash = first_candidate_hash or hashes["rootfsA"]
+        manifest.write_text(json.dumps({
+            "schema": 1, "kind": "jibo-full-flash-update",
+            "created_utc": "2026-09-25T00:00:00Z", "status": "failed",
+            "package": str(package_path.resolve()), "version": package_path.name,
+            "usb_port": "1-1", "var_policy": "preserve current configuration",
+            "partitions": partitions,
+            "backups": {"var": {"status": "backup complete",
+                                  "image": str(var_image), "manifest": str(backup_manifest),
+                                  "size_bytes": 8, "sha256": var_hash}},
+            "writes": [{"partition": "rootfsA", "candidate_sha256": first_hash,
+                        "size_bytes": 4, "status": "write started"}],
+        }))
+        package = updates.validate_package(package_path)
+        names = ["rootfsA", "rootfsB", "services", "skills", "var", toolkit.MARKER]
+        alt_output = '\n'.join('Found DFU: alt={}, name="{}"'.format(i, name)
+                               for i, name in enumerate(names))
+        operation = root / "resume-operation"
+        operation.mkdir()
+        return (package_path, package, candidates, hashes, var_hash, capacities,
+                manifest, names, alt_output, operation)
+
+    def _patch_resume_context(self, package, candidates, capacities, names,
+                              alt_output, operation, var_hash, upload_side_effect=None):
+        return [
+            patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]),
+            patch.object(toolkit.updates, "validate_package", return_value=package),
+            patch.object(toolkit, "_dfu_context",
+                         return_value=("1-1", names, "usb-identity-unavailable", alt_output)),
+            patch.object(toolkit, "_read_gpt_capacities", return_value=capacities),
+            patch.object(toolkit, "_new_operation_dir", return_value=operation),
+            patch.object(toolkit.updates, "prepare_images", return_value=candidates),
+            patch.object(toolkit, "_upload_var", return_value=var_hash),
+            patch.object(toolkit, "_upload_partition", side_effect=upload_side_effect),
+            patch.object(toolkit, "run_with_progress"),
+            patch.object(toolkit, "run", return_value=""),
+        ]
+
+    def test_resume_skips_recorded_partition_only_after_full_matching_readback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(root)
+            uploads = []
+
+            def upload(_tool, _port, name, _size, _destination):
+                uploads.append(name)
+                return hashes[name]
+
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                var_hash, upload)
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6] as live_var, patches[7] as readback, \
+                        patches[8] as transfer, patches[9] as reset:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            self.assertEqual(result["status"], "verified; reset requested")
+            self.assertEqual(uploads, ["rootfsA", "rootfsB", "services", "skills"])
+            live_var.assert_called_once()
+            self.assertEqual([argv[argv.index("-a") + 1]
+                              for args, _kwargs in transfer.call_args_list
+                              for argv in [args[0]]
+                              if "-D" in argv], ["rootfsB", "services", "skills"])
+            reset.assert_called_once()
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertEqual(saved["resumed_from"], str(manifest.resolve()))
+            self.assertEqual(saved["writes"][0]["status"], "verified")
+            self.assertTrue(saved["writes"][0]["resumed_without_write"])
+            self.assertTrue(saved["package_sha256"])
+
+    def test_resume_rewrites_recorded_partition_when_full_readback_differs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(root)
+            calls = {}
+
+            def upload(_tool, _port, name, _size, _destination):
+                calls[name] = calls.get(name, 0) + 1
+                if name == "rootfsA" and calls[name] == 1:
+                    return "f" * 64
+                return hashes[name]
+
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                var_hash, upload)
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6], patches[7], patches[8] as transfer, patches[9]:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            writes = [args[0][args[0].index("-a") + 1]
+                      for args, _kwargs in transfer.call_args_list if "-D" in args[0]]
+            self.assertEqual(writes, ["rootfsA", "rootfsB", "services", "skills"])
+            self.assertEqual(calls["rootfsA"], 2)
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertFalse(saved["writes"][0].get("resumed_without_write", False))
+
+    def test_resume_refuses_when_live_var_does_not_match_saved_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(root)
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                "0" * 64, lambda *_args: hashes["rootfsA"])
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6] as live_var, patches[7] as readback, \
+                        patches[8] as transfer, patches[9] as reset:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        with self.assertRaisesRegex(toolkit.DfuError, "var SHA-256 does not match"):
+                            toolkit.flash_update(
+                                package_path, True, "1-1", "dfu-util", None,
+                                "FLASH UPDATE", False, manifest)
+            live_var.assert_called_once()
+            readback.assert_not_called()
+            transfer.assert_not_called()
+            reset.assert_not_called()
+
+    def test_resume_fails_closed_when_fresh_candidate_differs_from_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bad_hash = hashlib.sha256(b"different package candidate").hexdigest()
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(
+                 root, first_candidate_hash=bad_hash)
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                var_hash, lambda *_args: hashes["rootfsA"])
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6] as live_var, patches[7] as readback, \
+                        patches[8] as transfer, patches[9] as reset:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        with self.assertRaisesRegex(toolkit.DfuError, "Freshly prepared rootfsA"):
+                            toolkit.flash_update(
+                                package_path, True, "1-1", "dfu-util", None,
+                                "FLASH UPDATE", False, manifest)
+            live_var.assert_not_called()
+            readback.assert_not_called()
+            transfer.assert_not_called()
+            reset.assert_not_called()
+
+    def test_resume_rejects_noncontiguous_or_malformed_prior_write_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (_, package, _, _, _, capacities,
+             manifest, _, _, _) = self._resume_fixture(root)
+            old = json.loads(manifest.read_text())
+            old["writes"][0]["partition"] = "rootfsB"
+            manifest.write_text(json.dumps(old))
+            with self.assertRaisesRegex(toolkit.DfuError, "contiguous partition prefix"):
+                toolkit._validate_resume_manifest(
+                    manifest, package, True, capacities,
+                    ["rootfsA", "rootfsB", "services", "skills"])
+
     def test_verify_update_write_reads_only_and_removes_temporary_image(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
