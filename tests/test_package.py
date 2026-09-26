@@ -146,10 +146,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn("Private key material detected in tools/dfu-util", errors.getvalue())
         self.assertFalse(self.output.exists())
 
-    def test_production_loader_pin(self):
-        self.assertEqual(package.PINNED_LOADER_SIZE, 415_088)
+    def test_hardware_checked_file_loader_pin(self):
+        self.assertEqual(package.PINNED_LOADER_SIZE, 432_000)
         self.assertEqual(package.PINNED_LOADER_SHA256,
-                         "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689")
+                         "6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263")
 
 
 if __name__ == "__main__":

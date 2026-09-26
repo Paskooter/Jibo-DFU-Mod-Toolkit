@@ -1,0 +1,8 @@
+{
+  "kind": "experimental-file-rpc-loader",
+  "source_commit": "29c8cb0b60a3425954c1518c47443eaceb3c0afe",
+  "size_bytes": 432000,
+  "sha256": "6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263",
+  "hardware_tested": true,
+  "hardware_test": "Moth: entered DFU, read and wrote /jibo/mode.json, then checked content and metadata"
+}

@@ -6,6 +6,7 @@ repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 package=${JIBO_PYZ:-$repo_dir/dist/jibo-dfu-linux-x86_64.pyz}
 loader=${JIBO_LOADER:-$repo_dir/assets/loader.bin}
 shofel_src=${JIBO_SHOFEL_SRC:-$repo_dir/.build/ShofEL2-for-T124}
+entry_dir=$repo_dir/.build/file-level-entry
 shofel_commit=31ac3a260c8a1501869aff6690b3b9ad4904ef58
 usb_monitor_pid=
 package_stage_dir=
@@ -160,15 +161,7 @@ python3 -c 'import ctypes; ctypes.CDLL("libusb-1.0.so.0")' >/dev/null 2>&1 ||
 dfu_util=${JIBO_DFU_UTIL:-$(command -v dfu-util || true)}
 [[ -n $dfu_util && -x $dfu_util ]] || die 'dfu-util is still missing. Set JIBO_DFU_UTIL to its executable path if it is installed elsewhere.'
 
-if [[ ! -f $loader ]]; then
-  # A local pre-release image can be used without copying it into the source tree.
-  local_loader=$repo_dir/.build/signed-skills-bundle-20260923/loader.bin
-  if [[ -z ${JIBO_LOADER:-} && -f $local_loader ]]; then
-    loader=$local_loader
-  else
-    die "The pinned RAM loader is missing at $loader. Supply its path with JIBO_LOADER=/path/to/loader.bin."
-  fi
-fi
+[[ -f $loader ]] || die "The RAM loader is missing at $loader. Supply its path with JIBO_LOADER=/path/to/loader.bin."
 
 if [[ ! -d $shofel_src ]]; then
   say 'Downloading the pinned ShofEL source.'
@@ -177,21 +170,11 @@ if [[ ! -d $shofel_src ]]; then
   git -C "$shofel_src" checkout --detach "$shofel_commit"
 fi
 
-if git -C "$shofel_src" apply --reverse --check "$repo_dir/patches/shofel2-dfu-entry.patch" >/dev/null 2>&1; then
-  say 'ShofEL toolkit patch is already applied.'
-else
-  say 'Applying the ShofEL toolkit patch.'
-  git -C "$shofel_src" apply --check "$repo_dir/patches/shofel2-dfu-entry.patch" ||
-    die 'The ShofEL patch does not apply to this source. Set JIBO_SHOFEL_SRC to the pinned source tree or remove the stale build tree.'
-  git -C "$shofel_src" apply "$repo_dir/patches/shofel2-dfu-entry.patch"
-fi
-
 say 'Building the USB entry helper.'
-# A reused source tree may have host objects compiled with the default
-# launch-disabled flag. Force a rebuild so its capability matches the payload.
-make -B -C "$shofel_src" DFU_STAGE2_ENABLE_LAUNCH=1 all test
+python3 "$repo_dir/scripts/build_file_level_entry.py" \
+  --source "$shofel_src" --loader "$loader" --out "$entry_dir"
 for file in shofel2_t124 intermezzo.bin dfu_stage2.bin; do
-  [[ -s $shofel_src/$file ]] || die "The ShofEL build did not create $file."
+  [[ -s $entry_dir/$file ]] || die "The ShofEL build did not create $file."
 done
 
 say 'Packaging the toolkit.'
@@ -200,9 +183,9 @@ package_stage_dir=$(mktemp -d "$(dirname -- "$package")/.jibo-package.XXXXXXXX")
 staged_package=$package_stage_dir/jibo-dfu.pyz
 python3 "$repo_dir/scripts/package.py" \
   --loader "$loader" \
-  --shofel2 "$shofel_src/shofel2_t124" \
-  --intermezzo "$shofel_src/intermezzo.bin" \
-  --dfu-stage "$shofel_src/dfu_stage2.bin" \
+  --shofel2 "$entry_dir/shofel2_t124" \
+  --intermezzo "$entry_dir/intermezzo.bin" \
+  --dfu-stage "$entry_dir/dfu_stage2.bin" \
   --dfu-util "$dfu_util" \
   --out "$staged_package"
 [[ -s $staged_package ]] || die 'Packaging did not create the toolkit.'

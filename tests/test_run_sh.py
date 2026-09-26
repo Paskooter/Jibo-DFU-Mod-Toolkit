@@ -36,6 +36,7 @@ class RunLauncherTests(unittest.TestCase):
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts" / "package.py").write_text("# intercepted by python3 stub\n")
         (self.repo / "scripts" / "check_package.py").write_text("# intercepted by python3 stub\n")
+        (self.repo / "scripts" / "build_file_level_entry.py").write_text("# intercepted by python3 stub\n")
         (self.repo / "patches").mkdir()
         (self.repo / "patches" / "shofel2-dfu-entry.patch").write_text("fixture patch\n")
         (self.repo / "assets").mkdir()
@@ -117,6 +118,22 @@ case "$name" in
         if [ -z "$output" ]; then exit 32; fi
         mkdir -p "$(dirname "$output")" || exit 33
         printf 'fixture package\n' > "$output" || exit 34
+        exit 0
+        ;;
+      *build_file_level_entry.py)
+        [ "${FAIL_MAKE:-0}" = 1 ] && exit 21
+        output=
+        previous=
+        for argument do
+          if [ "$previous" = out ]; then output=$argument; previous=; continue; fi
+          case "$argument" in
+            --out) previous=out ;;
+          esac
+        done
+        mkdir -p "$output" || exit 33
+        printf 'fixture executable\n' > "$output/shofel2_t124"
+        printf 'fixture payload\n' > "$output/intermezzo.bin"
+        printf 'fixture stage\n' > "$output/dfu_stage2.bin"
         exit 0
         ;;
       *.pyz)
@@ -244,14 +261,15 @@ exit 0
         events = self.events()
         package_index = self.package_call_index(events)
         launch_index = self.launch_index(events)
-        self.assertTrue(any(event.startswith("make ") for event in events), events)
+        self.assertTrue(any("/build_file_level_entry.py " in event for event in events), events)
         self.assertIsNotNone(package_index, events)
         self.assertIsNotNone(launch_index, events)
         self.assertLess(package_index, launch_index, events)
         self.assertIn("--loader " + str(self.loader), events[package_index])
-        self.assertIn("--shofel2 " + str(self.shofel / "shofel2_t124"), events[package_index])
-        self.assertIn("--intermezzo " + str(self.shofel / "intermezzo.bin"), events[package_index])
-        self.assertIn("--dfu-stage " + str(self.shofel / "dfu_stage2.bin"), events[package_index])
+        entry = self.repo / ".build" / "file-level-entry"
+        self.assertIn("--shofel2 " + str(entry / "shofel2_t124"), events[package_index])
+        self.assertIn("--intermezzo " + str(entry / "intermezzo.bin"), events[package_index])
+        self.assertIn("--dfu-stage " + str(entry / "dfu_stage2.bin"), events[package_index])
         self.assertIn("--dfu-util " + str(self.bin / "dfu-util"), events[package_index])
         self.assertIn("--out ", events[package_index])
         self.assertIn("/.jibo-package.", events[package_index])
@@ -264,7 +282,7 @@ exit 0
                                    extra_env={"FAIL_PACKAGE_CHECK_ONCE": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         events = self.events()
-        self.assertTrue(any(event.startswith("make ") for event in events), events)
+        self.assertTrue(any("/build_file_level_entry.py " in event for event in events), events)
         self.assertIsNotNone(self.package_call_index(events), events)
         self.assertLess(self.package_call_index(events), self.launch_index(events))
 
@@ -276,7 +294,7 @@ exit 0
         events = self.events()
         self.assertTrue(any(event.startswith("apt-get update") for event in events), events)
         self.assertTrue(any(event.startswith("apt-get install -y gcc") for event in events), events)
-        self.assertTrue(any(event.startswith("make ") for event in events), events)
+        self.assertTrue(any("/build_file_level_entry.py " in event for event in events), events)
         self.assertIsNotNone(self.launch_index(events), events)
 
     @unittest.skipIf(os.geteuid() == 0, "requires a non-root test process")

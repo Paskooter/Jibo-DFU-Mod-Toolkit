@@ -38,8 +38,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=SHOFEL_REPOSITORY,
                         help="ShofEL Git repository, URL or local directory")
-    parser.add_argument("--loader", type=Path, default=ROOT / ".build/file-level-candidate/experimental-file-rpc-loader.bin")
-    parser.add_argument("--out", type=Path, default=ROOT / ".build/file-level-candidate/shofel-entry")
+    parser.add_argument("--loader", type=Path, default=ROOT / "assets/loader.bin")
+    parser.add_argument("--out", type=Path, default=ROOT / ".build/file-level-entry")
     args = parser.parse_args()
     if args.loader.is_symlink():
         parser.error("candidate loader must not be a symlink: " + str(args.loader))
@@ -48,6 +48,9 @@ def main():
     if not loader.is_file():
         parser.error("candidate loader is missing: " + str(loader))
     candidate_manifest = loader.parent / "manifest.json"
+    if (not candidate_manifest.is_file() and
+            sha == digest(ROOT / "assets/loader.bin")):
+        candidate_manifest = ROOT / "assets/manifest.json"
     if not candidate_manifest.is_file():
         parser.error("candidate manifest is missing: " + str(candidate_manifest))
     candidate = json.loads(candidate_manifest.read_text())
@@ -59,7 +62,19 @@ def main():
     if not 0 < size < 4 * 1024 * 1024:
         parser.error("candidate loader size is outside the stage-2 DRAM range")
     if out.exists():
-        parser.error("output directory already exists: " + str(out))
+        manifest_path = out / "candidate-entry-manifest.json"
+        try:
+            built = json.loads(manifest_path.read_text())
+            files = built["files_sha256"]
+            if (built["loader_sha256"] == sha and built["loader_size"] == size and
+                    built["shofel_commit"] == SHOFEL_COMMIT and
+                    all(digest(out / name) == files[name]
+                        for name in ("shofel2_t124", "intermezzo.bin", "dfu_stage2.bin"))):
+                print("Reusing the matching ShofEL entry helper:", out)
+                return
+        except (OSError, KeyError, ValueError, TypeError):
+            pass
+        parser.error("existing ShofEL entry helper does not match this loader: " + str(out))
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".shofel-entry-", dir=out.parent) as temp:
