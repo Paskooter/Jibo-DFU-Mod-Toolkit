@@ -440,6 +440,29 @@ class CursesPromptTests(unittest.TestCase):
         self.assertIn("File: /jibo/mode.json on var",
                       confirm.call_args.args[1])
 
+    def test_mode_action_falls_back_for_unsupported_file_layout(self):
+        class UnsupportedFileLayout(Exception):
+            status = 3
+
+        calls = []
+        def file_edit(*_args, **_kwargs):
+            calls.append("file")
+            raise UnsupportedFileLayout()
+        def full_edit(mode, port=None, confirmation=None):
+            calls.append("full")
+            self.assertTrue(confirmation({"partition": "var", "usb_port": port}))
+            return {"status": "verified", "new_mode": mode}
+        api = SimpleNamespace(FileRpcStatusError=UnsupportedFileLayout,
+                              set_mode_file_live=file_edit, set_mode_live=full_edit)
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
+                patch.object(jibo_tui, "confirm_action", return_value=True) as confirm:
+            result = jibo_tui.execute_action(api, "set-mode", readiness)
+        self.assertEqual(calls, ["file", "full"])
+        self.assertEqual(result["new_mode"], "int-developer")
+        self.assertIn("Review the var write plan", confirm.call_args.args[1])
+
     def test_wifi_action_uses_file_edit_when_loader_exposes_it(self):
         calls = {}
         api = SimpleNamespace(
@@ -456,6 +479,28 @@ class CursesPromptTests(unittest.TestCase):
                           calls["open_network"], calls["port"]),
                          ("Test Wi-Fi", None, True, "1-1"))
         self.assertTrue(calls["guided"])
+
+    def test_wifi_action_falls_back_for_unsupported_file_layout(self):
+        class UnsupportedFileLayout(Exception):
+            status = 3
+
+        calls = []
+        def file_edit(*_args, **_kwargs):
+            calls.append("file")
+            raise UnsupportedFileLayout()
+        def full_edit(*_args, **_kwargs):
+            calls.append("full")
+            return {"status": "verified"}
+        api = SimpleNamespace(FileRpcStatusError=UnsupportedFileLayout,
+                              configure_wifi_file_live=file_edit,
+                              configure_wifi_live=full_edit)
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "text_input", return_value="Test Wi-Fi"), \
+                patch.object(jibo_tui, "select_option", return_value="open"):
+            result = jibo_tui.execute_action(api, "configure-wifi", readiness)
+        self.assertEqual(calls, ["file", "full"])
+        self.assertEqual(result["status"], "verified")
 
 
 if __name__ == "__main__":

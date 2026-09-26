@@ -41,6 +41,12 @@ def _can_edit_var_files(readiness):
             FILE_LEVEL_VAR_ALTS.issubset(readiness.alt_names))
 
 
+def _legacy_file_layout(api, error):
+    status_error = getattr(api, "FileRpcStatusError", None)
+    return (status_error is not None and isinstance(error, status_error) and
+            error.status == 3)
+
+
 def inspect_readiness(api, found=None):
     """Read USB state and, for DFU, check for the toolkit's loader marker."""
     found = tuple(api.devices()) if found is None else tuple(found)
@@ -851,11 +857,16 @@ def execute_action(api, key, readiness):
         confirmation = lambda plan: confirm_action(
             "Confirm mode change",
             _confirmation_details(plan, "Review the file change before changing the robot mode."
-                                  if direct_edit else
+                                  if plan.get("changes") else
                                   "Review the var write plan before changing the robot mode."))
         if direct_edit:
-            return api.set_mode_file_live(mode, port=readiness.port,
-                                          confirmation=confirmation, guided=True)
+            try:
+                return api.set_mode_file_live(mode, port=readiness.port,
+                                              confirmation=confirmation, guided=True)
+            except Exception as exc:
+                if not _legacy_file_layout(api, exc):
+                    raise
+                print("The mode file uses a legacy layout; switching to a full var edit.", flush=True)
         return api.set_mode_live(mode, port=readiness.port,
                                  confirmation=confirmation)
     if key == "configure-wifi":
@@ -879,13 +890,18 @@ def execute_action(api, key, readiness):
         confirmation = lambda plan: confirm_action(
             "Confirm Wi-Fi change",
             _confirmation_details(plan, "Review the file change before adding this network."
-                                  if direct_edit else
+                                  if plan.get("changes") else
                                   "Review the var write plan before adding this network."))
         try:
             if direct_edit:
-                return api.configure_wifi_file_live(
-                    ssid, password, open_network, port=readiness.port,
-                    confirmation=confirmation, guided=True)
+                try:
+                    return api.configure_wifi_file_live(
+                        ssid, password, open_network, port=readiness.port,
+                        confirmation=confirmation, guided=True)
+                except Exception as exc:
+                    if not _legacy_file_layout(api, exc):
+                        raise
+                    print("The Wi-Fi file uses a legacy layout; switching to a full var edit.", flush=True)
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
         finally:
