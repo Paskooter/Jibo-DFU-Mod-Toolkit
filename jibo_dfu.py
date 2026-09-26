@@ -1725,10 +1725,6 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         raise DfuError("Prepared {} image does not match the live GPT size.".format(name))
             candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
             if resume_record is not None:
-                for entry in record["writes"]:
-                    name = entry["partition"]
-                    if candidate_hashes[name] != entry["candidate_sha256"]:
-                        raise DfuError("Freshly prepared {} does not match the candidate hash in the failed update record.".format(name))
                 backup = record["backups"]["var"]
                 record["status"] = "checking saved var"
                 _private_write(record_path, record)
@@ -1781,22 +1777,33 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     entry = record["writes"][index]
                     record["status"] = "checking previous write"
                     _private_write(record_path, record)
+                    timestamp_equivalent = False
                     if name == "skills" and skills_chunks:
                         actual = _upload_skills_partition(
                             dfu_util, port, capacities[name], skills_chunks,
                             destination=None, workdir=directory)["sha256"]
                     else:
                         with tempfile.TemporaryDirectory(prefix="resume-readback-", dir=directory) as readback_dir:
+                            readback = Path(readback_dir) / "partition.img"
                             actual = _upload_partition(
-                                dfu_util, port, name, capacities[name],
-                                Path(readback_dir) / "partition.img")
+                                dfu_util, port, name, capacities[name], readback)
+                            if actual == entry["candidate_sha256"] and actual != digest:
+                                timestamp_equivalent = updates.equivalent_except_ext4_write_time(
+                                    candidate, readback)
                     entry["resume_readback_sha256"] = actual
-                    if actual == digest:
+                    if actual == digest or timestamp_equivalent:
+                        if timestamp_equivalent:
+                            entry["prepared_sha256"] = digest
+                            entry["equivalence"] = "ext4 write timestamp only"
+                        else:
+                            entry["candidate_sha256"] = digest
                         entry["readback_sha256"] = actual
                         entry["status"] = "verified"
                         entry["resumed_without_write"] = True
                         _private_write(record_path, record)
                         continue
+                    entry["previous_candidate_sha256"] = entry["candidate_sha256"]
+                    entry["candidate_sha256"] = digest
                     entry["status"] = "write started"
                     _private_write(record_path, record)
                     write_and_verify(name, candidate, digest, entry)
