@@ -386,6 +386,120 @@ def _filesystem_geometry(image: Path) -> tuple[int, int]:
     return block_size, block_count
 
 
+def _restore_ext4_write_time(source: Path, output: Path) -> None:
+    """Remove resize2fs's wall-clock stamp from classic 1 KiB ext4 images.
+
+    Jibo's stock images have no metadata_csum feature. Their primary and backup
+    superblocks receive a new s_wtime on every resize, making otherwise equal
+    partition images hash differently across flash attempts. Preserve the
+    source image's timestamp in each real superblock. Other ext4 layouts are
+    left to their filesystem tools, which know how to update their checksums.
+    """
+    with source.open("rb") as original, output.open("r+b") as prepared:
+        original.seek(1024)
+        old = original.read(1024)
+        prepared.seek(1024)
+        new = prepared.read(1024)
+        if len(old) != 1024 or len(new) != 1024 or old[56:58] != b"\x53\xef" or \
+                new[56:58] != b"\x53\xef":
+            raise UpdateError("The prepared ext4 superblock is missing or invalid.")
+        if struct.unpack_from("<I", new, 24)[0] != 0 or \
+                struct.unpack_from("<I", new, 100)[0] & 0x400:
+            return
+        block_size = 1024
+        if struct.unpack_from("<I", old, 24)[0] != struct.unpack_from("<I", new, 24)[0]:
+            raise UpdateError("The prepared ext4 block size changed unexpectedly.")
+        blocks_per_group = struct.unpack_from("<I", new, 32)[0]
+        block_count = struct.unpack_from("<I", new, 4)[0]
+        if not blocks_per_group or not block_count:
+            raise UpdateError("The prepared ext4 group geometry is invalid.")
+        groups = (block_count + blocks_per_group - 1) // blocks_per_group
+        for group in range(groups):
+            offset = group * blocks_per_group * block_size + 1024
+            if offset + 1024 > output.stat().st_size:
+                raise UpdateError("An ext4 backup superblock extends beyond the prepared image.")
+            prepared.seek(offset)
+            header = prepared.read(128)
+            if header[56:58] != b"\x53\xef":
+                if group == 0:
+                    raise UpdateError("The prepared ext4 primary superblock is missing.")
+                continue
+            if struct.unpack_from("<H", header, 90)[0] != group % 65536:
+                raise UpdateError("An ext4 backup superblock has the wrong group number.")
+            prepared.seek(offset + 48)
+            prepared.write(old[48:52])
+        prepared.flush()
+        os.fsync(prepared.fileno())
+
+
+def equivalent_except_ext4_write_time(expected: Path, actual: Path) -> bool:
+    """Compare complete classic ext4 images, permitting only s_wtime changes.
+
+    Older flash attempts used resize2fs's wall-clock timestamp. A full USB
+    readback can be reused when every other byte matches the newly prepared
+    image and its original full-image hash still matches the old update record.
+    """
+    expected, actual = Path(expected), Path(actual)
+    if expected.stat().st_size != actual.stat().st_size:
+        return False
+    with expected.open("rb") as reference, actual.open("rb") as observed:
+        reference.seek(1024)
+        header = reference.read(1024)
+        observed.seek(1024)
+        live_header = observed.read(1024)
+        if len(header) != 1024 or header[56:58] != b"\x53\xef" or \
+                live_header[56:58] != b"\x53\xef" or \
+                struct.unpack_from("<I", header, 24)[0] != 0 or \
+                struct.unpack_from("<I", header, 100)[0] & 0x400:
+            return False
+        blocks_per_group = struct.unpack_from("<I", header, 32)[0]
+        block_count = struct.unpack_from("<I", header, 4)[0]
+        if not blocks_per_group or not block_count or \
+                block_count * 1024 > expected.stat().st_size:
+            return False
+        allowed = []
+        for group in range((block_count + blocks_per_group - 1) // blocks_per_group):
+            offset = group * blocks_per_group * 1024 + 1024
+            if offset + 128 > expected.stat().st_size:
+                return False
+            reference.seek(offset)
+            stamp = reference.read(128)
+            observed.seek(offset)
+            live_stamp = observed.read(128)
+            if stamp[56:58] != b"\x53\xef":
+                if group == 0 or live_stamp[56:58] == b"\x53\xef":
+                    return False
+                continue
+            if live_stamp[56:58] != b"\x53\xef" or \
+                    struct.unpack_from("<H", stamp, 90)[0] != group % 65536 or \
+                    struct.unpack_from("<H", live_stamp, 90)[0] != group % 65536:
+                return False
+            allowed.append(offset + 48)
+        reference.seek(0)
+        observed.seek(0)
+        position = 0
+        next_stamp = 0
+        while True:
+            left = reference.read(1024 * 1024)
+            right = observed.read(1024 * 1024)
+            if not left:
+                return not right
+            if len(left) != len(right):
+                return False
+            if left != right:
+                adjusted = bytearray(right)
+                while next_stamp < len(allowed) and allowed[next_stamp] < position + len(left):
+                    offset = allowed[next_stamp] - position
+                    adjusted[offset:offset + 4] = left[offset:offset + 4]
+                    next_stamp += 1
+                if left != adjusted:
+                    return False
+            else:
+                while next_stamp < len(allowed) and allowed[next_stamp] < position + len(left):
+                    next_stamp += 1
+            position += len(left)
+
+
 def _copy_sparse(source: Path, destination: Path) -> None:
     """Copy an image while preserving holes where SEEK_DATA/SEEK_HOLE exist."""
 
@@ -549,6 +663,7 @@ def prepare_images(
                     stream.truncate(capacity)
                     stream.flush()
                     os.fsync(stream.fileno())
+                _restore_ext4_write_time(source, output)
                 if output.stat().st_size != capacity:
                     raise UpdateError("Prepared image has an unexpected file size: " + filename)
                 final_block_size, final_block_count = _filesystem_geometry(output)

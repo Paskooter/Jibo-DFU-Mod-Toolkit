@@ -218,29 +218,70 @@ class UpdatePackageTests(unittest.TestCase):
             transfer.assert_not_called()
             reset.assert_not_called()
 
-    def test_resume_fails_closed_when_fresh_candidate_differs_from_manifest(self):
+    def test_resume_rewrites_when_fresh_candidate_is_not_equivalent_to_old_write(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            bad_hash = hashlib.sha256(b"different package candidate").hexdigest()
+            old_hash = hashlib.sha256(b"older timestamped candidate").hexdigest()
             (package_path, package, candidates, hashes, var_hash, capacities,
              manifest, names, alt_output, operation) = self._resume_fixture(
-                 root, first_candidate_hash=bad_hash)
+                 root, first_candidate_hash=old_hash)
+            calls = {}
+
+            def upload(_tool, _port, name, _size, _destination):
+                calls[name] = calls.get(name, 0) + 1
+                return old_hash if name == "rootfsA" and calls[name] == 1 else hashes[name]
+
             patches = self._patch_resume_context(
                 package, candidates, capacities, names, alt_output, operation,
-                var_hash, lambda *_args: hashes["rootfsA"])
+                var_hash, upload)
             with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
                 with patches[0], patches[1], patches[2], patches[3], patches[4], \
                         patches[5], patches[6] as live_var, patches[7] as readback, \
-                        patches[8] as transfer, patches[9] as reset:
+                        patches[8] as transfer, patches[9] as reset, \
+                        patch.object(updates, "equivalent_except_ext4_write_time", return_value=False) as equivalent:
                     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        with self.assertRaisesRegex(toolkit.DfuError, "Freshly prepared rootfsA"):
-                            toolkit.flash_update(
-                                package_path, True, "1-1", "dfu-util", None,
-                                "FLASH UPDATE", False, manifest)
-            live_var.assert_not_called()
-            readback.assert_not_called()
-            transfer.assert_not_called()
-            reset.assert_not_called()
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            live_var.assert_called_once()
+            equivalent.assert_called_once()
+            self.assertEqual(calls["rootfsA"], 2)
+            self.assertEqual([args[0][args[0].index("-a") + 1]
+                              for args, _kwargs in transfer.call_args_list if "-D" in args[0]],
+                             ["rootfsA", "rootfsB", "services", "skills"])
+            reset.assert_called_once()
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertEqual(saved["writes"][0]["candidate_sha256"], hashes["rootfsA"])
+
+    def test_resume_skips_legacy_write_when_only_ext4_timestamp_differs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            old_hash = hashlib.sha256(b"older timestamped candidate").hexdigest()
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(
+                 root, first_candidate_hash=old_hash)
+
+            def upload(_tool, _port, name, _size, _destination):
+                return old_hash if name == "rootfsA" else hashes[name]
+
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                var_hash, upload)
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6], patches[7], patches[8] as transfer, patches[9], \
+                        patch.object(updates, "equivalent_except_ext4_write_time", return_value=True) as equivalent:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            equivalent.assert_called_once()
+            self.assertEqual([args[0][args[0].index("-a") + 1]
+                              for args, _kwargs in transfer.call_args_list if "-D" in args[0]],
+                             ["rootfsB", "services", "skills"])
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertTrue(saved["writes"][0]["resumed_without_write"])
+            self.assertEqual(saved["writes"][0]["equivalence"], "ext4 write timestamp only")
 
     def test_resume_rejects_noncontiguous_or_malformed_prior_write_records(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -621,6 +662,45 @@ class UpdatePackageTests(unittest.TestCase):
                                                           root / "from-archive")
             self.assertEqual(prepared_archive["skills"].stat().st_size, capacities["skills"])
             self.assertNotIn("var", prepared_archive)
+
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "resize2fs", "e2fsck")),
+                         "e2fsprogs is required for the ext4 timestamp comparison")
+    def test_resize_timestamp_is_reproducible_and_only_timestamp_differences_are_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.ext4"
+            with source.open("wb") as stream:
+                stream.truncate(4 * 1024 * 1024)
+            subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", "-b", "1024",
+                            "-O", "^metadata_csum", str(source)], check=True, capture_output=True)
+            copies = [root / "first.ext4", root / "second.ext4"]
+            for copy in copies:
+                shutil.copyfile(source, copy)
+                with copy.open("r+b") as stream:
+                    stream.truncate(16 * 1024 * 1024)
+                subprocess.run(["resize2fs", "-f", str(copy), "16384"],
+                               check=True, capture_output=True)
+                with copy.open("r+b") as stream:
+                    stream.truncate(16 * 1024 * 1024)
+            with copies[1].open("r+b") as stream:
+                for position in (1072, 8 * 1024 * 1024 + 1072):
+                    stream.seek(position)
+                    stream.write(b"\x01\x02\x03\x04")
+            for copy in copies:
+                updates._restore_ext4_write_time(source, copy)
+                check = subprocess.run(["e2fsck", "-f", "-n", str(copy)],
+                                       text=True, capture_output=True)
+                self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            self.assertEqual(hashlib.sha256(copies[0].read_bytes()).hexdigest(),
+                             hashlib.sha256(copies[1].read_bytes()).hexdigest())
+            with copies[1].open("r+b") as stream:
+                stream.seek(1072)
+                stream.write(b"\x05\x06\x07\x08")
+            self.assertTrue(updates.equivalent_except_ext4_write_time(copies[0], copies[1]))
+            with copies[1].open("r+b") as stream:
+                stream.seek(4096)
+                stream.write(b"\xff")
+            self.assertFalse(updates.equivalent_except_ext4_write_time(copies[0], copies[1]))
 
 
 if __name__ == "__main__":
