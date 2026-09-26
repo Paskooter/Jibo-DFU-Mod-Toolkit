@@ -890,7 +890,8 @@ def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
                 run_with_progress([dfu_util, "-d", "0955:701a", "--path", port,
                                    "-a", name, "-D", entry["image"]],
                                   timeout=14400, label="Restoring " + name,
-                                  download_size=size)
+                                  download_size=size,
+                                  allow_progress_completion=True)
                 with tempfile.TemporaryDirectory(prefix="restore-readback-", dir=directory) as temp:
                     readback = Path(temp) / "partition.img"
                     actual = (_upload_var(dfu_util, port, readback) if name == "var" else
@@ -1137,6 +1138,7 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                      "-a", chunk["name"], "-D", str(candidate_piece)],
                     timeout=14400,
                     download_size=chunk["size_bytes"],
+                    allow_progress_completion=True,
                     label="Writing skills chunk {}/{} ({})".format(
                         index, len(chunks), chunk["name"]))
                 readback = temporary / "readback.img"
@@ -1446,7 +1448,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
         run_with_progress(
             [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-D", str(candidate)],
             timeout=900, label="Writing the edited 500 MiB var partition over USB",
-            download_size=EXPECTED_VAR_SIZE)
+            download_size=EXPECTED_VAR_SIZE, allow_progress_completion=True)
         readback = Path(directory) / "readback-var.img"
         readback_hash = _upload_var(dfu_util, port, readback)
         record["readback_sha256"] = readback_hash
@@ -1572,6 +1574,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
                          "-D", str(candidate)], timeout=14400,
                         download_size=capacities[name],
+                        allow_progress_completion=True,
                         label="Writing {} ({} bytes)".format(name, capacities[name]))
                     with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
                         readback = Path(readback_dir) / "partition.img"
