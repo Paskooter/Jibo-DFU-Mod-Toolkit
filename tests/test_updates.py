@@ -196,6 +196,34 @@ class UpdatePackageTests(unittest.TestCase):
             saved = json.loads(Path(result["manifest"]).read_text())
             self.assertFalse(saved["writes"][0].get("resumed_without_write", False))
 
+    def test_resume_trusts_recorded_completed_transfer_without_readback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (package_path, package, candidates, hashes, var_hash, capacities,
+             manifest, names, alt_output, operation) = self._resume_fixture(root)
+            old = json.loads(manifest.read_text())
+            old["writes"][0]["status"] = "transfer complete"
+            manifest.write_text(json.dumps(old))
+            patches = self._patch_resume_context(
+                package, candidates, capacities, names, alt_output, operation,
+                var_hash, upload_side_effect=AssertionError("unexpected readback"))
+            with patch.object(toolkit, "EXPECTED_VAR_SIZE", 8):
+                with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                        patches[5], patches[6] as live_var, patches[7] as readback, \
+                        patches[8] as transfer, patches[9]:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            live_var.assert_not_called()
+            readback.assert_not_called()
+            written = [argv[argv.index("-a") + 1]
+                       for args, _kwargs in transfer.call_args_list
+                       for argv in [args[0]] if "-D" in argv]
+            self.assertEqual(written, ["rootfsB", "services", "skills"])
+            saved = json.loads(Path(result["manifest"]).read_text())
+            self.assertTrue(saved["writes"][0]["resumed_without_write"])
+
     def test_resume_reuses_saved_var_without_live_dump(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
