@@ -23,9 +23,9 @@ and keep the original full-flash/USB recovery route available.
 
 The workflow patches both `rootfsA` and `rootfsB`, plus `services` and
 `skills`. It changes every stock server-client region configuration, gives
-Node's HTTPS clients an explicit ISRG Root X1 trust anchor without disabling
-certificate verification, and gives the OTA downloader that anchor only for
-`jibo.io` URLs. Other download hosts keep their existing TLS handling. Since
+Node's HTTPS clients an explicit ISRG Root X1 trust anchor for `jibo.io` hosts
+without disabling certificate verification, and gives the OTA downloader that
+anchor only for `jibo.io` URLs. Other download hosts keep their existing TLS handling. Since
 DFU cannot create files, it replaces the
 expired, 2 KiB-allocated `DST_Root_CA_X3.crt` slot with ISRG Root X1 and points
 these temporary clients at that existing path. The OTA should replace this
@@ -46,8 +46,8 @@ profile on an unverified board revision:
 
 ```sh
 sudo python3 jibo_dfu.py enter-dfu-shofel \
-  --shofel .build/file-level-candidate/shofel-entry/shofel2_t124 \
-  --loader .build/file-level-candidate/experimental-file-rpc-loader.bin \
+  --shofel .build/file-level-v2/shofel-entry/shofel2_t124 \
+  --loader .build/file-level-v2/experimental-file-rpc-loader.bin \
   --confirm-meerkat-rev02
 ```
 

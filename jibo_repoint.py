@@ -89,9 +89,12 @@ def patched_bytes(kind, source):
         return source.replace(b"jibo.com", b"jibo.io")
     if kind == "client":
         return _replace_once(source,
-            b"new https.Agent({rejectUnauthorized: true});",
-            b'new https.Agent({rejectUnauthorized: true, ca: require("fs").readFileSync("' +
-            CA_PATH.encode() + b'")});')
+            b"options.agent = this.sslAgent();",
+            b'options.agent = /(^|\\.)jibo\\.io$/.test(endpoint.hostname || "") ? '
+            b'(AWS.NodeHttpClient.jiboIoSslAgent || '
+            b'(AWS.NodeHttpClient.jiboIoSslAgent = new (require("https").Agent)'
+            b'({rejectUnauthorized: true, ca: require("fs").readFileSync("' +
+            CA_PATH.encode() + b'")}))) : this.sslAgent();')
     if kind == "downloader":
         return _replace_once(source,
             b"http.get(argv.url, function(res) {",
@@ -174,14 +177,14 @@ def plan(dfu_util, port, names, quiet=False):
 PATCHED_SHA256 = {
     "ca": CA_SHA256,
     "region": "d0a5b081b05a0ff717e4e57623505d88b83fce053b438f5b5e364a3e534d278e",
-    "client": "108afb13770d68d66595c13447df9ab2f6354a7ab02c49b657ec663b8b10e987",
+    "client": "ed9e7db8e584d2728f6f00bdc234f0fb3e43c6ff74c0c59f89682e28fe3a397d",
     "downloader": "71716f3a0e9f5f17e30db67193cb46776ca2c4e0cc2f1a32d0540bd8de497338",
 }
 PATCHED_54_SHA256 = {
     "downloader": "bc8342a66662d981067a6a6688ac6147c0bca628cd37fc9a61161139acae2ed0",
 }
 PATCHED_33_SHA256 = {
-    "client": "af2f0c5ca122ff9c39fba6aa2630d22f649402842767e1614eea6cf14b0fd20d",
+    "client": "e01ec852303530a6d0acc55a9b8f8eb2f2a801634f7c5c85b4965da772152ec5",
 }
 
 

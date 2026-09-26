@@ -36,11 +36,13 @@ class RepointTests(unittest.TestCase):
     def test_transforms_keep_tls_verification_enabled(self):
         region = b"jibo.com/" * 5
         self.assertEqual(repoint.patched_bytes("region", region), b"jibo.io/" * 5)
-        client = b"new https.Agent({rejectUnauthorized: true});"
+        client = b"options.agent = this.sslAgent();"
         result = repoint.patched_bytes("client", client)
         self.assertIn(b"rejectUnauthorized: true", result)
         self.assertIn(b'require("fs").readFileSync', result)
         self.assertIn(repoint.CA_PATH.encode(), result)
+        self.assertIn(b'jibo\\.io$', result)
+        self.assertIn(b': this.sslAgent();', result)
         self.assertNotIn(b"rejectUnauthorized: false", result)
         downloader = b"let req = http.get(argv.url, function(res) {"
         result = repoint.patched_bytes("downloader", downloader)
