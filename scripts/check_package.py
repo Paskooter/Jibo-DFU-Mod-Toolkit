@@ -9,9 +9,11 @@ import tempfile
 import zipfile
 
 try:
-    from .package import PINNED_LOADER_SHA256, PINNED_LOADER_SIZE
+    from .package import (PINNED_LOADER_SHA256, PINNED_LOADER_SIZE,
+                          candidate_loader_hash_matches)
 except ImportError:
-    from package import PINNED_LOADER_SHA256, PINNED_LOADER_SIZE
+    from package import (PINNED_LOADER_SHA256, PINNED_LOADER_SIZE,
+                         candidate_loader_hash_matches)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +36,10 @@ def check_package(path, source_root=ROOT):
             if len(loader) != PINNED_LOADER_SIZE or \
                     hashlib.sha256(loader).hexdigest() != PINNED_LOADER_SHA256:
                 return False, "the bundled RAM loader does not match the pinned image"
+            for name in ("tools/shofel2_t124", "tools/dfu_stage2.bin"):
+                if not candidate_loader_hash_matches(archive.read(name),
+                                                     PINNED_LOADER_SHA256):
+                    return False, name + " does not embed the pinned RAM loader hash"
             with tempfile.TemporaryDirectory(prefix="jibo-package-check-") as directory:
                 shofel = Path(directory) / "shofel2_t124"
                 shofel.write_bytes(archive.read("tools/shofel2_t124"))

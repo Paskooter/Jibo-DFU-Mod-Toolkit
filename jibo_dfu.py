@@ -2309,15 +2309,16 @@ def _stat_partition_file_rpc(dfu_util, port, partition, path, workdir, quiet=Fal
     if len(response) != FILE_STAT_STRUCT.size:
         raise DfuError("The file mailbox returned invalid stat metadata.")
     (inode, size, allocated_bytes, uid, gid, mode, nlink,
-     extent_count, ext4_uuid) = FILE_STAT_STRUCT.unpack(response)
+     mapping_count, ext4_uuid) = FILE_STAT_STRUCT.unpack(response)
     if (not inode or not stat.S_ISREG(mode) or size > FILE_LEVEL_MAX_BYTES or
             allocated_bytes < size or not allocated_bytes or
             allocated_bytes > FILE_LEVEL_MAX_BYTES or
-            nlink != 1 or extent_count != 1 or len(ext4_uuid) != 16):
-        raise DfuError("The target must be an existing bounded regular file with one allocated extent and no hard links.")
+            nlink != 1 or mapping_count != 1 or len(ext4_uuid) != 16):
+        raise DfuError("The target must be an existing bounded regular file with one "
+                       "allocated block mapping and no hard links.")
     return {"inode": inode, "size_bytes": size, "allocated_bytes": allocated_bytes,
             "uid": uid, "gid": gid, "mode": mode, "nlink": nlink,
-            "extent_count": extent_count, "ext4_uuid": ext4_uuid.hex()}
+            "mapping_count": mapping_count, "ext4_uuid": ext4_uuid.hex()}
 
 
 def _upload_file_response(dfu_util, port, partition, request_id, workdir, label, quiet=False):
@@ -2572,7 +2573,7 @@ class FileTransaction:
                 unchanged_metadata = all(
                     after_stat[key] == change["before_metadata"][key]
                     for key in ("inode", "allocated_bytes", "uid", "gid", "mode",
-                                "nlink", "extent_count", "ext4_uuid"))
+                                "nlink", "mapping_count", "ext4_uuid"))
                 if actual != edit["content"] or len(actual) != after_stat["size_bytes"] or not unchanged_metadata:
                     write_entry["status"] = "verification failed"
                     record["status"] = "verification failed"

@@ -9,6 +9,7 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
+import scripts.check_package as check_package
 import scripts.package as package
 
 
@@ -27,10 +28,12 @@ class PackageTests(unittest.TestCase):
         self.intermezzo = self.shofel_dir / "intermezzo.bin"
         self.dfu_stage = self.shofel_dir / "dfu_stage2.bin"
         self.dfu_util = self.root / "dfu-util"
-        self.shofel.write_text("#!/bin/sh\nprintf 'dfu-stage-launch=1\\n'\n")
+        loader_hash = hashlib.sha256(self.padded_loader).digest()
+        self.shofel.write_bytes(b"#!/bin/sh\nprintf 'dfu-stage-launch=1\\n'\nexit 0\n" +
+                                loader_hash)
         self.shofel.chmod(0o755)
         self.intermezzo.write_bytes(b"RCM intermezzo")
-        self.dfu_stage.write_bytes(b"DFU stage payload")
+        self.dfu_stage.write_bytes(b"DFU stage payload" + loader_hash)
         self.dfu_util.write_bytes(b"dfu-util executable")
         self.output = self.root / "jibo-tool.pyz"
 
@@ -63,7 +66,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(archive.read("loader.bin"), self.padded_loader)
             self.assertEqual(archive.read("tools/shofel2_t124"), self.shofel.read_bytes())
             self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")
-            self.assertEqual(archive.read("tools/dfu_stage2.bin"), b"DFU stage payload")
+            self.assertEqual(archive.read("tools/dfu_stage2.bin"),
+                             b"DFU stage payload" + hashlib.sha256(self.padded_loader).digest())
             self.assertEqual(archive.read("tools/dfu-util"), b"dfu-util executable")
             self.assertEqual(archive.read("__main__.py").decode(), package.BOOTSTRAP)
             self.assertFalse(any(name.startswith("bundles/") for name in archive.namelist()))
@@ -146,10 +150,36 @@ class PackageTests(unittest.TestCase):
         self.assertIn("Private key material detected in tools/dfu-util", errors.getvalue())
         self.assertFalse(self.output.exists())
 
-    def test_hardware_checked_file_loader_pin(self):
+    def test_stage2_hash_must_match_loader(self):
+        self.dfu_stage.write_bytes(b"DFU stage payload")
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit):
+            self.run_package()
+        self.assertIn("dfu_stage2.bin does not embed exactly", errors.getvalue())
+        self.assertFalse(self.output.exists())
+
+
+    def test_package_check_rejects_stage2_with_stale_loader_hash(self):
+        self.run_package()
+        loader_hash = hashlib.sha256(self.padded_loader).hexdigest()
+        with patch.object(check_package, "PINNED_LOADER_SIZE", len(self.padded_loader)), \
+                patch.object(check_package, "PINNED_LOADER_SHA256", loader_hash):
+            self.assertEqual(check_package.check_package(self.output), (True, "ready"))
+            damaged = self.root / "stale-stage.pyz"
+            with zipfile.ZipFile(self.output) as source, \
+                    zipfile.ZipFile(damaged, "w") as destination:
+                for name in source.namelist():
+                    content = source.read(name)
+                    if name == "tools/dfu_stage2.bin":
+                        content = b"stale stage helper"
+                    destination.writestr(name, content)
+            result = check_package.check_package(damaged)
+        self.assertEqual(result, (False, "tools/dfu_stage2.bin does not embed the pinned RAM loader hash"))
+
+    def test_pinned_file_loader_hash(self):
         self.assertEqual(package.PINNED_LOADER_SIZE, 432_000)
         self.assertEqual(package.PINNED_LOADER_SHA256,
-                         "6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263")
+                         "19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43")
 
 
 if __name__ == "__main__":

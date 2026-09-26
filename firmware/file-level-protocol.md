@@ -41,22 +41,27 @@ The response has a 61-byte header followed by its body: 8-byte magic
 and a 32-byte SHA-256 digest of the body. A successful read body contains file
 bytes; a successful stat body contains the 52-byte packed values
 `<QIIIIIII16s` (inode, size, allocated bytes, UID, GID, mode, link count,
-extent count, UUID). A successful write response has an empty body. Nonzero
-status indicates rejection; the nonce still identifies that request.
+mapping count, UUID). The mapping count is one for supported files, whether
+the block is described by an extent or a legacy direct pointer. A successful
+write response has an empty body. Nonzero status indicates rejection; the
+nonce still identifies that request.
 
 The first implementation is deliberately narrow: only the five named GPT
 partitions are exposed, and writes can replace existing regular files up to
-4096 bytes when they occupy one allocated ext4 extent/block and have one hard
-link. The inode, data block, block bitmap, inode bitmap, group descriptors,
-and journal are checked before a write; symlink traversal, unallocated inodes
+4096 bytes when they occupy one allocated ext4 data block and have one hard
+link. The block can be mapped by exactly one depth-zero extent or by legacy
+direct pointers with inode flags zero, `i_block[0]` set, and every remaining
+direct and indirect pointer zero. The inode's allocated-sector count must
+equal one filesystem block. The inode, data block, block bitmap, inode bitmap,
+group descriptors, and journal are checked before a write; symlink traversal, unallocated inodes
 or blocks, uninitialized groups, and superblock/GDT/reserved-GDT blocks are
 rejected. Group bitmap and inode-table pointers are also rejected if they
 overlap those reserved ranges. META_BG descriptor locations and group
 descriptor checksums are validated. No create, delete, rename, symlink, hole,
 multi-extent, or allocation operation is provided. The ext4 volume must have
 supported feature bits and a clean superblock/journal. The writer bypasses
-ext4's journal entirely. It writes the existing data block and inode-size field directly
-with checked block I/O, preserving the rest of the inode; host readback
+ext4's journal entirely. It writes the existing data block and inode-size field
+directly with checked block I/O, preserving the rest of the inode; host readback
 checks content and metadata after each write. This has a power-loss window
 between the data and inode writes. Recover by restoring the transaction's
 pre-operation partition baseline. The host transaction saves one verified
@@ -85,6 +90,6 @@ from `normal` to `developer`; the immediate file-level readback matched SHA-256
 `d6c405b54ef96016170d89a9095189a27bb031d6a5f9e134d0d7c91ce641a47c`.
 Before and after, the file was inode 1455, owned by UID/GID 0:0, with mode
 0600, one link, and the same ext4 UUID. The current 500 MiB var dump matched
-an existing backup, so the write reused that rollback image. Other direct
-file writes have not yet been tested on hardware. The candidate is not enabled
-by the pinned loader.
+an existing backup, so the write reused that rollback image. That test used the
+extent-only build. The updated direct-pointer support has been compile-validated
+but not tested on hardware. The candidate remains experimental.

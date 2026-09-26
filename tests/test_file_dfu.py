@@ -93,7 +93,7 @@ class FileDfuTests(unittest.TestCase):
             self.assertTrue(run.call_args.kwargs["allow_progress_completion"])
             self.assertFalse((Path(directory) / "file-request.bin").exists())
 
-    def test_stat_preflight_requires_regular_file_and_one_small_extent(self):
+    def test_stat_preflight_requires_regular_file_and_one_small_mapping(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(j, "_file_request_transfer"), \
                 patch.object(j, "_upload_file_response") as response:
@@ -106,7 +106,7 @@ class FileDfuTests(unittest.TestCase):
                                      ((5, 3, 8192, 0, 0, 0o100600, 1, 1, b"u" * 16),
                                       "regular file"),
                                      ((5, 3, 4096, 0, 0, 0o100600, 1, 2, b"u" * 16),
-                                      "one allocated extent")):
+                                      "one allocated block mapping")):
                 response.return_value = j.FILE_STAT_STRUCT.pack(*changes)
                 with self.subTest(changes=changes), self.assertRaisesRegex(j.DfuError, message):
                     j._stat_partition_file_rpc(
@@ -115,7 +115,7 @@ class FileDfuTests(unittest.TestCase):
     def test_stat_command_reports_octal_permissions_without_writing(self):
         metadata = {"inode": 26450, "size_bytes": 17, "allocated_bytes": 1024,
                     "uid": 0, "gid": 0, "mode": 0o100644, "nlink": 1,
-                    "extent_count": 1, "ext4_uuid": "00" * 16}
+                    "mapping_count": 1, "ext4_uuid": "00" * 16}
         with patch.object(j, "_file_loader_context", return_value=("1-1", [], "serial-sha256:robot", "")), \
                 patch.object(j, "_stat_partition_file_rpc", return_value=metadata) as request:
             result = j.stat_partition_file_live("/jibo/mode.json", "var", "1-1", "dfu-util")
@@ -139,7 +139,7 @@ class FileDfuTests(unittest.TestCase):
     def _transaction_patches(self, operation_dir, events, *, post_mode=None):
         metadata = {"inode": 12, "size_bytes": 3, "allocated_bytes": 4096,
                     "uid": 0, "gid": 0, "mode": 0o100600, "nlink": 1,
-                    "extent_count": 1, "ext4_uuid": "ab" * 16}
+                    "mapping_count": 1, "ext4_uuid": "ab" * 16}
         stat_calls = [0]
         def stat(*_args, **_kwargs):
             stat_calls[0] += 1

@@ -47,6 +47,8 @@ def main():
     out = args.out.resolve()
     if not loader.is_file():
         parser.error("candidate loader is missing: " + str(loader))
+    size = loader.stat().st_size
+    sha = digest(loader)
     candidate_manifest = loader.parent / "manifest.json"
     if (not candidate_manifest.is_file() and
             sha == digest(ROOT / "assets/loader.bin")):
@@ -54,8 +56,6 @@ def main():
     if not candidate_manifest.is_file():
         parser.error("candidate manifest is missing: " + str(candidate_manifest))
     candidate = json.loads(candidate_manifest.read_text())
-    size = loader.stat().st_size
-    sha = digest(loader)
     if (candidate.get("kind") != "experimental-file-rpc-loader" or
             candidate.get("size_bytes") != size or candidate.get("sha256") != sha):
         parser.error("candidate loader does not match its file-RPC build manifest")

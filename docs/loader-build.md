@@ -16,7 +16,11 @@ python3 scripts/build_loader.py \
   --file-level-candidate
 ```
 
-The included padded image is 432,000 bytes with SHA-256 `6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263`. Its checked manifest is `assets/manifest.json`.
+The included padded image is 432,000 bytes with SHA-256
+`19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43`. Its checked
+manifest is `assets/manifest.json`. This build accepts one-block extents and
+legacy one-block direct-pointer files. The updated direct-pointer path has been
+compile-validated but not tested on hardware.
 
 Verify the padded output with:
 
@@ -28,8 +32,8 @@ import hashlib
 raw = Path('/tmp/jibo-loader-build/ram-dfu-loader/u-boot-dtb-tegra.bin').read_bytes()
 padded = raw + bytes((-len(raw)) % 16)
 assert len(padded) == 432000
-assert hashlib.sha256(padded).hexdigest() == '6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263'
-print('Pinned loader reproduced')
+assert hashlib.sha256(padded).hexdigest() == '19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43'
+print('Direct-pointer candidate loader reproduced')
 PY
 ```
 

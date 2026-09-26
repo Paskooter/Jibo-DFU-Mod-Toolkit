@@ -11,7 +11,15 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_LOADER_SIZE = 432_000
-PINNED_LOADER_SHA256 = "6c44d0a5371f734e727083e759f713c40f168dc0f68a332b51d32c5d17a6f263"
+PINNED_LOADER_SHA256 = "19e1dee8a473843bb915b504cf53a10b26cdff8a6fd81d6332ae031c6b569d43"
+BASELINE_LOADER_SHA256 = bytes.fromhex(
+    "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689")
+
+
+def candidate_loader_hash_matches(content, loader_sha256):
+    """Check that a stage helper embeds this loader and excludes its old pin."""
+    expected = bytes.fromhex(loader_sha256)
+    return content.count(expected) == 1 and BASELINE_LOADER_SHA256 not in content
 
 BOOTSTRAP = '''import os, pathlib, subprocess, sys, tempfile, zipfile
 with tempfile.TemporaryDirectory(prefix="jibo-dfu-") as directory:
@@ -86,6 +94,9 @@ def main():
     digest = hashlib.sha256(loader).hexdigest()
     if digest != PINNED_LOADER_SHA256:
         parser.error("Padded loader SHA-256 does not match the pinned RAM DFU image.")
+    for name in ("tools/shofel2_t124", "tools/dfu_stage2.bin"):
+        if not candidate_loader_hash_matches(data[name], digest):
+            parser.error(name + " does not embed exactly the pinned RAM loader hash.")
     data["loader.bin"] = loader
 
     sources = {
