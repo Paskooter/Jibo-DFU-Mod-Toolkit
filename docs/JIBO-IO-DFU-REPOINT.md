@@ -11,13 +11,18 @@ permanent trust store and remaining cloud-service changes.
 
 The helper currently recognizes the exact official 3.3.4 RTM, 5.4.0 EFT,
 5.4.2 production, [8.19.0 production](https://pvindex.org/repository/platformos/builds/release-production/jibo-pvt-flash-build-8.19.0-20171018.tar.bz2),
+[9.12.0 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-9.12.0-20180103-production.tar.bz2),
 [10.5.9 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-10.5.9-20180218-production.tar.bz2),
+[11.7.1 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-11.7.1-20180314-production.tar.bz2),
 [12.10.0 production](https://pvindex.org/repository/platformos/builds/sqa-testing/jibo-pvt-flash-build-12.10.0-20180823-production.tar.bz2),
-and 13.0.0 production file layouts checked offline. The checked 8.19.0,
-10.5.9, and 12.10.0 OTA files share the 13.0.0 input hashes. It
-detects each rootfs slot separately and probes the known nested client copies
-when present. It also probes four optional client copies seen in an archived
-3.3.0 skills package.
+and 13.0.0 production file layouts checked offline. In the sampled 8.19.0,
+9.12.0, 10.5.9, 11.7.1, and 12.10.0 bundles, the repoint target paths and stock
+file hashes match the 13.0.0 inputs across `rootfs`, `services`, and `skills`,
+and their allocated files fit the transformed contents. This verifies those
+specific bundles; other releases remain unverified. The helper detects each
+rootfs slot separately and probes the known nested client copies when present.
+It also probes four optional client copies seen in an archived 3.3.0 skills
+package.
 It refuses modified or unknown images, non-contiguous files,
 too-small preallocated files, and the bundled `jibo-file-v1` loader. It requires
 a separately built, opt-in `jibo-file-v2` loader. This v2 loader has **not been
