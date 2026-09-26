@@ -235,7 +235,7 @@
 -	    (!strncmp(dfu->name, "emmc-", 5) || !strcmp(dfu->name, "jibo-dfu-v1")))
 +	    (!strncmp(dfu->name, "emmc-", 5) ||
 +	     !strcmp(dfu->name, "jibo-dfu-v1") ||
-+	     !strcmp(dfu->name, "jibo-file-v1")))
++	     !strcmp(dfu->name, "jibo-file-v2")))
  		return -EPERM;
  	/* skills-* writes are allowed only for generated, exact GPT slices. */
  	if (op == DFU_OP_WRITE && !strncmp(dfu->name, "skills-", 7) &&
@@ -778,8 +778,8 @@
 +#include <blk.h>
 +#include <part.h>
 +
-+#define JIBO_FILE_RPC_MAX_REQUEST 4458
-+#define JIBO_FILE_RPC_MAX_RESPONSE 4157
++#define JIBO_FILE_RPC_MAX_REQUEST 12650
++#define JIBO_FILE_RPC_MAX_RESPONSE 12349
 +
 +int jibo_file_rpc_run(struct blk_desc *dev, disk_partition_t *part,
 +                      const unsigned char *request, unsigned int request_len,
@@ -789,7 +789,7 @@
 +#endif
 --- /dev/null
 +++ b/fs/ext4/jibo_file_rpc.c
-@@ -0,0 +1,1112 @@
+@@ -0,0 +1,1149 @@
 +/* SPDX-License-Identifier: GPL-2.0+ */
 +/*
 + * Bounded Jibo file mailbox.  This intentionally does not call ext4fs_init(),
@@ -811,7 +811,8 @@
 +#include "jibo_file_rpc.h"
 +
 +#define JIBO_FILE_MAX_PATH 255
-+#define JIBO_FILE_MAX_BYTES 4096
++#define JIBO_FILE_MAX_BYTES 12288
++#define JIBO_FILE_MAX_BLOCKS 12
 +#define JIBO_FILE_REQ_HEADER 31
 +#define JIBO_FILE_PRECONDITION 76
 +#define JIBO_FILE_RESP_HEADER 61
@@ -1507,43 +1508,63 @@
 +static int jibo_file_metadata(struct ext2fs_node *node, int ino,
 +			      struct ext2_inode *inode, u8 *super,
 +			      u8 *stat_buf, u32 blocksize,
-+			      u64 *data_block)
++			      u64 *data_blocks, u32 *block_count)
 +{
 +	struct ext4_extent_header *eh;
 +	struct ext4_extent *extent;
 +	unsigned long long phys;
-+	u32 uid, gid, size;
++	u32 uid, gid, size, blocks, sectors_per_block, i, j;
 +
 +	if ((le16_to_cpu(inode->mode) & FILETYPE_INO_MASK) != FILETYPE_INO_REG ||
 +	    le16_to_cpu(inode->nlinks) != 1 ||
-+	    !(le32_to_cpu(inode->flags) & JIBO_EXT4_EXTENT_FL) ||
++	    !data_blocks || !block_count ||
++	    blocksize < 1024 || blocksize > 4096 || blocksize % 512 ||
 +	    le32_to_cpu(inode->dir_acl) != 0)
 +		return -1;
-+	eh = (struct ext4_extent_header *)inode->b.blocks.dir_blocks;
-+	if (le16_to_cpu(eh->eh_magic) != JIBO_EXT4_EXTENT_MAGIC ||
-+	    le16_to_cpu(eh->eh_depth) != 0 || le16_to_cpu(eh->eh_entries) != 1)
++	sectors_per_block = blocksize / 512;
++	if (!sectors_per_block ||
++	    le32_to_cpu(inode->blockcnt) % sectors_per_block)
 +		return -1;
-+	extent = (struct ext4_extent *)(eh + 1);
-+	if (le32_to_cpu(extent->ee_block) != 0 ||
-+	    le16_to_cpu(extent->ee_len) != 1)
++	blocks = le32_to_cpu(inode->blockcnt) / sectors_per_block;
++	if (!blocks || blocks > JIBO_FILE_MAX_BLOCKS)
 +		return -1;
-+	phys = ((unsigned long long)le16_to_cpu(extent->ee_start_hi) << 32) |
-+		le32_to_cpu(extent->ee_start_lo);
-+	if (le16_to_cpu(extent->ee_start_hi) ||
-+	    phys >= __le32_to_cpu(node->data->sblock.total_blocks) ||
-+	    le32_to_cpu(inode->blockcnt) != blocksize / 512 || !phys ||
-+	    jibo_file_data_block_safe(phys, blocksize, super))
-+		return -1;
-+	{
-+		unsigned int i;
-+		for (i = 0; i < jibo_journal_count; ++i)
-+			if (phys >= jibo_journal_start[i] &&
-+			    phys - jibo_journal_start[i] < jibo_journal_blocks[i])
-+				return -1;
-+	}
 +	size = le32_to_cpu(inode->size);
-+	if (size > JIBO_FILE_MAX_BYTES || size > blocksize)
++	if (!size || size > JIBO_FILE_MAX_BYTES || size > blocks * blocksize)
 +		return -1;
++	if (le32_to_cpu(inode->flags) & JIBO_EXT4_EXTENT_FL) {
++		eh = (struct ext4_extent_header *)inode->b.blocks.dir_blocks;
++		if (le16_to_cpu(eh->eh_magic) != JIBO_EXT4_EXTENT_MAGIC ||
++		    le16_to_cpu(eh->eh_depth) != 0 ||
++		    le16_to_cpu(eh->eh_entries) != 1)
++			return -1;
++		extent = (struct ext4_extent *)(eh + 1);
++		if (le32_to_cpu(extent->ee_block) != 0 ||
++		    le16_to_cpu(extent->ee_len) != blocks ||
++		    le16_to_cpu(extent->ee_start_hi))
++			return -1;
++		phys = le32_to_cpu(extent->ee_start_lo);
++	} else {
++		/* Stock Release-13 images use contiguous ext2 direct pointers. */
++		phys = get_unaligned_le32((u8 *)inode->b.blocks.dir_blocks);
++		if (get_unaligned_le32((u8 *)inode->b.blocks.dir_blocks + 48))
++			return -1; /* no indirect block or allocation */
++	}
++	if (!phys || phys >= __le32_to_cpu(node->data->sblock.total_blocks))
++		return -1;
++	for (i = 0; i < blocks; ++i) {
++		u64 block = phys + i;
++		if (!(le32_to_cpu(inode->flags) & JIBO_EXT4_EXTENT_FL) &&
++		    get_unaligned_le32((u8 *)inode->b.blocks.dir_blocks + i * 4) != block)
++			return -1;
++		if (block >= __le32_to_cpu(node->data->sblock.total_blocks) ||
++		    jibo_file_data_block_safe(block, blocksize, super))
++			return -1;
++		for (j = 0; j < jibo_journal_count; ++j)
++			if (block >= jibo_journal_start[j] &&
++			    block - jibo_journal_start[j] < jibo_journal_blocks[j])
++				return -1;
++		data_blocks[i] = block;
++	}
 +	uid = le16_to_cpu(inode->uid) |
 +		((u32)get_unaligned_le16((u8 *)inode + 120) << 16);
 +	gid = le16_to_cpu(inode->gid) |
@@ -1551,7 +1572,7 @@
 +	if (stat_buf) {
 +		put_unaligned_le64((u64)ino, stat_buf);
 +		jibo_put_le32(stat_buf + 8, size);
-+		jibo_put_le32(stat_buf + 12, blocksize);
++		jibo_put_le32(stat_buf + 12, blocks * blocksize);
 +		jibo_put_le32(stat_buf + 16, uid);
 +		jibo_put_le32(stat_buf + 20, gid);
 +		jibo_put_le32(stat_buf + 24, le16_to_cpu(inode->mode));
@@ -1559,7 +1580,7 @@
 +		jibo_put_le32(stat_buf + 32, 1);
 +		memcpy(stat_buf + 36, super + 104, 16);
 +	}
-+	*data_block = phys;
++	*block_count = blocks;
 +	return 0;
 +}
 +
@@ -1609,7 +1630,8 @@
 +			   struct ext2fs_node *node, int ino,
 +			   struct ext2_inode *inode,
 +			   const u8 *pre, const u8 *new_data, u32 new_len,
-+			   u32 blocksize, u8 *super, u64 data_block)
++			   u32 blocksize, u8 *super,
++			   const u64 *data_blocks, u32 block_count)
 +{
 +	struct ext2_inode raw_inode, verify_inode;
 +	struct ext2fs_node verify_node;
@@ -1617,20 +1639,25 @@
 +	u8 *verify_block = NULL;
 +	u8 digest[32];
 +	u64 inode_block, safe_inode_block;
-+	u32 inode_off, safe_inode_off;
++	u32 inode_off, safe_inode_off, allocated_bytes, i;
 +	loff_t actual;
 +	int status = JIBO_STATUS_IO;
 +
-+	if (new_len == 0 || new_len > JIBO_FILE_MAX_BYTES ||
-+	    new_len > blocksize || new_len > get_unaligned_le32(pre + 12))
++	if (!data_blocks || !block_count || block_count > JIBO_FILE_MAX_BLOCKS ||
++	    blocksize < 1024 || blocksize > 4096)
 +		return JIBO_STATUS_UNSUPPORTED;
-+	data_buf = memalign(ARCH_DMA_MINALIGN, blocksize);
-+	read_buf = memalign(ARCH_DMA_MINALIGN, blocksize);
++	allocated_bytes = block_count * blocksize;
++	if (new_len == 0 || new_len > JIBO_FILE_MAX_BYTES ||
++	    new_len > allocated_bytes ||
++	    allocated_bytes != get_unaligned_le32(pre + 12))
++		return JIBO_STATUS_UNSUPPORTED;
++	data_buf = memalign(ARCH_DMA_MINALIGN, allocated_bytes);
++	read_buf = memalign(ARCH_DMA_MINALIGN, allocated_bytes);
 +	inode_buf = memalign(ARCH_DMA_MINALIGN, blocksize);
 +	verify_block = memalign(ARCH_DMA_MINALIGN, blocksize);
 +	if (!data_buf || !read_buf || !inode_buf || !verify_block)
 +		goto out;
-+	memset(data_buf, 0, blocksize);
++	memset(data_buf, 0, allocated_bytes);
 +	memcpy(data_buf, new_data, new_len);
 +	if (ext4fs_inode_location(ext4fs_root, ino, &inode_block, &inode_off) ||
 +	    jibo_inode_table_location_safe(ino, super, blocksize,
@@ -1639,17 +1666,25 @@
 +	    jibo_raw_read(dev, part, inode_block, blocksize, inode_buf))
 +		goto out;
 +	memcpy(&raw_inode, inode_buf + inode_off, sizeof(raw_inode));
-+	if (!jibo_inode_matches(&raw_inode, inode) ||
-+	    jibo_raw_read(dev, part, data_block, blocksize, read_buf))
++	if (!jibo_inode_matches(&raw_inode, inode))
 +		goto out;
++	for (i = 0; i < block_count; ++i)
++		if (jibo_raw_read(dev, part, data_blocks[i], blocksize,
++				  read_buf + i * blocksize))
++			goto out;
 +	jibo_sha256(read_buf, get_unaligned_le32(pre + 8), digest);
 +	if (memcmp(digest, pre + 44, sizeof(digest)))
 +		goto out;
-+	if (jibo_raw_write(dev, part, data_block, blocksize, data_buf))
-+		goto poison;
++	for (i = 0; i < block_count; ++i)
++		if (jibo_raw_write(dev, part, data_blocks[i], blocksize,
++				   data_buf + i * blocksize))
++			goto poison;
 +	blkcache_invalidate(dev->if_type, dev->devnum);
-+	if (jibo_raw_read(dev, part, data_block, blocksize, read_buf) ||
-+	    memcmp(data_buf, read_buf, blocksize))
++	for (i = 0; i < block_count; ++i)
++		if (jibo_raw_read(dev, part, data_blocks[i], blocksize,
++				  read_buf + i * blocksize))
++			goto poison;
++	if (memcmp(data_buf, read_buf, allocated_bytes))
 +		goto poison;
 +	if (jibo_raw_read(dev, part, inode_block, blocksize, inode_buf))
 +		goto poison;
@@ -1707,8 +1742,8 @@
 +	u8 super[1024], request_id[16], digest[32], stat_buf[52];
 +	u8 *file_data = NULL;
 +	u32 path_len, content_len, blocksize, status = JIBO_STATUS_BAD_REQUEST;
-+	u32 operation, inode_no = 0, file_size = 0;
-+	u64 data_block = 0;
++	u32 operation, inode_no = 0, file_size = 0, file_blocks = 0;
++	u64 data_blocks[JIBO_FILE_MAX_BLOCKS];
 +	unsigned int expected_len, body_len = 0;
 +	int found_ino = 0;
 +	const u8 *path, *pre = NULL, *new_data = NULL;
@@ -1844,16 +1879,17 @@
 +	inode_no = found_ino;
 +	inode = node->inode;
 +	if (jibo_file_metadata(node, inode_no, &inode, super, stat_buf,
-+			       blocksize, &data_block)) {
++			       blocksize, data_blocks, &file_blocks)) {
 +		status = JIBO_STATUS_UNSUPPORTED;
 +		goto respond;
 +	}
 +	file_size = le32_to_cpu(inode.size);
-+	if (file_size > JIBO_FILE_MAX_BYTES || file_size > blocksize) {
++	if (file_size > JIBO_FILE_MAX_BYTES ||
++	    file_size > file_blocks * blocksize) {
 +		status = JIBO_STATUS_UNSUPPORTED;
 +		goto respond;
 +	}
-+	file_data = memalign(ARCH_DMA_MINALIGN, blocksize);
++	file_data = memalign(ARCH_DMA_MINALIGN, file_blocks * blocksize);
 +	if (!file_data) {
 +		status = JIBO_STATUS_IO;
 +		goto respond;
@@ -1876,7 +1912,7 @@
 +		jibo_sha256(file_data, file_size, digest);
 +		if (get_unaligned_le64(pre) != (u64)inode_no ||
 +		    get_unaligned_le32(pre + 8) != file_size ||
-+		    get_unaligned_le32(pre + 12) != blocksize ||
++		    get_unaligned_le32(pre + 12) != file_blocks * blocksize ||
 +		    get_unaligned_le32(pre + 16) != get_unaligned_le32(stat_buf + 16) ||
 +		    get_unaligned_le32(pre + 20) != get_unaligned_le32(stat_buf + 20) ||
 +		    get_unaligned_le32(pre + 24) != get_unaligned_le32(stat_buf + 24) ||
@@ -1885,7 +1921,8 @@
 +		} else {
 +			status = jibo_write_file(dev, part, node, inode_no, &inode,
 +					 pre, new_data, content_len,
-+					 blocksize, super, data_block);
++					 blocksize, super, data_blocks,
++					 file_blocks);
 +		}
 +	}
 +respond:

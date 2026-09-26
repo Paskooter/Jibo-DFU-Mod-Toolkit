@@ -17,10 +17,12 @@ class FileDfuTests(unittest.TestCase):
         source = (Path(j.ROOT) / "firmware/file-level-protocol.md").read_text()
         c_source = (Path(j.ROOT) / "firmware/file-level.patch").read_text()
         self.assertEqual(j.FILE_WRITE_PRECONDITION.size, 76)
-        self.assertEqual(j.FILE_RPC_MAX_REQUEST, 4458)
+        self.assertEqual(j.FILE_RPC_MAX_REQUEST, 12650)
         self.assertIn("76-byte compare-and-write", source)
         self.assertIn("#define JIBO_FILE_PRECONDITION 76", c_source)
-        self.assertIn("#define JIBO_FILE_RPC_MAX_REQUEST 4458", c_source)
+        self.assertIn("#define JIBO_FILE_RPC_MAX_REQUEST 12650", c_source)
+        self.assertIn("#define JIBO_FILE_MAX_BLOCKS 12", c_source)
+        self.assertIn("jibo-file-v2", (Path(j.ROOT) / "firmware/jibo_dfu_entry.h").read_text())
 
     def test_aero_meta_bg_group_66_fixture_uses_meta_bg_location(self):
         patch = (Path(j.ROOT) / "firmware/file-level.patch").read_text()
@@ -93,7 +95,7 @@ class FileDfuTests(unittest.TestCase):
             self.assertTrue(run.call_args.kwargs["allow_progress_completion"])
             self.assertFalse((Path(directory) / "file-request.bin").exists())
 
-    def test_stat_preflight_requires_regular_file_and_one_small_extent(self):
+    def test_stat_preflight_requires_regular_file_and_bounded_allocation(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(j, "_file_request_transfer"), \
                 patch.object(j, "_upload_file_response") as response:
@@ -103,7 +105,7 @@ class FileDfuTests(unittest.TestCase):
                 "dfu-util", "1-2", "var", "/jibo/mode.json", directory)["allocated_bytes"], 4096)
             for changes, message in (((5, 3, 4096, 0, 0, 0o040755, 1, 1, b"u" * 16),
                                       "regular file"),
-                                     ((5, 3, 8192, 0, 0, 0o100600, 1, 1, b"u" * 16),
+                                     ((5, 3, 16384, 0, 0, 0o100600, 1, 1, b"u" * 16),
                                       "regular file"),
                                      ((5, 3, 4096, 0, 0, 0o100600, 1, 2, b"u" * 16),
                                       "one allocated extent")):

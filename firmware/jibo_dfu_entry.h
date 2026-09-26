@@ -77,7 +77,7 @@ static void jibo_dfu_entry(void)
 		goto failed;
 	used = n;
 #ifdef CONFIG_JIBO_DFU_FILE_RPC
-	n = snprintf(entry, sizeof(entry), ";jibo-file-v1 raw 0 34");
+	n = snprintf(entry, sizeof(entry), ";jibo-file-v2 raw 0 34");
 	if (n < 0 || n >= sizeof(entry) || used + n >= sizeof(alternatives))
 		goto failed;
 	memcpy(alternatives + used, entry, n + 1);

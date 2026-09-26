@@ -29,8 +29,10 @@ RCM = ("0955", "7740")
 DFU = ("0955", "701a")
 MARKER = "jibo-dfu-v1"
 FILE_LEVEL_MARKER = "jibo-file-v1"
+FILE_LEVEL_MARKER_V2 = "jibo-file-v2"
 FILE_LEVEL_PARTITIONS = ("rootfsA", "rootfsB", "services", "skills", "var")
-FILE_LEVEL_MAX_BYTES = 4096
+FILE_LEVEL_MAX_BYTES_V1 = 4096
+FILE_LEVEL_MAX_BYTES = 12288
 FILE_RPC_MAGIC = b"JIBOFL1\0"
 FILE_RPC_RESPONSE_MAGIC = b"JIBOR1\0\0"
 FILE_RPC_HEADER = struct.Struct("<8sBHI16s")
@@ -1670,8 +1672,8 @@ def _file_response_alt_name(partition):
 
 def _file_loader_context(port, dfu_util, partitions, require_identity):
     port, names, device_tag, listing = _dfu_context(port, dfu_util, include_output=True)
-    if FILE_LEVEL_MARKER not in names:
-        raise DfuError("The active DFU loader does not support file access. Load the toolkit's current RAM loader or use a full-partition workflow.")
+    if FILE_LEVEL_MARKER not in names and FILE_LEVEL_MARKER_V2 not in names:
+        raise DfuError("The active DFU loader does not support file access. Load the toolkit's RAM loader or use a full-partition workflow.")
     missing = [name for name in (_file_alt_name(partition) for partition in partitions)
                if name not in names]
     if missing:
@@ -1688,7 +1690,8 @@ def _file_loader_context(port, dfu_util, partitions, require_identity):
 
 def _live_var_file_available(port, dfu_util):
     _, names, _ = _dfu_context(port, dfu_util)
-    return {FILE_LEVEL_MARKER, "jibo-file-var-in", "jibo-file-var-out"}.issubset(names)
+    return ({"jibo-file-var-in", "jibo-file-var-out"}.issubset(names) and
+            (FILE_LEVEL_MARKER in names or FILE_LEVEL_MARKER_V2 in names))
 
 
 def _file_request(path, operation, content=b"", request_id=None, precondition=None):
@@ -1888,6 +1891,11 @@ class FileTransaction:
             raise DfuError("A file transaction can replace each partition path only once.")
         port, names, device_tag, alt_output = _file_loader_context(
             self.port, self.dfu_util, touched, True)
+        if (FILE_LEVEL_MARKER_V2 not in names and
+                any(len(edit["content"]) > FILE_LEVEL_MAX_BYTES_V1
+                    for edit in self.edits if "content" in edit)):
+            raise DfuError("This replacement exceeds the v1 loader's 4096-byte limit; "
+                           "use a validated jibo-file-v2 candidate loader.")
         gpt_layout = _read_gpt_layout(self.dfu_util, port, names)
         capacities = {name: details["size_bytes"] for name, details in gpt_layout.items()}
         partition_identities = {}
@@ -1935,6 +1943,10 @@ class FileTransaction:
                     edit["content"] = edit["transform"](current)
                 if not isinstance(edit["content"], bytes) or not (0 < len(edit["content"]) <= FILE_LEVEL_MAX_BYTES):
                     raise DfuError("A replacement must contain 1 to {} bytes.".format(FILE_LEVEL_MAX_BYTES))
+                if (FILE_LEVEL_MARKER_V2 not in names and
+                        len(edit["content"]) > FILE_LEVEL_MAX_BYTES_V1):
+                    raise DfuError("This replacement exceeds the v1 loader's 4096-byte limit; "
+                                   "use a validated jibo-file-v2 candidate loader.")
                 if len(edit["content"]) > before_stat["allocated_bytes"]:
                     raise DfuError("{} needs {} bytes but has only {} bytes allocated; this in-place writer cannot grow files."
                                    .format(edit["path"], len(edit["content"]),
@@ -2355,6 +2367,15 @@ def main(argv=None):
     _add_dfu_argument(wifi_file)
     _add_operation_argument(wifi_file)
     wifi_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
+    repoint = sub.add_parser("repoint-jibo-io",
+                             help="Prepare stock Release 13.0.0 for its first jibo.io OTA using the experimental v2 file loader")
+    _add_device_arguments(repoint)
+    _add_dfu_argument(repoint)
+    _add_operation_argument(repoint)
+    repoint.add_argument("--dry-run", action="store_true", help="Read and validate every stock file without writing")
+    repoint.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
+    repoint.add_argument("--claim-code-stdin", action="store_true",
+                         help="Read one portal claim code from stdin, without exposing it in process arguments")
     write = sub.add_parser("write-var", help="Back up var, write an edited image, and verify its readback")
     write.add_argument("image", type=Path)
     _add_device_arguments(write)
@@ -2487,6 +2508,16 @@ def main(argv=None):
                 tool("dfu-util", args.dfu_util), args.operation_dir,
                 True if args.yes else None)
             password = None
+        elif args.command == "repoint-jibo-io":
+            import jibo_repoint
+            claim_code = None
+            if args.claim_code_stdin:
+                claim_code = sys.stdin.readline(256).strip()
+                if not re.fullmatch(r"[A-Za-z0-9_-]{43}", claim_code):
+                    raise DfuError("The portal claim code is missing or invalid.")
+            result = jibo_repoint.repoint_jibo_io(
+                args.port, tool("dfu-util", args.dfu_util), args.operation_dir,
+                True if args.yes else None, claim_code, args.dry_run)
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
                       for path in _update_candidates(args.directory)]

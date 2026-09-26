@@ -55,6 +55,7 @@ class PackageTests(unittest.TestCase):
         expected = {
             "__main__.py", "loader.bin", "README.md", "jibo_dfu.py",
             "jibo_dfu_bounded.py", "jibo_images.py", "jibo_updates.py", "jibo_tui.py",
+            "jibo_repoint.py", "assets/isrg-root-x1.pem",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
             "tools/dfu-util",
         }

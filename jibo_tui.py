@@ -38,7 +38,9 @@ FILE_LEVEL_VAR_ALTS = frozenset(("jibo-file-v1", "jibo-file-var-in",
 
 def _can_edit_var_files(readiness):
     return (readiness.state == "dfu-ready" and
-            FILE_LEVEL_VAR_ALTS.issubset(readiness.alt_names))
+            {"jibo-file-var-in", "jibo-file-var-out"}.issubset(readiness.alt_names) and
+            ("jibo-file-v1" in readiness.alt_names or
+             "jibo-file-v2" in readiness.alt_names))
 
 
 def inspect_readiness(api, found=None):

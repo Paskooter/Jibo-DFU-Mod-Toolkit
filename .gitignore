@@ -8,6 +8,8 @@ PROJECT_SPEC.md
 *.raw
 *.dump
 *.pem
+# Public root CA only; private PEM material remains ignored.
+!assets/isrg-root-x1.pem
 *.der
 *.key
 captures/
