@@ -92,7 +92,7 @@ class EntryTests(unittest.TestCase):
             ]), 0)
         flash.assert_called_once_with(
             Path(self.root / "package.tar.bz2"), True, "1-1", "/usr/bin/dfu-util",
-            None, "FLASH UPDATE", False, manifest,
+            None, "FLASH UPDATE", False, manifest, False,
         )
 
 

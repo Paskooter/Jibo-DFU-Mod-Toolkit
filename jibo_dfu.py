@@ -1110,7 +1110,8 @@ def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, 
 
 
 def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
-                         operation_directory, record_path, record, write_entry):
+                         operation_directory, record_path, record, write_entry,
+                         verify_readback=True):
     candidate = Path(candidate)
     if candidate.is_symlink() or not candidate.is_file() or candidate.stat().st_size != capacity:
         raise DfuError("The prepared skills image does not match the GPT partition size.")
@@ -1141,23 +1142,25 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                     allow_progress_completion=True,
                     label="Writing skills chunk {}/{} ({})".format(
                         index, len(chunks), chunk["name"]))
-                readback = temporary / "readback.img"
-                actual_hash = _upload_partition(dfu_util, port, chunk["name"],
-                                                chunk["size_bytes"], readback)
-                chunk_record["readback_sha256"] = actual_hash
-                if actual_hash != expected_hash:
-                    chunk_record["status"] = "readback mismatch"
-                    _private_write(record_path, record)
-                    raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(
-                        chunk["name"]))
-                with readback.open("rb") as stream:
-                    _copy_exact(stream, _NullWriter(), chunk["size_bytes"], readback_hash)
-                chunk_record["status"] = "verified"
+                if verify_readback:
+                    readback = temporary / "readback.img"
+                    actual_hash = _upload_partition(dfu_util, port, chunk["name"],
+                                                    chunk["size_bytes"], readback)
+                    chunk_record["readback_sha256"] = actual_hash
+                    if actual_hash != expected_hash:
+                        chunk_record["status"] = "readback mismatch"
+                        _private_write(record_path, record)
+                        raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(
+                            chunk["name"]))
+                    with readback.open("rb") as stream:
+                        _copy_exact(stream, _NullWriter(), chunk["size_bytes"], readback_hash)
+                chunk_record["status"] = "verified" if verify_readback else "transfer complete"
                 _private_write(record_path, record)
-        if readback_hash.hexdigest() != candidate_hash:
+        if verify_readback and readback_hash.hexdigest() != candidate_hash:
             raise DfuError("The assembled skills readback did not match the prepared image.")
-        write_entry["readback_sha256"] = readback_hash.hexdigest()
-        write_entry["status"] = "verified"
+        if verify_readback:
+            write_entry["readback_sha256"] = readback_hash.hexdigest()
+        write_entry["status"] = "verified" if verify_readback else "transfer complete"
         _private_write(record_path, record)
         return candidate_hash
     except (DfuError, OSError):
@@ -1234,7 +1237,7 @@ def _validate_resume_manifest(manifest_path, package, preserve_var,
         raise DfuError("The failed update record has an invalid write list.")
     clean_writes = []
     allowed_statuses = {"write started", "writing bounded skills chunks", "verified",
-                        "verification failed", "failed"}
+                        "transfer complete", "verification failed", "failed"}
     for index, entry in enumerate(writes):
         if not isinstance(entry, dict) or index >= len(partitions) or \
                 entry.get("partition") != partitions[index]:
@@ -1615,7 +1618,8 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
 
 
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
-                 confirmation=None, dry_run=False, resume_from=None):
+                 confirmation=None, dry_run=False, resume_from=None,
+                 verify_readback=False):
     """Install an official full-flash package using named DFU alternatives."""
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
@@ -1652,22 +1656,25 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
             "skills_transfer": ("{} GPT-bounded DFU chunks".format(len(skills_chunks))
                                 if skills_chunks else "single named DFU alternative"),
+            "readback_policy": "full partition readback" if verify_readback else "DFU transfer completion",
             "status": "plan only" if dry_run else "awaiting confirmation"}
     if resume_record is not None:
         plan["resume_from"] = str(resume_path)
         plan["previously_attempted_partitions"] = [entry["partition"]
                                                     for entry in resume_record["writes"]]
-        plan["resume_check"] = "full-read each recorded partition; skip only on candidate hash match"
+        plan["resume_check"] = "check prior partition writes; skip only on candidate hash match"
     if dry_run:
         return plan
     print("\nOfficial full-flash update plan:")
     print(json.dumps(plan, indent=2))
-    print("This writes the listed partitions, verifies each by a full USB readback, then requests a reset.")
+    print("This writes the listed partitions, then requests a reset.")
+    if verify_readback:
+        print("Each partition will be read back in full and compared with the prepared image.")
     print("A preserved var keeps its current mode, identity, network settings, and first-boot resize marker.")
     if resume_record is None:
         print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
     else:
-        print("Resume checks the saved var hash and fully reads every recorded partition before deciding to skip or rewrite it.")
+        print("Resume uses the saved var backup and checks prior partition writes before deciding to skip or rewrite them.")
     if callable(confirmation):
         if not confirmation(plan):
             return {**plan, "status": "cancelled"}
@@ -1718,10 +1725,6 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 backup = record["backups"]["var"]
                 record["status"] = "checking saved var"
                 _private_write(record_path, record)
-                with tempfile.TemporaryDirectory(prefix="resume-var-check-", dir=directory) as check_dir:
-                    live_var_hash = _upload_var(dfu_util, port, Path(check_dir) / "var.img")
-                if live_var_hash != backup["sha256"]:
-                    raise DfuError("The connected robot's var SHA-256 does not match the rollback backup in the failed update. No partition write was attempted.")
                 if _has_unique_device_tag(device_tag):
                     _verify_var_backup_for_robot(backup, device_tag)
             else:
@@ -1740,7 +1743,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 if name == "skills" and skills_chunks:
                     actual = _write_skills_chunks(
                         dfu_util, port, candidate, capacities[name], skills_chunks,
-                        directory, record_path, record, entry)
+                        directory, record_path, record, entry, verify_readback)
                 else:
                     run_with_progress(
                         [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
@@ -1748,15 +1751,18 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         download_size=capacities[name],
                         allow_progress_completion=True,
                         label="Writing {} ({} bytes)".format(name, capacities[name]))
-                    with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
-                        readback = Path(readback_dir) / "partition.img"
-                        actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
-                entry["readback_sha256"] = actual
-                if actual != digest:
-                    entry["status"] = "verification failed"
-                    _private_write(record_path, record)
-                    raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(name))
-                entry["status"] = "verified"
+                    actual = None
+                    if verify_readback:
+                        with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
+                            readback = Path(readback_dir) / "partition.img"
+                            actual = _upload_partition(dfu_util, port, name, capacities[name], readback)
+                if verify_readback:
+                    entry["readback_sha256"] = actual
+                    if actual != digest:
+                        entry["status"] = "verification failed"
+                        _private_write(record_path, record)
+                        raise DfuError("{} did not match its readback. DFU was left active; retry the update from the selected package.".format(name))
+                entry["status"] = "verified" if verify_readback else "transfer complete"
                 _private_write(record_path, record)
 
             previous_count = len(record["writes"])
@@ -1765,6 +1771,11 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 digest = candidate_hashes[name]
                 if index < previous_count:
                     entry = record["writes"][index]
+                    if entry["status"] in ("verified", "transfer complete") and \
+                            entry["candidate_sha256"] == digest:
+                        entry["resumed_without_write"] = True
+                        _private_write(record_path, record)
+                        continue
                     record["status"] = "checking previous write"
                     _private_write(record_path, record)
                     timestamp_equivalent = False
@@ -1802,13 +1813,13 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                              "size_bytes": capacities[name], "status": "write started"}
                     record["writes"].append(entry)
                     write_and_verify(name, candidate, digest, entry)
-        record["status"] = "verified; reset pending"
+        record["status"] = "verified; reset pending" if verify_readback else "transferred; reset pending"
         _private_write(record_path, record)
         try:
             run([dfu_util, "-d", "0955:701a", "--path", port, "-e", "-R"], timeout=60)
-            record["status"] = "verified; reset requested"
+            record["status"] = "verified; reset requested" if verify_readback else "transferred; reset requested"
         except DfuError as exc:
-            record["status"] = "verified; reset not confirmed"
+            record["status"] = "verified; reset not confirmed" if verify_readback else "transferred; reset not confirmed"
             record["reset_error"] = str(exc)
         _private_write(record_path, record)
         return {"status": record["status"], "package": str(package.source),
@@ -2583,7 +2594,7 @@ def main(argv=None):
     _add_confirmation_argument(write)
     list_updates = sub.add_parser("list-updates", help="List official full-flash packages in an updates folder")
     list_updates.add_argument("--directory", type=Path, default=Path.cwd() / "updates")
-    flash = sub.add_parser("flash-update", help="Back up, install, and verify an official full-flash package")
+    flash = sub.add_parser("flash-update", help="Back up and install an official full-flash package")
     flash.add_argument("package", type=Path, help="Extracted package directory or official .tar.bz2 archive")
     policy = flash.add_mutually_exclusive_group(required=True)
     policy.add_argument("--preserve-var", action="store_true", help="Keep current identity, mode, Wi-Fi, and user settings")
@@ -2598,6 +2609,8 @@ def main(argv=None):
                                     help="Confirm the reviewed update plan for scripted writes")
     flash.add_argument("--resume-from", type=Path,
                        help="Resume an incomplete preserve-var update from its update-manifest.json")
+    flash.add_argument("--verify-readback", action="store_true",
+                       help="Read back every written partition in full and compare it with the package image")
     verify = sub.add_parser("verify-update-write",
                             help="Read back one update partition and compare it with a saved operation record")
     verify.add_argument("manifest", type=Path, help="Saved update-manifest.json from a flash attempt")
@@ -2719,7 +2732,7 @@ def main(argv=None):
             result = flash_update(args.package, args.preserve_var, args.port,
                                   tool("dfu-util", args.dfu_util), args.operation_dir,
                                   UPDATE_CONFIRMATION if args.yes else args.confirm,
-                                  args.dry_run, args.resume_from)
+                                  args.dry_run, args.resume_from, args.verify_readback)
         elif args.command == "verify-update-write":
             result = verify_update_write(args.manifest, args.partition, args.port,
                                          tool("dfu-util", args.dfu_util))

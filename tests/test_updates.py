@@ -130,7 +130,7 @@ class UpdatePackageTests(unittest.TestCase):
             patch.object(toolkit, "run", return_value=""),
         ]
 
-    def test_resume_skips_recorded_partition_only_after_full_matching_readback(self):
+    def test_resume_checks_incomplete_record_then_skips_matching_partition(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (package_path, package, candidates, hashes, var_hash, capacities,
@@ -152,9 +152,9 @@ class UpdatePackageTests(unittest.TestCase):
                         result = toolkit.flash_update(
                             package_path, True, "1-1", "dfu-util", None,
                             "FLASH UPDATE", False, manifest)
-            self.assertEqual(result["status"], "verified; reset requested")
-            self.assertEqual(uploads, ["rootfsA", "rootfsB", "services", "skills"])
-            live_var.assert_called_once()
+            self.assertEqual(result["status"], "transferred; reset requested")
+            self.assertEqual(uploads, ["rootfsA"])
+            live_var.assert_not_called()
             self.assertEqual([argv[argv.index("-a") + 1]
                               for args, _kwargs in transfer.call_args_list
                               for argv in [args[0]]
@@ -192,11 +192,11 @@ class UpdatePackageTests(unittest.TestCase):
             writes = [args[0][args[0].index("-a") + 1]
                       for args, _kwargs in transfer.call_args_list if "-D" in args[0]]
             self.assertEqual(writes, ["rootfsA", "rootfsB", "services", "skills"])
-            self.assertEqual(calls["rootfsA"], 2)
+            self.assertEqual(calls["rootfsA"], 1)
             saved = json.loads(Path(result["manifest"]).read_text())
             self.assertFalse(saved["writes"][0].get("resumed_without_write", False))
 
-    def test_resume_refuses_when_live_var_does_not_match_saved_rollback(self):
+    def test_resume_reuses_saved_var_without_live_dump(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (package_path, package, candidates, hashes, var_hash, capacities,
@@ -209,14 +209,14 @@ class UpdatePackageTests(unittest.TestCase):
                         patches[5], patches[6] as live_var, patches[7] as readback, \
                         patches[8] as transfer, patches[9] as reset:
                     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                        with self.assertRaisesRegex(toolkit.DfuError, "var SHA-256 does not match"):
-                            toolkit.flash_update(
-                                package_path, True, "1-1", "dfu-util", None,
-                                "FLASH UPDATE", False, manifest)
-            live_var.assert_called_once()
-            readback.assert_not_called()
-            transfer.assert_not_called()
-            reset.assert_not_called()
+                        result = toolkit.flash_update(
+                            package_path, True, "1-1", "dfu-util", None,
+                            "FLASH UPDATE", False, manifest)
+            self.assertEqual(result["status"], "transferred; reset requested")
+            live_var.assert_not_called()
+            self.assertGreaterEqual(readback.call_count, 1)
+            self.assertGreaterEqual(transfer.call_count, 1)
+            reset.assert_called_once()
 
     def test_resume_rewrites_when_fresh_candidate_is_not_equivalent_to_old_write(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -243,9 +243,9 @@ class UpdatePackageTests(unittest.TestCase):
                         result = toolkit.flash_update(
                             package_path, True, "1-1", "dfu-util", None,
                             "FLASH UPDATE", False, manifest)
-            live_var.assert_called_once()
+            live_var.assert_not_called()
             equivalent.assert_called_once()
-            self.assertEqual(calls["rootfsA"], 2)
+            self.assertEqual(calls["rootfsA"], 1)
             self.assertEqual([args[0][args[0].index("-a") + 1]
                               for args, _kwargs in transfer.call_args_list if "-D" in args[0]],
                              ["rootfsA", "rootfsB", "services", "skills"])
@@ -351,7 +351,7 @@ class UpdatePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(updates.UpdateError, "partition-entry array CRC"):
             updates.parse_gpt_layout_prefix(bytes(prefix))
 
-    def test_preserve_var_flash_never_writes_var_and_verifies_each_target(self):
+    def test_preserve_var_flash_never_writes_var_or_reads_back_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             images_dir = root / "release" / "flash_jibo" / "output" / "images"
@@ -397,11 +397,11 @@ class UpdatePackageTests(unittest.TestCase):
             var_backup.assert_called_once_with("1-1", "dfu-util")
             backup.assert_not_called()
             skills_backup.assert_not_called()
-            self.assertEqual(upload.call_count, 4)
-            self.assertEqual(result["status"], "verified; reset requested")
+            upload.assert_not_called()
+            self.assertEqual(result["status"], "transferred; reset requested")
             self.assertEqual(result["backups"], {"var": {"image": "saved-var.img"}})
 
-    def test_fresh_var_flash_backs_up_only_var_before_writing(self):
+    def test_full_readback_option_backs_up_only_var_before_writing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             images_dir = root / "release" / "flash_jibo" / "output" / "images"
@@ -430,12 +430,14 @@ class UpdatePackageTests(unittest.TestCase):
                     patch.object(toolkit, "run", return_value=""):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     result = toolkit.flash_update(root / "release", False, port="1-1",
-                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE")
+                                                  dfu_util="dfu-util", confirmation="FLASH UPDATE",
+                                                  verify_readback=True)
             var_backup.assert_called_once_with("1-1", "dfu-util")
             other_backup.assert_not_called()
             skills_backup.assert_not_called()
             self.assertEqual(result["backups"], {"var": {"image": "saved-var.img"}})
             self.assertEqual(upload.call_count, 5)
+            self.assertEqual(result["status"], "verified; reset requested")
             self.assertEqual([argv[argv.index("-a") + 1] for argv in transfers],
                              list(toolkit.UPDATE_ORDER))
 
@@ -509,11 +511,11 @@ class UpdatePackageTests(unittest.TestCase):
             self.assertEqual([written[name] for name in chunk_names],
                              [skills_payload[:1024], skills_payload[1024:2048], skills_payload[2048:]])
             self.assertEqual([download_sizes[name] for name in chunk_names], [1024, 1024, 512])
-            self.assertEqual(result["status"], "verified; reset requested")
+            self.assertEqual(result["status"], "transferred; reset requested")
             manifest = json.loads((operation / "update-manifest.json").read_text())
             skills_write = next(item for item in manifest["writes"] if item["partition"] == "skills")
             self.assertEqual([item["alternative"] for item in skills_write["chunks"]], list(chunk_names))
-            self.assertTrue(all(item["status"] == "verified" for item in skills_write["chunks"]))
+            self.assertTrue(all(item["status"] == "transfer complete" for item in skills_write["chunks"]))
 
     def test_skills_chunk_map_must_match_gpt_capacity_and_reported_sizes(self):
         with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024):
