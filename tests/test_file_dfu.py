@@ -126,7 +126,7 @@ class FileDfuTests(unittest.TestCase):
     def test_bundled_loader_is_capability_gated_before_file_transfer(self):
         with patch.object(j, "_dfu_context",
                           return_value=("1-2", [j.MARKER, "var"], "unknown", "")):
-            with self.assertRaisesRegex(j.DfuError, "pinned loader cannot perform file-level"):
+            with self.assertRaisesRegex(j.DfuError, "does not support file access"):
                 j._file_loader_context("1-2", "dfu-util", ("var",), True)
 
     def test_unknown_identity_cannot_start_a_file_write(self):
@@ -141,7 +141,7 @@ class FileDfuTests(unittest.TestCase):
                     "uid": 0, "gid": 0, "mode": 0o100600, "nlink": 1,
                     "extent_count": 1, "ext4_uuid": "ab" * 16}
         stat_calls = [0]
-        def stat(*_args):
+        def stat(*_args, **_kwargs):
             stat_calls[0] += 1
             events.append("stat" if stat_calls[0] == 1 else "post-stat")
             result = metadata.copy()
@@ -150,16 +150,16 @@ class FileDfuTests(unittest.TestCase):
                 if post_mode is not None:
                     result["mode"] = post_mode
             return result
-        def read(*_args):
+        def read(*_args, **_kwargs):
             events.append("read")
             return b"old"
         def backup(*args):
             events.append("backup:" + args[3])
             return {"image": "/backup/var.img", "sha256": "baseline",
                     "manifest": "/backup/manifest.json", "status": "backup complete"}
-        def send(*_args):
+        def send(*_args, **_kwargs):
             events.append("write")
-        def response(*_args):
+        def response(*_args, **_kwargs):
             events.append("ack")
             return b""
         return (
@@ -231,6 +231,64 @@ class FileDfuTests(unittest.TestCase):
             self.assertEqual(record["status"], "verification failed")
             self.assertEqual(record["writes"][0]["after_metadata"]["mode"], 0o100644)
             self.assertLess(events.index("backup:var"), events.index("write"))
+
+    def test_transform_uses_one_preflight_read_and_guided_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            events = []
+            patches = self._transaction_patches(operation_dir, events)
+            display = io.StringIO()
+            with patches[0], patches[1], patches[2], patches[3] as read, \
+                    patches[4], patches[5], patches[6], patches[7], \
+                    redirect_stdout(display):
+                read.side_effect = [b"old", b"new!"]
+                transaction = j.FileTransaction(("var",), "1-2", "dfu-util",
+                                                operation_dir, guided=True)
+                transaction.transform("var", "/jibo/mode.json",
+                                      lambda old: b"new!" if old == b"old" else b"bad",
+                                      description="robot mode to developer")
+                result = transaction.commit(True)
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(read.call_count, 2)
+            self.assertIn("Checking the current files", display.getvalue())
+            self.assertIn("Updating robot mode to developer", display.getvalue())
+            self.assertNotIn("device_tag", display.getvalue())
+
+    def test_unchanged_file_does_not_create_backup_or_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            events = []
+            patches = self._transaction_patches(operation_dir, events)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patches[4] as backup, patches[5] as write, patches[6], patches[7], \
+                    redirect_stdout(io.StringIO()):
+                transaction = j.FileTransaction(("var",), "1-2", "dfu-util",
+                                                operation_dir)
+                transaction.transform("var", "/jibo/mode.json", lambda old: old)
+                result = transaction.commit(True)
+            self.assertEqual(result["status"], "already current")
+            backup.assert_not_called()
+            write.assert_not_called()
+            self.assertEqual(events, ["stat", "read"])
+
+    def test_non_var_file_change_does_not_back_up_partition_automatically(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            events = []
+            patches = self._transaction_patches(operation_dir, events)
+            with patches[0], patch.object(j, "_read_gpt_layout", return_value={
+                    "services": {"first_lba": 200, "last_lba": 207,
+                                 "size_bytes": 4096}}), patches[2], patches[3] as read, \
+                    patches[4] as backup, patches[5], patches[6], patches[7], \
+                    redirect_stdout(io.StringIO()):
+                read.side_effect = [b"old", b"new!"]
+                transaction = j.FileTransaction(("services",), "1-2", "dfu-util",
+                                                operation_dir)
+                transaction.replace("services", "/etc/example", b"new!")
+                result = transaction.commit(True)
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(result["backups"], {})
+            backup.assert_not_called()
 
 
 if __name__ == "__main__":

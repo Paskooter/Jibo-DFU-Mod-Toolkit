@@ -56,6 +56,22 @@ def fake_api(devices=(), marker=True, alts=None, shofel_dfu=False):
 
 
 class TuiReadinessTests(unittest.TestCase):
+    def test_guided_mode_result_hides_transaction_metadata(self):
+        lines = jibo_tui._result_summary("set-mode", {
+            "status": "verified", "mode": "developer",
+            "operation_directory": "/tmp/record", "writes": [
+                {"before_sha256": "secretly-technical", "before_metadata": {"inode": 1}}]})
+        self.assertEqual(lines, ["Robot mode set to developer.",
+                                 "Operation record: /tmp/record"])
+
+    def test_partition_checklist_uses_shared_arrow_key_menu(self):
+        screen = FakeScreen([ord("a"), curses.KEY_DOWN, curses.KEY_DOWN,
+                             curses.KEY_ENTER])
+        with patch.object(curses, "curs_set", return_value=None):
+            selected = jibo_tui._multi_select_session(
+                screen, "Back up partitions", (("var", "var"), ("services", "services")))
+        self.assertEqual(selected, ("var", "services"))
+
     def test_rcm_and_dfu_are_distinct_states(self):
         rcm = jibo_tui.inspect_readiness(fake_api([{"port": "1-1", "state": "rcm"}]))
         dfu = jibo_tui.inspect_readiness(fake_api([{"port": "1-1", "state": "dfu"}]))
@@ -100,46 +116,42 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertNotIn("enter-dfu-signed", items)
         self.assertNotIn("backup-var-shofel", items)
         self.assertNotIn("verify-bundle", items)
-        self.assertFalse(items["probe-dfu-gpt"].enabled)
+        self.assertTrue(items["more-tools"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertFalse(items["set-mode"].enabled)
-        self.assertTrue(items["inspect-backup"].enabled)
+        self.assertTrue(items["more-tools"].enabled)
         self.assertIn("Enter DFU", items["backup-var"].reason)
 
         no_marker = jibo_tui.inspect_readiness(
             fake_api([{"port": "1-1", "state": "dfu"}], marker=False))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_marker)}
         self.assertFalse(items["enter-dfu-shofel"].enabled)
-        self.assertFalse(items["probe-dfu-gpt"].enabled)
+        self.assertTrue(items["more-tools"].enabled)
         self.assertFalse(items["backup-var"].enabled)
 
         no_var = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-1", "state": "dfu"}], alts=["jibo-dfu-v1", "rootfsA"]))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_var)}
         self.assertEqual(no_var.state, "dfu-profile-incomplete")
-        self.assertFalse(items["probe-dfu-gpt"].enabled)
+        self.assertTrue(items["more-tools"].enabled)
         self.assertFalse(items["backup-var"].enabled)
         self.assertIn("var", items["backup-var"].reason)
 
     def test_dfu_gpt_probe_is_enabled_only_with_ready_loader(self):
         ready = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-3", "state": "dfu"}]))
-        item = {entry.key: entry for entry in
-                jibo_tui.build_menu_items(ready)}["probe-dfu-gpt"]
-        self.assertTrue(item.enabled)
+        self.assertTrue({entry.key: entry for entry in
+                         jibo_tui.build_menu_items(ready)}["more-tools"].enabled)
 
         rcm = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-3", "state": "rcm"}]))
-        item = {entry.key: entry for entry in
-                jibo_tui.build_menu_items(rcm)}["probe-dfu-gpt"]
-        self.assertFalse(item.enabled)
-        self.assertIn("Enter DFU", item.reason)
+        self.assertTrue({entry.key: entry for entry in
+                         jibo_tui.build_menu_items(rcm)}["more-tools"].enabled)
 
         no_marker = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-3", "state": "dfu"}], marker=False))
-        item = {entry.key: entry for entry in
-                jibo_tui.build_menu_items(no_marker)}["probe-dfu-gpt"]
-        self.assertFalse(item.enabled)
+        self.assertTrue({entry.key: entry for entry in
+                         jibo_tui.build_menu_items(no_marker)}["more-tools"].enabled)
 
     def test_dfu_usb_permission_error_is_not_reported_as_missing_loader(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
@@ -195,7 +207,7 @@ class TuiReadinessTests(unittest.TestCase):
     def test_enabled_item_is_returned_for_dispatch(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
         app = jibo_tui.TerminalMenu(api)
-        screen = FakeScreen([curses.KEY_DOWN, curses.KEY_DOWN,
+        screen = FakeScreen([curses.KEY_DOWN] * 4 + [
                              curses.KEY_ENTER])
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
@@ -218,7 +230,7 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertEqual(screen.timeout_ms, 1500)
         self.assertEqual(app.readiness.state, "dfu-ready")
         self.assertTrue(app.items[1].enabled)
-        self.assertEqual(app.command, "probe-dfu-gpt")
+        self.assertEqual(app.command, "set-mode")
 
     def test_enter_rechecks_usb_and_blocks_disconnected_action(self):
         snapshots = [
@@ -412,8 +424,8 @@ class CursesPromptTests(unittest.TestCase):
     def test_mode_action_uses_file_edit_when_loader_exposes_it(self):
         calls = {}
         api = SimpleNamespace(
-            set_mode_file_live=lambda mode, port=None, confirmation=None:
-                calls.update(mode=mode, port=port, confirmation=confirmation))
+            set_mode_file_live=lambda mode, port=None, confirmation=None, guided=False:
+                calls.update(mode=mode, port=port, confirmation=confirmation, guided=guided))
         readiness = jibo_tui.Readiness(
             "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
         with patch.object(jibo_tui, "_select_mode", return_value="int-developer"), \
@@ -424,16 +436,17 @@ class CursesPromptTests(unittest.TestCase):
                 "usb_port": "1-1", "changes": [{"partition": "var",
                     "path": "/jibo/mode.json", "before_size_bytes": 17,
                     "candidate_size_bytes": 26}]}))
-        self.assertIn("var:/jibo/mode.json (17 → 26 bytes)",
+        self.assertTrue(calls["guided"])
+        self.assertIn("File: /jibo/mode.json on var",
                       confirm.call_args.args[1])
 
     def test_wifi_action_uses_file_edit_when_loader_exposes_it(self):
         calls = {}
         api = SimpleNamespace(
             configure_wifi_file_live=lambda ssid, password, open_network,
-                    port=None, confirmation=None: calls.update(
+                    port=None, confirmation=None, guided=False: calls.update(
                         ssid=ssid, password=password, open_network=open_network,
-                        port=port, confirmation=confirmation))
+                        port=port, confirmation=confirmation, guided=guided))
         readiness = jibo_tui.Readiness(
             "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
         with patch.object(jibo_tui, "text_input", return_value="Test Wi-Fi"), \
@@ -442,6 +455,7 @@ class CursesPromptTests(unittest.TestCase):
         self.assertEqual((calls["ssid"], calls["password"],
                           calls["open_network"], calls["port"]),
                          ("Test Wi-Fi", None, True, "1-1"))
+        self.assertTrue(calls["guided"])
 
 
 if __name__ == "__main__":

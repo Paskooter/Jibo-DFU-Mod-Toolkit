@@ -95,7 +95,8 @@ def status_lines(readiness):
                 "RCM/APX is the entry state. Choose ShofEL to load DFU into RAM.")
     if readiness.state == "dfu-ready":
         return ("STEP 3 / 3   DFU active; Jibo recovery loader ready",
-                "The robot is ready for the partition and update actions below.")
+                ("Quick file changes are available." if _can_edit_var_files(readiness) else
+                 "The robot is ready for partition and update actions."))
     if readiness.state == "dfu-error":
         return ("USB STATE   DFU detected; loader status unavailable",
                 "DFU is not the same as RCM/APX. " + (readiness.detail or "Check USB access."))
@@ -168,16 +169,15 @@ def build_menu_items(readiness, update_packages=()):
     items = [
         MenuItem("enter-dfu-shofel", "Enter DFU with ShofEL (RAM loader)",
                  is_rcm and readiness.shofel_dfu_available, shofel_dfu_reason),
-        MenuItem("probe-dfu-gpt", "Check partition layout (read-only)",
+        MenuItem("set-mode", "Set robot mode" + (" (quick edit)" if _can_edit_var_files(readiness)
+                                               else ""), is_dfu, connection_reason),
+        MenuItem("configure-wifi", "Add a Wi-Fi network" +
+                 (" (quick edit)" if _can_edit_var_files(readiness) else ""),
                  is_dfu, connection_reason),
-        MenuItem("backup-var", "Back up var", is_dfu, connection_reason),
-        MenuItem("set-mode", "Set robot mode", is_dfu, connection_reason),
-        MenuItem("configure-wifi", "Configure Wi-Fi", is_dfu, connection_reason),
         MenuItem("flash-update", "Install an official update package",
                  is_dfu and not missing_update and bool(packages), update_reason),
-        MenuItem("write-var", "Write an edited var image", is_dfu, connection_reason),
-        MenuItem("inspect-backup", "Inspect a local var backup"),
-        MenuItem("edit-backup", "Edit a local var backup"),
+        MenuItem("backup-var", "Save or check a var backup", is_dfu, connection_reason),
+        MenuItem("more-tools", "More tools and local images"),
     ]
     return tuple(items)
 
@@ -322,6 +322,62 @@ def select_option(title, options, prompt="", detail="", cancel_label="Cancel", i
         screen, title, options, prompt, detail, initial, cancel_label))
 
 
+def _multi_select_session(screen, title, options, initial=()):
+    _start_screen(screen)
+    items = _normalise_options(options)
+    chosen = set(initial)
+    selected = 0
+    while True:
+        row, height, width = _screen_heading(screen, title)
+        row += 1
+        dim = getattr(curses, "A_DIM", 0)
+        reverse = getattr(curses, "A_REVERSE", 0)
+        rows = len(items) + 1
+        available = max(1, height - row - 4)
+        start = max(0, min(selected - available + 1, rows - available))
+        for index in range(start, min(rows, start + available)):
+            if index == len(items):
+                label = "Continue with {} selected".format(len(chosen))
+            else:
+                label = "[{}] {}".format("x" if items[index].key in chosen else " ",
+                                         items[index].label)
+            attr = reverse if index == selected else 0
+            _addstr(screen, row + index - start, 0,
+                    ("> " if index == selected else "  ") + label, attr)
+        _addstr(screen, height - 2, 0, "Space/Enter Toggle   A Select all   N Clear", dim)
+        _addstr(screen, height - 1, 0,
+                "↑/↓ Select   Enter Continue   Esc Cancel", dim)
+        screen.refresh()
+        key = screen.getch()
+        if key in (27, ord("q"), ord("Q")):
+            return None
+        if key in (curses.KEY_UP, ord("k")):
+            selected = (selected - 1) % rows
+        elif key in (curses.KEY_DOWN, ord("j")):
+            selected = (selected + 1) % rows
+        elif key in (ord("a"), ord("A")):
+            chosen = {item.key for item in items}
+        elif key in (ord("n"), ord("N")):
+            chosen.clear()
+        elif key in (ord(" "), curses.KEY_ENTER, 10, 13):
+            if selected == len(items):
+                if chosen:
+                    return tuple(item.key for item in items if item.key in chosen)
+            else:
+                key_name = items[selected].key
+                if key_name in chosen:
+                    chosen.remove(key_name)
+                else:
+                    chosen.add(key_name)
+
+
+def select_multiple_options(title, options, initial=()):
+    """Use the same arrow-key menu style for a partition checklist."""
+    if not _terminal_available():
+        return None
+    return curses.wrapper(lambda screen: _multi_select_session(screen, title, options, initial))
+
+
 def _read_key(screen):
     get_wch = getattr(screen, "get_wch", None)
     if get_wch is not None:
@@ -422,6 +478,50 @@ def _screen_lines(content):
     if isinstance(content, str):
         return content.splitlines() or [""]
     return [str(line) for line in content]
+
+
+def _result_summary(action, result):
+    """Keep the guided view focused on the outcome; detailed records stay on disk."""
+    if not isinstance(result, dict):
+        return _screen_lines(result)
+    status = result.get("status", "complete")
+    if status == "cancelled":
+        return [result.get("message", "No change was made.")]
+    if action == "set-mode" and (result.get("mode") or result.get("new_mode")):
+        mode = result.get("mode") or result["new_mode"]
+        if status == "already current":
+            return ["The robot is already in {} mode.".format(mode)]
+        lines = ["Robot mode set to {}.".format(mode)]
+    elif action == "configure-wifi":
+        lines = ["Saved Wi-Fi network: {!r}.".format(result["ssid"])
+                 if result.get("ssid") else "Wi-Fi configuration updated."]
+    elif action == "backup-var":
+        lines = ["Var backup is ready."]
+        if result.get("image"):
+            lines.append("Saved at: " + result["image"])
+    elif result.get("partitions") and result.get("manifest"):
+        names = [entry.get("name", "?") if isinstance(entry, dict) else str(entry)
+                 for entry in result["partitions"]]
+        lines = [("Backup ready: " if status == "backup complete" else "Restored: ") +
+                 ", ".join(names) + ".", "Record: " + str(result["manifest"])]
+    elif action == "flash-update":
+        lines = ["Official update: {}.".format(status)]
+    elif action == "probe-dfu-gpt" or "partition_sizes_bytes" in result:
+        lines = ["Partition layout checked."]
+    elif action == "write-var":
+        lines = ["Edited var image: {}.".format(status)]
+    elif result.get("writes"):
+        lines = ["File changes: {}.".format(status)]
+    elif "mode" in result and "wifi_configured" in result:
+        lines = ["Mode: {}".format(result["mode"]),
+                 "Saved Wi-Fi networks: {}".format(result.get("wifi_network_count", 0))]
+    elif result.get("image"):
+        lines = ["Image ready: " + str(result["image"])]
+    else:
+        return _screen_lines(result)
+    if result.get("operation_directory"):
+        lines.append("Operation record: " + str(result["operation_directory"]))
+    return lines
 
 
 def _message_session(screen, title, lines, wait=True):
@@ -614,6 +714,9 @@ def _action_hint(key):
         "write-var": "Select an edited image; review and confirm before writing.",
         "inspect-backup": "Read mode and Wi-Fi presence from a local image without showing credentials.",
         "edit-backup": "Create an edited copy of a local image. The source image is kept unchanged.",
+        "more-tools": "Partition checks, edited images, and local backup tools.",
+        "backup-partitions": "Select GPT partitions to save. Existing verified copies are reused.",
+        "restore-partitions": "Select partitions from a backup set and verify every write by readback.",
     }
     return hints.get(key, "")
 
@@ -622,6 +725,17 @@ def _confirmation_details(plan, introduction):
     if not isinstance(plan, dict):
         return introduction + ("\n" + str(plan) if plan else "")
     lines = [introduction]
+    if plan.get("changes"):
+        lines.append("USB port: " + str(plan.get("usb_port", "selected robot")))
+        for change in plan["changes"]:
+            lines.append("Change: " + (change.get("description") or change["path"]))
+            lines.append("File: {} on {}".format(change["path"], change["partition"]))
+        if any(change["partition"] == "var" for change in plan["changes"]):
+            lines.append("A saved var rollback copy is checked before writing.")
+        if any(change["partition"] != "var" for change in plan["changes"]):
+            lines.append("Other partitions are backed up only when you select a backup action.")
+        lines.append("The edited files and their permissions are checked after writing.")
+        return "\n".join(lines)
     fields = (
         ("operation", "Operation"),
         ("package", "Package"),
@@ -635,6 +749,7 @@ def _confirmation_details(plan, introduction):
         ("candidate_sha256", "Edited var SHA-256"),
         ("baseline_backup", "Rollback backup"),
         ("baseline_sha256", "Backup SHA-256"),
+        ("source_manifest", "Backup set"),
     )
     for key, label in fields:
         if plan.get(key) is not None:
@@ -739,7 +854,7 @@ def execute_action(api, key, readiness):
                                   "Review the var write plan before changing the robot mode."))
         if direct_edit:
             return api.set_mode_file_live(mode, port=readiness.port,
-                                          confirmation=confirmation)
+                                          confirmation=confirmation, guided=True)
         return api.set_mode_live(mode, port=readiness.port,
                                  confirmation=confirmation)
     if key == "configure-wifi":
@@ -769,13 +884,61 @@ def execute_action(api, key, readiness):
             if direct_edit:
                 return api.configure_wifi_file_live(
                     ssid, password, open_network, port=readiness.port,
-                    confirmation=confirmation)
+                    confirmation=confirmation, guided=True)
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
         finally:
             password = None
     if key == "flash-update":
         return _run_update(api, port=readiness.port)
+    if key == "more-tools":
+        options = []
+        if readiness.state == "dfu-ready":
+            options.extend((("probe-dfu-gpt", "Check partition layout"),
+                            ("backup-partitions", "Back up selected partitions"),
+                            ("restore-partitions", "Restore selected partitions"),
+                            ("write-var", "Write an edited var image")))
+        options.extend((("inspect-backup", "Inspect a local var backup"),
+                        ("edit-backup", "Edit a local var backup")))
+        selected = select_option("More tools", options,
+                                 prompt="Choose a maintenance or local-image action.")
+        if selected is None:
+            return {"status": "cancelled", "message": "No tool selected."}
+        return execute_action(api, selected, readiness)
+    if key == "backup-partitions":
+        _, _, available = api.available_backup_partitions(port=readiness.port)
+        if not available:
+            raise RuntimeError("This DFU loader exposes no complete GPT partitions for backup.")
+        choices = tuple((name, "{}  ({:.1f} MiB)".format(
+            name, extent["size_bytes"] / (1024 * 1024)))
+            for name, extent in available.items())
+        selected = select_multiple_options("Back up partitions", choices, initial=("var",))
+        if selected is None:
+            return {"status": "cancelled", "message": "No backup was started."}
+        return api.backup_partitions(selected, port=readiness.port)
+    if key == "restore-partitions":
+        source = text_input("Restore partitions", "Path to backup-set.json or its folder:")
+        if source is None or not source.strip():
+            return {"status": "cancelled", "message": "No restore was started."}
+        manifest = Path(source.strip()).expanduser()
+        if manifest.is_dir():
+            manifest /= "backup-set.json"
+        backup_set = json.loads(manifest.read_text())
+        entries = backup_set.get("partitions", ())
+        if not entries:
+            raise RuntimeError("The selected backup set lists no partitions.")
+        choices = tuple((entry["name"], "{}  ({:.1f} MiB)".format(
+            entry["name"], entry["size_bytes"] / (1024 * 1024)))
+            for entry in entries)
+        selected = select_multiple_options("Choose partitions to restore", choices,
+                                           initial=tuple(entry["name"] for entry in entries))
+        if selected is None:
+            return {"status": "cancelled", "message": "No restore was started."}
+        confirmation = lambda plan: confirm_action(
+            "Confirm partition restore",
+            _confirmation_details(plan, "These partitions will be replaced with the saved images."))
+        return api.restore_partitions(manifest, selected, port=readiness.port,
+                                      confirmation=confirmation)
     if key == "write-var":
         image = text_input("Write an edited var image", "Path to edited 500 MiB var image:")
         if image is None or not image.strip():
@@ -852,7 +1015,7 @@ def run(api_module):
             result = execute_action(api_module, action, app.readiness)
             if action != "enter-dfu-shofel" or not (
                     isinstance(result, dict) and result.get("state") == "dfu"):
-                show_screen(label, _screen_lines(result))
+                show_screen(label, _result_summary(action, result))
         except KeyboardInterrupt:
             show_screen(label, "Cancelled.")
         except Exception as exc:
