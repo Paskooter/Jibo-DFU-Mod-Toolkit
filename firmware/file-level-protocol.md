@@ -63,8 +63,9 @@ ext4's journal entirely. It writes the existing data blocks and inode-size field
 with checked block I/O, preserving the rest of the inode; host readback
 checks content and metadata after each write. This has a power-loss window
 between the data and inode writes. Recover by restoring the transaction's
-pre-operation partition baseline. The host transaction saves one verified
-full partition baseline for every touched partition before it starts writing.
+pre-operation partition baseline. The host transaction saves or reuses one
+verified `var` baseline if `var` is touched. Other partitions are backed up
+only when explicitly selected with `backup-partitions`.
 
 An interrupted DFU mailbox transfer can be retried from block zero; the
 candidate loader resets file-RPC upload/download state for that retry. If the

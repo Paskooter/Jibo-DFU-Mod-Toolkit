@@ -111,6 +111,9 @@ def plan(dfu_util, port, names):
             current_sha = _sha(source)
             if current_sha == STOCK_SHA256[kind]:
                 candidate = patched_bytes(kind, source)
+                if _sha(candidate) != PATCHED_SHA256[kind]:
+                    raise dfu.DfuError("The {} transform did not match its pinned output at {}:{}; no writes attempted."
+                                       .format(kind, partition, path))
                 stat = dfu._stat_partition_file_rpc(dfu_util, port, partition, path, directory)
                 if len(candidate) > stat["allocated_bytes"]:
                     raise dfu.DfuError("{} would need {} bytes but has only {} allocated; no writes attempted."

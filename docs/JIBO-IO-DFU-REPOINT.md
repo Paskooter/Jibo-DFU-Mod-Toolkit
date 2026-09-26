@@ -55,12 +55,15 @@ Review the target list, then run the confirmed transaction:
 sudo python3 jibo_dfu.py repoint-jibo-io
 ```
 
-The tool displays the before/after hashes and creates one verified full-partition
-rollback baseline for each touched partition **before the first write**. This
-can take time and several gigabytes of host disk. The robot stays in DFU after
-the command; exit DFU/reboot through the normal recovery procedure. Do not
-unplug it during a write. If a write or readback fails, leave it in DFU and
-restore the saved partition baseline; do not blindly reboot.
+The tool displays the before/after hashes. It does not automatically back up
+the four system partitions: only `var` receives an automatic baseline when
+it is changed, and this workflow does not change `var`. If you want rollback
+images, use `backup-partitions` to select these partitions before repointing.
+Keep the official update package available so the system partitions can be
+reflashed if needed. The robot stays in DFU after the command; exit DFU/reboot
+through the normal recovery procedure. Do not unplug it during a write. If a
+write or readback fails, leave it in DFU and repair the affected partition
+before rebooting.
 
 If `/var/jibo/credentials.json` exists, the command submits its credential pair
 over HTTPS to jibo.io's adoption endpoint after all file writes verify. It

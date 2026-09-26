@@ -65,6 +65,16 @@ class RepointTests(unittest.TestCase):
         stat.assert_not_called()
         transfer.assert_not_called()
 
+    def test_transform_must_match_pinned_output_before_write(self):
+        stock = b"jibo.com/" * 5
+        with patch.object(repoint, "patch_manifest", return_value=(("rootfsA", "/region", "region"),)), \
+                patch.dict(repoint.STOCK_SHA256, {"region": hashlib.sha256(stock).hexdigest()}), \
+                patch.object(dfu, "_read_partition_file_rpc", return_value=stock), \
+                patch.object(dfu, "_stat_partition_file_rpc") as stat:
+            with self.assertRaisesRegex(dfu.DfuError, "pinned output"):
+                repoint.plan("dfu-util", "1-2", [dfu.FILE_LEVEL_MARKER_V2])
+        stat.assert_not_called()
+
     def test_existing_credentials_are_validated_and_adopted_only_to_jibo_io(self):
         credentials = {"accessKeyId": "A" * 20, "secretAccessKey": "s" * 40,
                        "region": "api"}

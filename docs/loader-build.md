@@ -46,11 +46,12 @@ python3 scripts/build_loader.py \
   --file-level-candidate
 ```
 
-The ShofEL entry helper checks the loader's exact size and SHA-256 before transferring it. Build the matching helper with:
+The ShofEL entry helper checks the loader's exact size and SHA-256 before transferring it. Build the matching v2 helper with:
 
 ```sh
-python3 scripts/build_file_level_entry.py --loader assets/loader.bin \
-  --out .build/file-level-entry
+python3 scripts/build_file_level_entry.py \
+  --loader .build/file-level-candidate/experimental-file-rpc-loader.bin \
+  --out .build/file-level-candidate/shofel-entry
 ```
 
-The builder checks the image against its manifest, starts from the pinned ShofEL source commit, applies the stage-2 patch, replaces the stage-2 size and hash, and runs the ShofEL tests. A matching local build is reused. This loader entered DFU on Moth and passed a direct mode-file write and metadata readback; Wi-Fi file writes still need a hardware check.
+The builder checks the image against its manifest, starts from the pinned ShofEL source commit, applies the stage-2 patch, replaces the stage-2 size and hash, and runs the ShofEL tests. A matching local build is reused. The bundled v1 loader entered DFU on Moth and passed a direct mode-file write and metadata readback. The v2 candidate still needs hardware validation.

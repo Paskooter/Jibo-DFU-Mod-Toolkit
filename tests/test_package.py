@@ -10,6 +10,7 @@ import zipfile
 from unittest.mock import patch
 
 import scripts.package as package
+import scripts.check_package as check_package
 
 
 class PackageTests(unittest.TestCase):
@@ -78,6 +79,26 @@ class PackageTests(unittest.TestCase):
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("enter-dfu-shofel", result.stdout)
+
+    def test_cached_package_tracks_repoint_code_and_certificate(self):
+        self.run_package()
+        with patch.object(check_package, "PINNED_LOADER_SIZE", len(self.padded_loader)), \
+                patch.object(check_package, "PINNED_LOADER_SHA256",
+                             hashlib.sha256(self.padded_loader).hexdigest()):
+            self.assertTrue(check_package.check_package(self.output)[0])
+            with tempfile.TemporaryDirectory() as source_dir:
+                source_root = Path(source_dir)
+                for relative in check_package.SOURCES:
+                    destination = source_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes((package.ROOT / relative).read_bytes())
+                for changed in ("jibo_repoint.py", "assets/isrg-root-x1.pem"):
+                    target = source_root / changed
+                    target.write_bytes(target.read_bytes() + b"changed")
+                    ready, reason = check_package.check_package(self.output, source_root)
+                    self.assertFalse(ready)
+                    self.assertIn(changed, reason)
+                    target.write_bytes((package.ROOT / changed).read_bytes())
 
     def test_loader_must_match_pinned_padded_size_and_hash(self):
         self.loader.write_bytes(b"different data")
