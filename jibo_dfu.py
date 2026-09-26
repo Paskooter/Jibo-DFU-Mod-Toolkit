@@ -2003,7 +2003,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             record["reset_error"] = str(exc)
         _private_write(record_path, record)
         return {"status": record["status"], "package": str(package.source),
-                "var_policy": plan["var_policy"], "verified_partitions": partitions,
+                "var_policy": plan["var_policy"],
+                "transferred_partitions": partitions,
+                "verified_partitions": partitions if verify_readback else [],
                 "manifest": str(record_path), "backups": record["backups"],
                 "resumed_from": str(resume_path) if resume_record is not None else None}
     except (DfuError, updates.UpdateError, OSError) as exc:
