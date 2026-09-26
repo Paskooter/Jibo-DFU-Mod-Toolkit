@@ -69,7 +69,7 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refr
 | --- | --- |
 | Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; saves or reuses one rollback backup, edits only `/jibo/mode.json`, and checks the file and its permissions. |
 | Add a Wi-Fi network | Saves or reuses the `var` backup, adds the network to the existing `/var/etc/wpa_supplicant.conf`, and checks the file and its permissions. |
-| Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, saves or reuses one `var` rollback backup, expands package images to their final partition sizes offline, and verifies each write by readback. `rootfsA`, `rootfsB`, `services`, and `skills` are restored from the package if needed; they are not backed up first. |
+| Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, saves or reuses one `var` rollback backup, and writes the package images. The normal path accepts DFU's completed transfer without a second full-partition read; `flash-update --verify-readback` adds one. `rootfsA`, `rootfsB`, `services`, and `skills` are restored from the package if needed; they are not backed up first. |
 | Save or check a var backup | Reads the 500 MiB `var` partition and saves a SHA-256 manifest. Reuses a verified existing backup for the same DFU device unless refreshed. |
 | More tools and local images | Checks the partition layout; backs up or restores chosen partitions; writes an edited `var` image; or inspects and edits a local backup. Local image edits do not change the robot. |
 
@@ -104,7 +104,7 @@ sudo python3 dist/jibo-dfu-linux-x86_64.pyz list-updates
 
 Use `--out /path/to/new/directory` with `backup-var` to force a fresh read for comparison. The default reuses one verified baseline for the same robot; `--refresh` reads the current state and discards the new copy if it is byte-identical to the saved baseline. Use `--partition NAME` more than once with `backup-partitions` or `restore-partitions` to pick several partitions. The update workflow saves or reuses a `var` rollback backup. Its reads of other partitions occur after writing to verify that the result matches the selected package.
 
-If an update stops mid-flash, leave the robot in DFU. `flash-update PACKAGE --preserve-var --resume-from /path/to/update-manifest.json --yes` checks the saved `var` backup against the connected robot and fully reads each previously attempted partition. It skips a write only when that partition already matches the freshly prepared package image, then verifies every remaining write.
+If an update stops mid-flash, leave the robot in DFU. `flash-update PACKAGE --preserve-var --resume-from /path/to/update-manifest.json --yes` reuses the existing `var` backup without dumping live `var` again. It skips a recorded completed partition when its prepared image hash matches; incomplete writes are read back before deciding whether to repeat them. Add `--verify-readback` if you want a full comparison of new writes.
 
 ## Hardware results and remaining work
 
