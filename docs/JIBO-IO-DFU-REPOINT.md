@@ -11,9 +11,9 @@ permanent trust store and remaining cloud-service changes.
 
 The helper currently recognizes the exact official 3.3.4 RTM, 5.4.0 EFT,
 5.4.2 production, and 13.0.0 production file layouts checked offline. It
-detects each rootfs slot separately, including their different nested client
-copies. It also probes four optional client copies seen in an archived 3.3.0
-skills package.
+detects each rootfs slot separately and probes the known nested client copies
+when present. It also probes four optional client copies seen in an archived
+3.3.0 skills package.
 It refuses modified or unknown images, non-contiguous files,
 too-small preallocated files, and the bundled `jibo-file-v1` loader. It requires
 a separately built, opt-in `jibo-file-v2` loader. This v2 loader has **not been
@@ -36,7 +36,7 @@ The required files vary by installed layout:
 
 | Partition | Existing paths patched |
 | --- | --- |
-| `rootfsA`, `rootfsB` (each) | `/usr/share/ca-certificates/mozilla/DST_Root_CA_X3.crt`; `lib/region_config.json` and `lib/http/node.js` under `/usr/lib/node_modules/@jibo/jibo-server-client`; `/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js`. 13.0.0 adds the two nested client copies under `jibo-log-client` and `jibo-ota-updater`. |
+| `rootfsA`, `rootfsB` (each) | `/usr/share/ca-certificates/mozilla/DST_Root_CA_X3.crt`; `lib/region_config.json` and `lib/http/node.js` under `/usr/lib/node_modules/@jibo/jibo-server-client`; `/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js`. Known nested client copies under `jibo-log-client` and `jibo-ota-updater` are patched when present. |
 | `services` | `lib/region_config.json` and `lib/http/node.js` under `/bin/jibo-ssm/node_modules/@jibo/jibo-server-client` |
 | `skills` | `lib/region_config.json` and `lib/http/node.js` under `/jibo/Jibo/Skills/oobe-config/node_modules/@jibo/jibo-server-client`. Four older `@be/be` package copies are checked when present. |
 
@@ -76,13 +76,17 @@ write or readback fails, leave it in DFU and repair the affected partition
 before rebooting.
 
 If `/var/jibo/credentials.json` exists, add `--adopt-existing` to submit its
-credential pair over HTTPS to jibo.io's adoption endpoint after all file
-writes verify. The default command does not read or send credentials. The
+credential pair over HTTPS to `api.jibo.io`'s adoption endpoint after all file
+writes verify. This optional endpoint is defined in the Phoenix account server
+source; live deployment has not been checked. The default command does not read
+or send credentials. The
 adoption option never prints or stores those secrets in the operation record. To also link a
 previously paired robot to an existing portal account, generate a fresh claim
 code in the portal and pipe it on stdin with `--claim-code-stdin`; the code is
 not passed as a process argument. Without a claim code, adoption registers an
-unclaimed robot, so finish claiming it in the portal. If there are no robot
+unclaimed robot, so finish claiming it in the portal. A valid `friendlyId` in
+the saved credentials is included; otherwise Phoenix assigns a new display ID.
+If there are no robot
 credentials, the command leaves account creation to the jibo.io QR/OOBE flow.
 If adoption fails, keep the robot in DFU and rerun the idempotent command after
 fixing network/server access.

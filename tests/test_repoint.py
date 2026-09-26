@@ -22,10 +22,10 @@ class RepointTests(unittest.TestCase):
         self.assertIn(("services", repoint.SERVICE_CLIENT + "/lib/http/node.js", "client"), files)
         self.assertIn(("skills", repoint.OOBE_CLIENT + "/lib/region_config.json", "region"), files)
 
-    def test_54_layout_omits_later_nested_rootfs_clients(self):
+    def test_54_layout_probes_later_nested_rootfs_clients(self):
         files = repoint.patch_manifest({"rootfsA": "5.4", "rootfsB": "5.4"})
-        self.assertEqual(len(files), 20)
-        self.assertNotIn(("rootfsA", repoint.ROOT_CLIENTS[1] + "/lib/http/node.js", "client"), files)
+        self.assertEqual(len(files), 28)
+        self.assertIn(("rootfsA", repoint.ROOT_CLIENTS[1] + "/lib/http/node.js", "client"), files)
         self.assertEqual(repoint._pinned_output("downloader", repoint.STOCK_54_SHA256["downloader"]),
                          repoint.PATCHED_54_SHA256["downloader"])
 
@@ -99,11 +99,12 @@ class RepointTests(unittest.TestCase):
 
     def test_existing_credentials_are_validated_and_adopted_only_to_jibo_io(self):
         credentials = {"accessKeyId": "A" * 20, "secretAccessKey": "s" * 40,
-                       "region": "api"}
+                       "region": "stg-entrypoint", "friendlyId": "Moth-123"}
         with patch.object(dfu, "_read_partition_file_rpc",
                           return_value=json.dumps(credentials).encode()):
             parsed = repoint._existing_credentials("dfu-util", "1-2")
-        self.assertEqual(parsed, credentials)
+        self.assertEqual(parsed, {"accessKeyId": "A" * 20, "secretAccessKey": "s" * 40,
+                                  "friendlyId": "Moth-123"})
         response = io.BytesIO(b'{"adopted":true,"linked":true}')
         with patch.object(repoint.urllib.request, "build_opener") as opener:
             opener.return_value.open.return_value.__enter__.return_value = response
@@ -111,11 +112,11 @@ class RepointTests(unittest.TestCase):
             request = opener.return_value.open.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.jibo.io/api/adopt-robot")
         self.assertIn(b'"claimCode": "', request.data)
+        self.assertIn(b'"friendlyId": "Moth-123"', request.data)
         self.assertIn("linked", message)
         with patch.object(dfu, "_read_partition_file_rpc",
                           return_value=json.dumps({**credentials, "region": "evil.example"}).encode()):
-            with self.assertRaisesRegex(dfu.DfuError, "not an approved"):
-                repoint._existing_credentials("dfu-util", "1-2")
+            self.assertEqual(repoint._existing_credentials("dfu-util", "1-2"), parsed)
 
     def test_repoint_does_not_access_credentials_without_adoption_request(self):
         with patch.object(dfu, "_file_loader_context", return_value=(

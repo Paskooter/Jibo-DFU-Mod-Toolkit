@@ -51,13 +51,11 @@ EARLY_SKILL_CLIENTS = tuple(
 
 
 def patch_manifest(rootfs_profiles=None):
-    """Return the exact paths required by the detected rootfs layouts."""
-    rootfs_profiles = rootfs_profiles or {"rootfsA": "13.0", "rootfsB": "13.0"}
+    """Return known OTA file paths; the extra client copies are probed if present."""
     files = []
     for partition in ("rootfsA", "rootfsB"):
         files.append((partition, CA_PATH, "ca"))
-        clients = ROOT_CLIENTS if rootfs_profiles[partition] == "13.0" else ROOT_CLIENTS[:1]
-        for base in clients:
+        for base in ROOT_CLIENTS:
             files.append((partition, base + "/lib/region_config.json", "region"))
             files.append((partition, base + "/lib/http/node.js", "client"))
         files.append((partition, "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js", "downloader"))
@@ -121,6 +119,10 @@ def plan(dfu_util, port, names, quiet=False):
             observed[(partition, "/usr/lib/node_modules/@jibo/jibo-ota-updater/src/download-update.js")] = source
             observed[(partition, ROOT_CLIENTS[0] + "/lib/http/node.js")] = client
         optional = set()
+        for partition in ("rootfsA", "rootfsB"):
+            for base in ROOT_CLIENTS[1:]:
+                optional.add((partition, base + "/lib/region_config.json"))
+                optional.add((partition, base + "/lib/http/node.js"))
         for base in EARLY_SKILL_CLIENTS:
             optional.add(("skills", base + "/lib/region_config.json"))
             optional.add(("skills", base + "/lib/http/node.js"))
@@ -164,12 +166,15 @@ def plan(dfu_util, port, names, quiet=False):
         if quiet:
             print("\rChecking OTA files [{}] {}/{}".format(
                 "#" * 20, len(targets), len(targets)), file=sys.stderr, flush=True)
-        for base in EARLY_SKILL_CLIENTS:
-            pair = {("skills", base + "/lib/region_config.json"),
-                    ("skills", base + "/lib/http/node.js")}
-            if len(pair & optional_found) == 1:
-                raise dfu.DfuError("An archived skills client is only partly present at {}. No writes attempted."
-                                   .format(base))
+        for partition, bases in (("rootfsA", ROOT_CLIENTS[1:]),
+                                 ("rootfsB", ROOT_CLIENTS[1:]),
+                                 ("skills", EARLY_SKILL_CLIENTS)):
+            for base in bases:
+                pair = {(partition, base + "/lib/region_config.json"),
+                        (partition, base + "/lib/http/node.js")}
+                if len(pair & optional_found) == 1:
+                    raise dfu.DfuError("An OTA client is only partly present at {}:{}; no writes attempted."
+                                       .format(partition, base))
     return {"changes": changes, "rootfs_profiles": rootfs_profiles}
 
 
@@ -240,27 +245,29 @@ def _existing_credentials(dfu_util, port):
         credentials = json.loads(payload)
         access_key = credentials["accessKeyId"]
         secret_key = credentials["secretAccessKey"]
-        region = credentials["region"]
     except (ValueError, KeyError, TypeError) as exc:
         raise dfu.DfuError("Existing robot credentials are incomplete; adoption was not attempted.") from exc
     if (not isinstance(access_key, str) or not re.fullmatch(r"[A-Za-z0-9]{20}", access_key) or
             not isinstance(secret_key, str) or not re.fullmatch(r"[A-Za-z0-9]{40}", secret_key)):
         raise dfu.DfuError("Existing robot credentials are not in the format accepted by jibo.io.")
-    if region not in {"api", "stg-entrypoint", "alpha-entrypoint", "dev-entrypoint", "preprod-entrypoint"}:
-        raise dfu.DfuError("The existing credential region is not an approved jibo.io host.")
-    return {"accessKeyId": access_key, "secretAccessKey": secret_key, "region": region}
+    result = {"accessKeyId": access_key, "secretAccessKey": secret_key}
+    friendly_id = credentials.get("friendlyId")
+    if isinstance(friendly_id, str) and re.fullmatch(r"[A-Za-z0-9-]{3,80}", friendly_id):
+        result["friendlyId"] = friendly_id
+    return result
 
 
 def _adopt_existing(credentials, claim_code=None):
     """Register existing credentials without printing or saving either secret."""
     if credentials is None:
         return "No existing credentials: complete QR setup in the jibo.io portal, then install the OTA."
-    region = credentials["region"]
     body = {"accessKeyId": credentials["accessKeyId"],
             "secretAccessKey": credentials["secretAccessKey"]}
+    if credentials.get("friendlyId"):
+        body["friendlyId"] = credentials["friendlyId"]
     if claim_code:
         body["claimCode"] = claim_code
-    request = urllib.request.Request("https://{}.jibo.io/api/adopt-robot".format(region),
+    request = urllib.request.Request("https://api.jibo.io/api/adopt-robot",
         data=json.dumps(body).encode(), headers={"content-type": "application/json",
                                                  "x-phoenix-api-client": "jibo-dfu-repoint"})
     class NoRedirect(urllib.request.HTTPRedirectHandler):
