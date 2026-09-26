@@ -29,6 +29,21 @@ class RepointTests(unittest.TestCase):
         self.assertEqual(repoint._pinned_output("downloader", repoint.STOCK_54_SHA256["downloader"]),
                          repoint.PATCHED_54_SHA256["downloader"])
 
+    def test_rootfs_profile_accepts_verified_early_client_downloader_pair(self):
+        with patch.object(dfu, "_read_partition_file_rpc",
+                          side_effect=(b"archive downloader", b"early client")) as read, \
+                patch.object(repoint, "_sha", side_effect=(
+                    repoint.STOCK_54_SHA256["downloader"],
+                    repoint.STOCK_33_SHA256["client"],
+                )):
+            profile, source, client = repoint._rootfs_profile(
+                "dfu-util", "1-2", "rootfsA", "/tmp/test-repoint"
+            )
+        self.assertEqual(profile, "early client + 5.4 downloader")
+        self.assertEqual(source, b"archive downloader")
+        self.assertEqual(client, b"early client")
+        self.assertEqual(read.call_count, 2)
+
     def test_public_root_is_pinned(self):
         self.assertEqual(hashlib.sha256(repoint.CA_ASSET.read_bytes()).hexdigest(),
                          repoint.CA_SHA256)

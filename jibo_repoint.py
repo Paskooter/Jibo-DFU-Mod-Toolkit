@@ -222,7 +222,8 @@ def _rootfs_profile(dfu_util, port, partition, directory, quiet=False):
     if digest in (STOCK_SHA256["downloader"], PATCHED_SHA256["downloader"]):
         profile = "later stock client" if current_client else "earlier stock client" if early_client else None
     elif digest in (STOCK_54_SHA256["downloader"], PATCHED_54_SHA256["downloader"]):
-        profile = "earlier stock downloader" if current_client else None
+        profile = ("earlier stock downloader" if current_client else
+                   "early client + 5.4 downloader" if early_client else None)
     else:
         profile = None
     if profile is None:
