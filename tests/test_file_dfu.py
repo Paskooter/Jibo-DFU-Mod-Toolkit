@@ -93,7 +93,7 @@ class FileDfuTests(unittest.TestCase):
         failure = j.FileRpcStatusError(4)
         message = str(failure)
         self.assertIn("status 4", message)
-        self.assertIn("Boot normally", message)
+        self.assertIn("clean Linux unmount", message)
         self.assertIn("full-var transfer", message)
         self.assertIn("write the partition", message)
 

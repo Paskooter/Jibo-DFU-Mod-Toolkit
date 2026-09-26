@@ -50,8 +50,8 @@ def _needs_full_var_fallback(api, error):
 def _offer_full_var_edit(error):
     if getattr(error, "status", 3) == 4:
         prompt = "The ext4 journal needs recovery, so the RAM loader refused this file request."
-        detail = ("Cancel to boot normally, let Linux recover var, then re-enter DFU and retry. "
-                  "Or choose the full transfer, which reads and writes 500 MiB of var.")
+        detail = ("A clean Linux unmount can clear the journal. The full transfer reads and "
+                  "writes 500 MiB of var after replaying the journal on a local copy.")
     else:
         prompt = "This file's ext4 layout cannot be edited by the current RAM loader."
         detail = "The full transfer reads and writes 500 MiB of var, then checks the result."

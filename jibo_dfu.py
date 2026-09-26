@@ -85,8 +85,8 @@ class FileRpcStatusError(DfuError):
         elif status == 4:
             message = ("The ext4 journal needs recovery or could not be verified cleanly "
                        "(file mailbox status 4). The loader refused to read the target file or "
-                       "write the partition. Boot normally to let Linux recover var, then "
-                       "re-enter DFU and retry; the guided menu also offers a full-var transfer.")
+                       "write the partition. A clean Linux unmount can clear the journal; "
+                       "the guided menu also offers a full-var transfer.")
         else:
             message = "The file mailbox rejected the request with status {}.".format(status)
         super().__init__(message)
