@@ -30,9 +30,10 @@ _DFU_UPLOAD = 0x02
 _DFU_GETSTATUS = 0x03
 _DFU_ABORT = 0x06
 _DFU_FUNCTIONAL_DESCRIPTOR = 0x21
-_DFU_CAN_UPLOAD = 0x04
+_DFU_CAN_UPLOAD = 0x02
 _DFU_IDLE = 2
 _TIMEOUT_MS = 30000
+_LIBUSB_CONTROL_MAX = 4096
 
 
 class BoundedDfuError(RuntimeError):
@@ -234,12 +235,13 @@ def _find_device(lib, device_list, count, port):
     return matches[0]
 
 
-def _interface_alt(lib, device, handle, wanted_name):
+def dfu_alternates(lib, device, handle):
+    """Map every DFU alternate-setting name to its (interface, setting) pairs."""
     config = _ConfigDescriptorP()
     rc = lib.libusb_get_active_config_descriptor(device, ctypes.byref(config))
     _check_rc(lib, rc, "Could not read the active USB configuration")
     try:
-        found = []
+        found = {}
         for interface_index in range(min(int(config.contents.bNumInterfaces), 32)):
             interface = config.contents.interface[interface_index]
             for alt_index in range(min(int(interface.num_altsetting), 256)):
@@ -254,17 +256,24 @@ def _interface_alt(lib, device, handle, wanted_name):
                 )
                 _check_rc(lib, size, "Could not read a DFU alternate-setting name")
                 name = bytes(string[:size]).decode("ascii", "replace")
-                if name == wanted_name:
-                    found.append((int(descriptor.bInterfaceNumber), int(descriptor.bAlternateSetting)))
-        if len(found) != 1:
-            if not found:
-                raise BoundedDfuError(
-                    "The selected device does not expose the named DFU alternate " + repr(wanted_name) + "."
-                )
-            raise BoundedDfuError("The named DFU alternate appears more than once on the selected device.")
-        return found[0]
+                found.setdefault(name, []).append(
+                    (int(descriptor.bInterfaceNumber), int(descriptor.bAlternateSetting)))
+        return found
     finally:
         lib.libusb_free_config_descriptor(config)
+
+
+def _interface_alt(lib, device, handle, wanted_name, alternates=None):
+    if alternates is None:
+        alternates = dfu_alternates(lib, device, handle)
+    found = alternates.get(wanted_name, [])
+    if len(found) != 1:
+        if not found:
+            raise BoundedDfuError(
+                "The selected device does not expose the named DFU alternate " + repr(wanted_name) + "."
+            )
+        raise BoundedDfuError("The named DFU alternate appears more than once on the selected device.")
+    return found[0]
 
 
 def _control(lib, handle, request_type, request, value, interface, buffer, length, label):
@@ -290,7 +299,9 @@ def _dfu_transfer_size(lib, handle, interface):
     transfer_size = descriptor[5] | (descriptor[6] << 8)
     if transfer_size < 1:
         raise BoundedDfuError("The DFU descriptor reports an invalid transfer size.")
-    return min(transfer_size, MAX_UPLOAD_BYTES)
+    # libusb's Linux backend refuses control transfers over 4 KiB. Loaders that
+    # advertise more (jibo-dfu-queue-v1) honour the smaller wLength.
+    return min(transfer_size, MAX_UPLOAD_BYTES, _LIBUSB_CONTROL_MAX)
 
 
 def _upload_bounded(lib, handle, interface, transfer_size, max_bytes=MAX_UPLOAD_BYTES):

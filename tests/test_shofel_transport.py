@@ -1,6 +1,7 @@
 """DFU entry through ShofEL and DFU-only partition reads."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import tempfile
@@ -136,12 +137,13 @@ class ShofelTransportTests(unittest.TestCase):
 
         def upload(argv, **kwargs):
             self.assertEqual(argv, ["dfu-util", "-d", "0955:701a", "--path", "1-2",
-                                    "-a", "var", "-U", argv[-1]])
+                                    "-a", "var", "-U", argv[-3], "-Z", str(len(self.var))])
             self.assertEqual(kwargs["timeout"], 900)
             self.assertEqual(kwargs["progress_size"], len(self.var))
-            Path(argv[-1]).write_bytes(self.var)
+            Path(argv[-3]).write_bytes(self.var)
 
-        with patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "dfu"}]), \
+        with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "dfu-util"}), \
+                patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "dfu"}]), \
                 patch.object(toolkit, "dfu_alternatives", return_value=(names, listing)), \
                 patch.object(toolkit, "BACKUP_ROOT", self.backups), \
                 patch.object(toolkit, "EXPECTED_VAR_SIZE", len(self.var)), \
@@ -197,7 +199,7 @@ class ShofelTransportTests(unittest.TestCase):
                    'Found DFU: alt=1, name="var", size=4096\n')
 
         def short_upload(argv, **_kwargs):
-            Path(argv[-1]).write_bytes(self.var[:-1])
+            Path(argv[argv.index("-U") + 1]).write_bytes(self.var[:-1])
 
         with patch.object(toolkit, "devices", return_value=[{"port": "1-2", "state": "dfu"}]), \
                 patch.object(toolkit, "dfu_alternatives",

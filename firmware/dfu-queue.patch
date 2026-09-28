@@ -1,0 +1,121 @@
+--- a/drivers/dfu/dfu_mmc.c
++++ b/drivers/dfu/dfu_mmc.c
+@@ -238,7 +238,8 @@
+ 	if (op == DFU_OP_WRITE &&
+ 	    (!strncmp(dfu->name, "emmc-", 5) ||
+ 	     !strcmp(dfu->name, "jibo-dfu-v1") ||
+-	     !strcmp(dfu->name, "jibo-file-v1")))
++	     !strcmp(dfu->name, "jibo-file-v1") ||
++	     !strcmp(dfu->name, "jibo-dfu-queue-v1")))
+ 		return -EPERM;
+ 	/* skills-* writes are allowed only for generated, exact GPT slices. */
+ 	if (op == DFU_OP_WRITE && !strncmp(dfu->name, "skills-", 7) &&
+--- a/drivers/usb/gadget/ci_udc.c
++++ b/drivers/usb/gadget/ci_udc.c
+@@ -679,6 +679,15 @@
+ #else
+ 	writel(EPT_RX(0), &udc->epstat);
+ #endif
++#ifdef CONFIG_JIBO_DFU_QUEUE
++	/*
++	 * A SETUP ends the previous control transfer. A host that queues
++	 * requests can send it before udc_irq() has seen that transfer's
++	 * status stage complete. Drop the stale ep0 completion so it cannot
++	 * finish the data stage queued below before any data has moved.
++	 */
++	writel(EPT_RX(0) | EPT_TX(0), &udc->epcomp);
++#endif
+ 	DBG("handle setup %s, %x, %x index %x value %x length %x\n",
+ 	    reqname(r.bRequest), r.bRequestType, r.bRequest, r.wIndex,
+ 	    r.wValue, r.wLength);
+--- a/drivers/usb/gadget/composite.c
++++ b/drivers/usb/gadget/composite.c
+@@ -11,7 +11,12 @@
+ #include <linux/bitops.h>
+ #include <linux/usb/composite.h>
+ 
++#ifdef CONFIG_JIBO_DFU_QUEUE
++/* Holds one DFU block; DFU_USB_BUFSIZ must match. */
++#define USB_BUFSIZ	32768
++#else
+ #define USB_BUFSIZ	4096
++#endif
+ 
+ static struct usb_composite_driver *composite;
+ 
+--- a/drivers/usb/gadget/f_dfu.c
++++ b/drivers/usb/gadget/f_dfu.c
+@@ -239,8 +239,21 @@
+ {
+ 	struct f_dfu *f_dfu = req->context;
+ 
++#ifdef CONFIG_JIBO_DFU_QUEUE
++	/*
++	 * Return the wLength the host asked for. dfu-util 0.9 limits itself
++	 * to 4 KiB on Linux, below the advertised transfer size.
++	 */
++	if (len > DFU_USB_BUFSIZ) {
++		f_dfu->dfu_state = DFU_STATE_dfuERROR;
++		return -EINVAL;
++	}
++	return dfu_read(dfu_get_entity(f_dfu->altsetting), req->buf,
++			len, f_dfu->blk_seq_num);
++#else
+ 	return dfu_read(dfu_get_entity(f_dfu->altsetting), req->buf,
+ 			req->length, f_dfu->blk_seq_num);
++#endif
+ }
+ 
+ static int handle_dnload(struct usb_gadget *gadget, u16 len)
+@@ -249,6 +262,13 @@
+ 	struct usb_request *req = cdev->req;
+ 	struct f_dfu *f_dfu = req->context;
+ 
++#ifdef CONFIG_JIBO_DFU_QUEUE
++	/* The data stage lands in the ep0 buffer; refuse to overrun it. */
++	if (len > DFU_USB_BUFSIZ) {
++		f_dfu->dfu_state = DFU_STATE_dfuERROR;
++		return -EINVAL;
++	}
++#endif
+ 	if (len == 0)
+ 		f_dfu->dfu_state = DFU_STATE_dfuMANIFEST_SYNC;
+ 
+@@ -694,6 +714,11 @@
+ 	int alt_num = dfu_get_alt_number();
+ 	int rv, id, i;
+ 
++#ifdef CONFIG_JIBO_DFU_QUEUE
++	/* Every DFU block passes through the composite ep0 buffer. */
++	if (cdev->bufsiz < DFU_USB_BUFSIZ)
++		return -EINVAL;
++#endif
+ 	id = usb_interface_id(c, f);
+ 	if (id < 0)
+ 		return id;
+--- a/drivers/usb/gadget/f_dfu.h
++++ b/drivers/usb/gadget/f_dfu.h
+@@ -22,7 +22,12 @@
+ #define DFU_BIT_CAN_DNLOAD		0x1
+ 
+ /* big enough to hold our biggest descriptor */
++#ifdef CONFIG_JIBO_DFU_QUEUE
++/* Advertised wTransferSize; the composite ep0 buffer has the same size. */
++#define DFU_USB_BUFSIZ			32768
++#else
+ #define DFU_USB_BUFSIZ			4096
++#endif
+ 
+ #define USB_REQ_DFU_DETACH		0x00
+ #define USB_REQ_DFU_DNLOAD		0x01
+--- a/include/configs/kein-baseboard.h
++++ b/include/configs/kein-baseboard.h
+@@ -98,6 +98,8 @@
+ #undef CONFIG_ENV_IS_IN_MMC
+ #define CONFIG_ENV_IS_NOWHERE
+ #define CONFIG_JIBO_DFU_CID_SERIAL
++/* Accept queued DFU requests and 32 KiB blocks (jibo-dfu-queue-v1). */
++#define CONFIG_JIBO_DFU_QUEUE
+ #undef CONFIG_BOOTCOUNT_LIMIT
+ #undef CONFIG_BOOTCOUNT_ENV
+ 

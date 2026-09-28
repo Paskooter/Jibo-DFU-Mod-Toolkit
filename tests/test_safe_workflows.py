@@ -116,7 +116,7 @@ class SafeWorkflowTests(unittest.TestCase):
             def failed_transfer(argv, timeout, label, **kwargs):
                 self.assertEqual(kwargs["progress_path"], destination)
                 self.assertEqual(kwargs["progress_size"], j.EXPECTED_VAR_SIZE)
-                Path(argv[-1]).write_bytes(b"partial dump")
+                Path(argv[argv.index("-U") + 1]).write_bytes(b"partial dump")
                 raise j.DfuError("simulated transfer failure")
 
             with patch.object(j, "run_with_progress", side_effect=failed_transfer):
@@ -131,7 +131,7 @@ class SafeWorkflowTests(unittest.TestCase):
             def failed_transfer(argv, timeout, label, **kwargs):
                 self.assertEqual(kwargs["progress_path"], destination)
                 self.assertEqual(kwargs["progress_size"], j.EXPECTED_VAR_SIZE)
-                Path(argv[-1]).write_bytes(b"partial dump")
+                Path(argv[argv.index("-U") + 1]).write_bytes(b"partial dump")
                 raise j.DfuError("simulated transfer failure")
 
             with patch.object(j, "run_with_progress", side_effect=failed_transfer):

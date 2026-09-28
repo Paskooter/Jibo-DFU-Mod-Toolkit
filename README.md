@@ -21,7 +21,7 @@ The launcher checks the local `dist/jibo-dfu-linux-x86_64.pyz` before opening it
 
 When `./run.sh` is started inside WSL, it also tries to use Windows PowerShell and usbipd-win to attach a connected Jibo and reattach it when it changes from APX to DFU. If Windows interop or usbipd-win is unavailable, attach it manually. Use `JIBO_MANUAL_USB=1 ./run.sh` to skip automatic USB handoff.
 
-The first build needs an internet connection for ShofEL and package installation. The launcher's default loader is the included `assets/loader.bin`; `JIBO_LOADER=/path/to/loader.bin ./run.sh` selects a different local copy of the same pinned image. The U-Boot source and notices are in `vendor/jibo-ram-dfu-v1-source.tar.gz`; the file access changes are in `firmware/file-level.patch` and `firmware/cid-serial.patch`. An existing package can be run directly with `sudo python3 dist/jibo-dfu-linux-x86_64.pyz`.
+The first build needs an internet connection for ShofEL and package installation. The launcher's default loader is the included `assets/loader.bin`; `JIBO_LOADER=/path/to/loader.bin ./run.sh` selects a different local copy of the same pinned image. The U-Boot source and notices are in `vendor/jibo-ram-dfu-v1-source.tar.gz`; the file access changes are in `firmware/file-level.patch` and `firmware/cid-serial.patch`, and the faster transfer changes are in `firmware/dfu-queue.patch`. An existing package can be run directly with `sudo python3 dist/jibo-dfu-linux-x86_64.pyz`.
 
 ## Windows with WSL
 
@@ -74,6 +74,8 @@ With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refr
 | More tools and local images | Checks the partition layout; backs up or restores chosen partitions; writes an edited `var` image; or inspects and edits a local backup. Local image edits do not change the robot. |
 
 The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transfer resets the loader's read cursor, so another check or an update can run without restarting DFU.
+
+**Transfer speed:** Whole-partition reads and writes go through `jibo_dfu_pipeline.py`, which talks to Linux usbfs directly and keeps DFU requests queued instead of waiting a USB round trip for every block. The included loader uses 32 KiB blocks and accepts queued writes; it lists the read-only `jibo-dfu-queue-v1` alternate to say so. With an older loader, reads are still queued, but writes send one block at a time. Over WSL with usbipd-win, a 500 MiB `var` read took 52.0 s, against 115 s with dfu-util 0.9. A readback-checked `var` write took 76.4 s, against about 2 MiB/s with dfu-util. Set `JIBO_DFU_TRANSFER=dfu-util` to use dfu-util for these transfers. Small file-level requests always use dfu-util.
 
 Compact preserve-`var` flashing currently accepts the known 13.0.0 first-boot script. It checks the selected package's script and rootfs boot hook before writing. Older scripts can format `rootfsB` during first boot, so an unrecognized script is rejected rather than rearmed. The file editor now handles the resize script's legacy one-block mapping. If a different layout fails its safety checks, the toolkit reads the current 500 MiB `var`, edits a temporary copy, writes it back after the compact package images, and checks the new script and permissions before reset. The temporary image is removed when the operation ends; the existing rollback backup is reused.
 

@@ -24,7 +24,11 @@ def main():
                         help="include experimental eMMC-CID USB serial identity support")
     parser.add_argument("--file-level-candidate", action="store_true",
                         help="include the experimental file-RPC mailbox and stable CID serial")
+    parser.add_argument("--dfu-queue-candidate", action="store_true",
+                        help="accept queued DFU requests and 32 KiB blocks (needs --file-level-candidate)")
     args = parser.parse_args()
+    if args.dfu_queue_candidate and not args.file_level_candidate:
+        parser.error("--dfu-queue-candidate applies on top of --file-level-candidate")
     if args.out.exists():
         parser.error("Build directory already exists")
     source, out, host = args.source.resolve(), args.out.resolve(), args.host.resolve()
@@ -58,6 +62,9 @@ def main():
     if args.file_level_candidate:
         subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i",
                         str(ROOT / "firmware/file-level.patch")], cwd=out, check=True)
+    if args.dfu_queue_candidate:
+        subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i",
+                        str(ROOT / "firmware/dfu-queue.patch")], cwd=out, check=True)
     shutil.copyfile(ROOT / "firmware/jibo_dfu_entry.h", out / "common/jibo_dfu_entry.h")
     env = os.environ.copy()
     env.update(PATH=str(host / "usr/bin") + os.pathsep + env["PATH"],

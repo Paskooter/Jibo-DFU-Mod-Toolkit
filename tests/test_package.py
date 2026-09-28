@@ -57,7 +57,8 @@ class PackageTests(unittest.TestCase):
 
         expected = {
             "__main__.py", "loader.bin", "README.md", "jibo_dfu.py",
-            "jibo_dfu_bounded.py", "jibo_images.py", "jibo_updates.py", "jibo_tui.py",
+            "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py", "jibo_images.py",
+            "jibo_updates.py", "jibo_tui.py",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
             "tools/dfu-util",
         }
@@ -177,9 +178,9 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(result, (False, "tools/dfu_stage2.bin does not embed the pinned RAM loader hash"))
 
     def test_pinned_file_loader_hash(self):
-        self.assertEqual(package.PINNED_LOADER_SIZE, 432_000)
+        self.assertEqual(package.PINNED_LOADER_SIZE, 432_064)
         self.assertEqual(package.PINNED_LOADER_SHA256,
-                         "fd5fc5b1759ddbdbb0da88ac89c425ab95eb0bc494917cfe27daf71e55a31095")
+                         "7105edf6d7d9b68e32aef3f2c331a348e0612210cc9bd1c06bb26bba33b8e8c0")
 
 
 if __name__ == "__main__":

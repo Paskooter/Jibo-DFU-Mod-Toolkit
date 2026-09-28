@@ -1,8 +1,8 @@
 {
   "kind": "experimental-file-rpc-loader",
-  "source_commit": "a0a3fcff642cd7a5bbc4513657332e690c4ef16b",
-  "size_bytes": 432000,
-  "sha256": "fd5fc5b1759ddbdbb0da88ac89c425ab95eb0bc494917cfe27daf71e55a31095",
-  "hardware_tested": false,
-  "hardware_test": "Dirty-journal status-4 handling is compile-validated only; fast journal recovery remains unsupported."
+  "source_commit": "9a3d09941561c21570fedf4076c83cd187dcb9bf",
+  "size_bytes": 432064,
+  "sha256": "7105edf6d7d9b68e32aef3f2c331a348e0612210cc9bd1c06bb26bba33b8e8c0",
+  "hardware_tested": true,
+  "hardware_test": "2026-09-28: entered DFU through ShofEL; 4, 8, 16 and 32 KiB pipelined var reads, queued 16 and 32 KiB var writes checked by readback, dfu-util 0.9 reads, the GPT probe and a file-RPC stat matched. File-RPC writes and full updates have not run on this build."
 }

@@ -10,8 +10,8 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PINNED_LOADER_SIZE = 432_000
-PINNED_LOADER_SHA256 = "fd5fc5b1759ddbdbb0da88ac89c425ab95eb0bc494917cfe27daf71e55a31095"
+PINNED_LOADER_SIZE = 432_064
+PINNED_LOADER_SHA256 = "7105edf6d7d9b68e32aef3f2c331a348e0612210cc9bd1c06bb26bba33b8e8c0"
 BASELINE_LOADER_SHA256 = bytes.fromhex(
     "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689")
 
@@ -102,6 +102,7 @@ def main():
     sources = {
         "jibo_dfu.py": ROOT / "jibo_dfu.py",
         "jibo_dfu_bounded.py": ROOT / "jibo_dfu_bounded.py",
+        "jibo_dfu_pipeline.py": ROOT / "jibo_dfu_pipeline.py",
         "jibo_images.py": ROOT / "jibo_images.py",
         "jibo_updates.py": ROOT / "jibo_updates.py",
         "jibo_tui.py": ROOT / "jibo_tui.py",

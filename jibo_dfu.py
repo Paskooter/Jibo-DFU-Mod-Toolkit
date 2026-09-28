@@ -50,6 +50,7 @@ SKILLS_SECTOR_SIZE = 512
 SKILLS_CHUNK_SECTORS = 0x200000
 SKILLS_CHUNK_BYTES = SKILLS_SECTOR_SIZE * SKILLS_CHUNK_SECTORS
 DEFAULT_LOADER = ROOT / "loader.bin"
+PIPELINE_HELPER = ROOT / "jibo_dfu_pipeline.py"
 
 
 def _invoking_user():
@@ -279,11 +280,12 @@ def run_with_progress(argv, timeout, label, cwd=None, progress_path=None, progre
     except OSError as exc:
         raise DfuError("Could not start transfer command: " + str(exc)) from exc
 
+    command = Path(argv[1]).name if argv[0] == sys.executable and len(argv) > 1 else argv[0]
     if timed_out:
         raise DfuError("Command timed out after {} seconds: {}\n{}".format(
-            timeout, argv[0], _transfer_error_detail(output)))
+            timeout, command, _transfer_error_detail(output)))
     if result_code:
-        raise DfuError("Command failed: {}\n{}".format(argv[0], _transfer_error_detail(output)))
+        raise DfuError("Command failed: {}\n{}".format(command, _transfer_error_detail(output)))
     if download_size:
         transferred = _dfu_download_final_count(output, allow_progress_completion)
         if transferred != download_size:
@@ -345,6 +347,27 @@ def tool(name, override=None):
     if not located:
         raise DfuError("Missing " + name + "; install it or provide --" + name + ".")
     return located
+
+
+def _usbfs_available():
+    return Path("/dev/bus/usb").is_dir()
+
+
+def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=None):
+    """Build a whole-alternative read (-U) or write (-D) command.
+
+    The pipelined helper queues DFU requests instead of waiting a USB round
+    trip for each block. JIBO_DFU_TRANSFER=dfu-util selects dfu-util.
+    """
+    mode = os.environ.get("JIBO_DFU_TRANSFER", "pipelined")
+    if mode not in ("pipelined", "dfu-util"):
+        raise DfuError("JIBO_DFU_TRANSFER must be pipelined or dfu-util.")
+    argv = ["-d", "0955:701a", "--path", port, "-a", alternative, option, str(path)]
+    if option == "-U":
+        argv += ["-Z", str(size)]
+    if mode == "pipelined" and PIPELINE_HELPER.is_file() and _usbfs_available():
+        return [sys.executable, str(PIPELINE_HELPER)] + argv
+    return [dfu_util] + argv
 
 
 def _shofel_dfu_tool(override=None):
@@ -503,11 +526,11 @@ def _upload_var(dfu_util, port, destination):
     destination.unlink(missing_ok=True)
     try:
         run_with_progress(
-            [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-U", str(destination)],
+            _partition_transfer_argv(dfu_util, port, "var", "-U", destination, EXPECTED_VAR_SIZE),
             timeout=900, label="Reading the 500 MiB var partition from USB",
             progress_path=destination, progress_size=EXPECTED_VAR_SIZE)
         if not destination.is_file():
-            raise DfuError("dfu-util completed without creating the var image.")
+            raise DfuError("The DFU read completed without creating the var image.")
         destination.chmod(0o600)
         _chown_to_invoking_user(destination)
         size = destination.stat().st_size
@@ -525,8 +548,7 @@ def _upload_partition(dfu_util, port, partition, size, destination):
     destination.unlink(missing_ok=True)
     try:
         run_with_progress(
-            [dfu_util, "-d", "0955:701a", "--path", port, "-a", partition,
-             "-U", str(destination), "-Z", str(size)],
+            _partition_transfer_argv(dfu_util, port, partition, "-U", destination, size),
             timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size),
             progress_path=destination, progress_size=size)
         if destination.stat().st_size != size:
@@ -902,8 +924,8 @@ def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
                 _write_skills_chunks(dfu_util, port, entry["image"], size, chunks,
                                      directory, record_path, record, write)
             else:
-                run_with_progress([dfu_util, "-d", "0955:701a", "--path", port,
-                                   "-a", name, "-D", entry["image"]],
+                run_with_progress(_partition_transfer_argv(dfu_util, port, name, "-D",
+                                                           entry["image"]),
                                   timeout=14400, label="Restoring " + name,
                                   download_size=size,
                                   allow_progress_completion=True)
@@ -1187,8 +1209,8 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                 write_entry["chunks"].append(chunk_record)
                 _private_write(record_path, record)
                 run_with_progress(
-                    [dfu_util, "-d", "0955:701a", "--path", port,
-                     "-a", chunk["name"], "-D", str(candidate_piece)],
+                    _partition_transfer_argv(dfu_util, port, chunk["name"], "-D",
+                                             candidate_piece),
                     timeout=14400,
                     download_size=chunk["transfer_bytes"],
                     allow_progress_completion=True,
@@ -1751,7 +1773,7 @@ def _write_candidate(candidate, before, directory, port, dfu_util, confirmation=
     _private_write(record_path, record)
     try:
         run_with_progress(
-            [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var", "-D", str(candidate)],
+            _partition_transfer_argv(dfu_util, port, "var", "-D", candidate),
             timeout=900, label="Writing the edited 500 MiB var partition over USB",
             download_size=EXPECTED_VAR_SIZE, allow_progress_completion=True)
         readback = Path(directory) / "readback-var.img"
@@ -1989,8 +2011,8 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         transfer_size=transfer_sizes[name])
                 else:
                     run_with_progress(
-                        [dfu_util, "-d", "0955:701a", "--path", port, "-a", name,
-                         "-D", str(candidate)], timeout=14400,
+                        _partition_transfer_argv(dfu_util, port, name, "-D", candidate),
+                        timeout=14400,
                         download_size=transfer_sizes[name],
                         allow_progress_completion=True,
                         label="Writing {} prefix ({} bytes)".format(name, transfer_sizes[name]))
@@ -2078,8 +2100,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         "status": "write started"}
                     _private_write(record_path, record)
                     run_with_progress(
-                        [dfu_util, "-d", "0955:701a", "--path", port, "-a", "var",
-                         "-D", var_resize_image["image"]], timeout=14400,
+                        _partition_transfer_argv(dfu_util, port, "var", "-D",
+                                                 var_resize_image["image"]),
+                        timeout=14400,
                         download_size=EXPECTED_VAR_SIZE,
                         allow_progress_completion=True,
                         label="Writing preserved var with first-boot resize script")

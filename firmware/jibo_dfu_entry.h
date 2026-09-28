@@ -83,6 +83,14 @@ static void jibo_dfu_entry(void)
 	memcpy(alternatives + used, entry, n + 1);
 	used += n;
 #endif
+#ifdef CONFIG_JIBO_DFU_QUEUE
+	/* Read-only marker: queued DFU requests and 32 KiB blocks are safe. */
+	n = snprintf(entry, sizeof(entry), ";jibo-dfu-queue-v1 raw 0 34");
+	if (n < 0 || n >= sizeof(entry) || used + n >= sizeof(alternatives))
+		goto failed;
+	memcpy(alternatives + used, entry, n + 1);
+	used += n;
+#endif
 	/* This old DFU stack has signed 32-bit lengths. Use <=1 GiB chunks. */
 	for (offset = 0, i = 0; offset < mmc->block_dev.lba; offset += count, ++i) {
 		count = mmc->block_dev.lba - offset;
