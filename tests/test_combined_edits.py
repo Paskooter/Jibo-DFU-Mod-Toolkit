@@ -39,6 +39,21 @@ class CombinedEditTests(unittest.TestCase):
         self.assertEqual(images.build_rtm2_wifi_startup(custom, compact=True),
                          (custom, False))
 
+    def test_wifi_server_check_hook_is_added_once_to_stock_startups(self):
+        for start in (images._RTM2_WLAN_START, images._RTM3_WLAN_START):
+            with self.subTest(start=start):
+                original = ("auto wlan0\niface wlan0 inet dhcp\n\t" + start + "\n").encode()
+                edited, radio, hook = images.build_stock_wifi_startup(original, compact=True)
+                self.assertEqual(radio, start == images._RTM2_WLAN_START)
+                self.assertTrue(hook)
+                self.assertLess(len(edited), 1024)
+                self.assertIn(b"post-up /bin/sh -c 'f=/usr/local/bin/jibo-ssm/", edited)
+                self.assertEqual(images.build_stock_wifi_startup(edited, compact=True),
+                                 (edited, False, False))
+        custom = b"auto wlan0\niface wlan0 inet static\n\taddress 10.0.0.1\n"
+        self.assertEqual(images.build_stock_wifi_startup(custom),
+                         (custom, False, False))
+
     def test_partially_adjusted_rtm2_startup_requires_review(self):
         partial = (b"auto wlan0\niface wlan0 inet dhcp\n"
                    b"\tpost-up /usr/sbin/iw wlan0 set power_save off || true\n"
@@ -132,6 +147,7 @@ class CombinedEditTests(unittest.TestCase):
             self.assertEqual(result["previous_mode"], "oobe")
             self.assertEqual(result["network_count"], 2)
             self.assertTrue(result["rtm2_wifi_startup_adjusted"])
+            self.assertTrue(result["wifi_server_check_hook_added"])
             self.assertEqual(images.sha256_file(source), original_hash)
             mode = images._extract(edited, images.VAR_MODE_PATH, work / "check-mode")
             wifi = images._extract(edited, images.VAR_WIFI_PATH, work / "check-wifi")
@@ -143,3 +159,4 @@ class CombinedEditTests(unittest.TestCase):
             self.assertIn(b"ssid=546573742057692d4669", wifi)
             self.assertLess(len(interfaces), 1024)
             self.assertIn(b"iw wlan0 set power_save off", interfaces)
+            self.assertIn(b"testJiboServer = false;", interfaces)

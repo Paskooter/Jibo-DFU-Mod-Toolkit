@@ -489,6 +489,11 @@ def build_wifi_config(existing, ssid, password=None, open_network=False,
 _RTM2_WLAN_START = "post-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf"
 _RTM3_WLAN_START = "post-up wireless-startup"
 _RTM2_WIFI_SLEEP_AUTH = "/sys/kernel/debug/ieee80211/phy0/wlcore/sleep_auth"
+_WIFI_SERVER_CHECK_HOOK = (
+    "post-up /bin/sh -c 'f=/usr/local/bin/jibo-ssm/lib/skills-service-manager.js; "
+    "[ \"$(grep -Fc \"const testJiboServer = true;\" \"$f\")\" = 1 ] && "
+    "sed -i.jibo-dfu-original \"s/const testJiboServer = true;/const testJiboServer = false;/\" \"$f\" "
+    "|| true'")
 
 
 def build_rtm2_wifi_startup(existing, compact=False):
@@ -541,18 +546,58 @@ def build_rtm2_wifi_startup(existing, compact=False):
     return "".join(lines).encode("utf-8"), changed
 
 
-def _adjust_rtm2_wifi_startup(image, temp, compact=False):
-    """Patch the stock RTM2 wlan0 hook when a Wi-Fi edit is already in progress."""
+def build_wifi_server_check_hook(existing):
+    """Make stock Wi-Fi startup skip the defunct cloud check before SSM starts."""
+    try:
+        text = existing.decode("utf-8")
+    except (AttributeError, UnicodeDecodeError) as exc:
+        raise ImageError("The network interfaces file is not valid UTF-8.") from exc
+    lines = text.splitlines(keepends=True)
+    in_wlan0 = False
+    start_index = None
+    hook_count = 0
+    for index, line in enumerate(lines):
+        active = line.split("#", 1)[0].strip()
+        if re.match(r"^(?:iface|auto|allow-\S+)\s+", active):
+            in_wlan0 = bool(re.fullmatch(r"iface\s+wlan0\s+inet\s+dhcp", active))
+        if not in_wlan0:
+            continue
+        if active in (_RTM2_WLAN_START, _RTM3_WLAN_START):
+            if start_index is not None:
+                raise ImageError("The stock wlan0 startup appears more than once; no change was made.")
+            start_index = index
+        if "testJiboServer = true;" in active and "skills-service-manager.js" in active:
+            hook_count += 1
+    if hook_count > 1:
+        raise ImageError("The Wi-Fi server-check hook appears more than once; no change was made.")
+    if start_index is None or hook_count:
+        return existing, False
+    original = lines[start_index]
+    indent = original[:len(original) - len(original.lstrip())]
+    newline = "\r\n" if original.endswith("\r\n") else "\n"
+    lines.insert(start_index + 1, indent + _WIFI_SERVER_CHECK_HOOK + newline)
+    return "".join(lines).encode("utf-8"), True
+
+
+def build_stock_wifi_startup(existing, compact=False):
+    """Apply stock Wi-Fi startup fixes and report each change separately."""
+    replacement, radio_adjusted = build_rtm2_wifi_startup(existing, compact=compact)
+    replacement, server_hook_added = build_wifi_server_check_hook(replacement)
+    return replacement, radio_adjusted, server_hook_added
+
+
+def _adjust_stock_wifi_startup(image, temp, compact=False):
+    """Adjust stock wlan0 startup while a Wi-Fi edit is already in progress."""
     work = Path(temp)
     original = _extract(image, VAR_INTERFACES_PATH, work / "interfaces", optional=True)
     if original is None:
-        return False, None
-    replacement, adjusted = build_rtm2_wifi_startup(original, compact=compact)
+        return False, False, None
+    replacement, adjusted, hook_added = build_stock_wifi_startup(original, compact=compact)
     if replacement != original:
         _replace_file(image, VAR_INTERFACES_PATH, replacement, temp)
         if _extract(image, VAR_INTERFACES_PATH, work / "final-interfaces") != replacement:
-            raise ImageError("The RTM2 Wi-Fi startup edit did not survive image readback.")
-    return adjusted, replacement
+            raise ImageError("The Wi-Fi startup edit did not survive image readback.")
+    return adjusted, hook_added, replacement
 
 
 def edit_wifi(source, destination, ssid, password=None, open_network=False,
@@ -573,7 +618,7 @@ def edit_wifi(source, destination, ssid, password=None, open_network=False,
                 _run_debugfs(destination, "set_inode_field " + VAR_WIFI_PATH + " gid 0", writable=True)
             else:
                 _replace_file(destination, VAR_WIFI_PATH, replacement, temp)
-            startup_adjusted, startup_expected = _adjust_rtm2_wifi_startup(
+            startup_adjusted, hook_added, startup_expected = _adjust_stock_wifi_startup(
                 destination, temp, compact=compact)
             _replay_journal_on_copy(destination)
             verified = _extract(destination, VAR_WIFI_PATH, Path(temp) / "verified")
@@ -585,6 +630,7 @@ def edit_wifi(source, destination, ssid, password=None, open_network=False,
                 raise ImageError("The network startup file did not survive image readback.")
         return {"image": str(destination), "network_count": count,
                 "rtm2_wifi_startup_adjusted": startup_adjusted,
+                "wifi_server_check_hook_added": hook_added,
                 "sha256": sha256_file(destination),
                 "journal_replayed_on_temporary_copy": repaired}
     except Exception:
@@ -613,7 +659,7 @@ def edit_mode_wifi(source, destination, mode, ssid, password=None,
                 _put_factory_file(destination, VAR_WIFI_PATH, wifi_bytes, temp, 0o644)
             else:
                 _replace_file(destination, VAR_WIFI_PATH, wifi_bytes, temp)
-            startup_adjusted, startup_expected = _adjust_rtm2_wifi_startup(
+            startup_adjusted, hook_added, startup_expected = _adjust_stock_wifi_startup(
                 destination, temp, compact=True)
             _replay_journal_on_copy(destination)
             final_mode = _json_mode(_extract(destination, VAR_MODE_PATH, work / "final-mode"))
@@ -627,6 +673,7 @@ def edit_mode_wifi(source, destination, mode, ssid, password=None,
         return {"image": str(destination), "previous_mode": previous,
                 "mode": mode, "network_count": count,
                 "rtm2_wifi_startup_adjusted": startup_adjusted,
+                "wifi_server_check_hook_added": hook_added,
                 "sha256": sha256_file(destination),
                 "journal_replayed_on_temporary_copy": repaired}
     except Exception:

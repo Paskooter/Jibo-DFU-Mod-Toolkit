@@ -548,11 +548,15 @@ def _result_summary(action, result):
                  if result.get("ssid") else "Wi-Fi configuration updated."]
         if result.get("rtm2_wifi_startup_adjusted"):
             lines.append("RTM2 TI radio startup was adjusted; restart the robot to try Wi-Fi.")
+        if result.get("wifi_server_check_hook_added"):
+            lines.append("Wi-Fi startup will skip Jibo's retired server check after a restart.")
     elif action == "set-mode-wifi":
         lines = ["Robot mode set to {}.".format(result.get("mode") or result.get("new_mode")),
                  "Saved Wi-Fi network: {!r}.".format(result.get("ssid"))]
         if result.get("rtm2_wifi_startup_adjusted"):
             lines.append("RTM2 TI radio startup was adjusted; restart the robot to try Wi-Fi.")
+        if result.get("wifi_server_check_hook_added"):
+            lines.append("Wi-Fi startup will skip Jibo's retired server check after a restart.")
     elif action == "backup-var":
         lines = ["Var backup is ready."]
         if result.get("image"):

@@ -290,7 +290,8 @@ class SafeWorkflowTests(unittest.TestCase):
             baseline = operation_dir / "baseline.img"
             edit_result = {"previous_mode": "oobe", "network_count": 2,
                            "journal_replayed_on_temporary_copy": True,
-                           "rtm2_wifi_startup_adjusted": True}
+                           "rtm2_wifi_startup_adjusted": True,
+                           "wifi_server_check_hook_added": True}
             with patch.object(j, "_dfu_context", return_value=("1-1", ["var"], "device")), \
                     patch.object(j, "_new_operation_dir", return_value=operation_dir), \
                     patch.object(j, "_prepare_current_and_baseline", return_value={
@@ -310,6 +311,7 @@ class SafeWorkflowTests(unittest.TestCase):
             self.assertEqual(result["wifi_network_count"], 2)
             self.assertEqual(result["new_mode"], "developer")
             self.assertTrue(result["rtm2_wifi_startup_adjusted"])
+            self.assertTrue(result["wifi_server_check_hook_added"])
 
 
 if __name__ == "__main__":

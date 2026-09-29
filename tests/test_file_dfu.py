@@ -13,23 +13,23 @@ import jibo_dfu as j
 
 
 class FileDfuTests(unittest.TestCase):
-    def test_rtm2_startup_probe_uses_live_var_file(self):
+    def test_wifi_startup_probe_uses_live_var_file(self):
         legacy = (b"auto wlan0\niface wlan0 inet dhcp\n"
                   b"\tpost-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf\n")
         with patch.object(j, "read_partition_file_live", return_value=legacy) as read:
-            self.assertTrue(j._rtm2_wifi_startup_file_edit("1-2", "dfu-util"))
+            self.assertEqual(j._wifi_startup_file_edits("1-2", "dfu-util"), (True, True))
         read.assert_called_once_with(j.images.VAR_INTERFACES_PATH, "var", "1-2", "dfu-util")
         with patch.object(j, "read_partition_file_live",
                           return_value=b"auto wlan0\niface wlan0 inet dhcp\n\tpost-up wireless-startup\n"):
-            self.assertFalse(j._rtm2_wifi_startup_file_edit("1-2", "dfu-util"))
+            self.assertEqual(j._wifi_startup_file_edits("1-2", "dfu-util"), (False, True))
 
-    def test_fast_wifi_actions_include_rtm2_startup_in_same_transaction(self):
+    def test_fast_wifi_actions_include_startup_in_same_transaction(self):
         for combined in (False, True):
             with self.subTest(combined=combined):
                 transaction = Mock()
                 transaction.commit.return_value = {
                     "status": "verified", "writes": [{"path": j.images.VAR_INTERFACES_PATH}]}
-                with patch.object(j, "_rtm2_wifi_startup_file_edit", return_value=True), \
+                with patch.object(j, "_wifi_startup_file_edits", return_value=(True, True)), \
                         patch.object(j, "FileTransaction", return_value=transaction):
                     if combined:
                         result = j.set_mode_wifi_file_live(
@@ -44,7 +44,22 @@ class FileDfuTests(unittest.TestCase):
                 self.assertIn(j.images.VAR_WIFI_PATH, paths)
                 self.assertEqual(len(paths), 3 if combined else 2)
                 self.assertTrue(result["rtm2_wifi_startup_adjusted"])
+                self.assertTrue(result["wifi_server_check_hook_added"])
                 transaction.commit.assert_called_once_with(True)
+
+    def test_fast_wifi_action_handles_server_hook_without_rtm2_radio_change(self):
+        transaction = Mock()
+        transaction.commit.return_value = {
+            "status": "verified", "writes": [{"path": j.images.VAR_INTERFACES_PATH}]}
+        with patch.object(j, "_wifi_startup_file_edits", return_value=(False, True)), \
+                patch.object(j, "FileTransaction", return_value=transaction):
+            result = j.configure_wifi_file_live(
+                "Test Wi-Fi", open_network=True, port="1-2",
+                dfu_util="dfu-util", confirmation=True)
+        self.assertFalse(result["rtm2_wifi_startup_adjusted"])
+        self.assertTrue(result["wifi_server_check_hook_added"])
+        self.assertEqual(transaction.transform.call_args_list[-1].args[1],
+                         j.images.VAR_INTERFACES_PATH)
 
     def test_wire_sizes_match_candidate_firmware_and_spec(self):
         source = (Path(j.ROOT) / "firmware/file-level-protocol.md").read_text()
@@ -341,7 +356,7 @@ class FileDfuTests(unittest.TestCase):
                 files[path] = content
             with patch.object(j, "_file_loader_context", return_value=(
                     "1-2", [j.MARKER, "var"], "serial-sha256:robot", "")), \
-                    patch.object(j, "_rtm2_wifi_startup_file_edit", return_value=False), \
+                    patch.object(j, "_wifi_startup_file_edits", return_value=(False, False)), \
                     patch.object(j, "_read_gpt_layout", return_value={
                         "var": {"first_lba": 100, "last_lba": 107, "size_bytes": 4096}}), \
                     patch.object(j, "_stat_partition_file_rpc", side_effect=metadata), \
@@ -378,7 +393,7 @@ class FileDfuTests(unittest.TestCase):
                 return mode_metadata
             with patch.object(j, "_file_loader_context", return_value=(
                     "1-2", [j.MARKER, "var"], "serial-sha256:robot", "")), \
-                    patch.object(j, "_rtm2_wifi_startup_file_edit", return_value=False), \
+                    patch.object(j, "_wifi_startup_file_edits", return_value=(False, False)), \
                     patch.object(j, "_read_gpt_layout", return_value={
                         "var": {"first_lba": 100, "last_lba": 107, "size_bytes": 4096}}), \
                     patch.object(j, "_stat_partition_file_rpc", side_effect=metadata), \
