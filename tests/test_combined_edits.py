@@ -12,6 +12,40 @@ import jibo_images as images
 
 
 class CombinedEditTests(unittest.TestCase):
+    def test_rtm2_startup_is_adjusted_and_compacted_once(self):
+        original = (b"# stock instructions\n" * 55 +
+                    b"auto wlan0\niface wlan0 inet dhcp\n"
+                    b"\tpost-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf\n"
+                    b"\tpre-down wpa_cli -i wlan0 terminate\n")
+        edited, adjusted = images.build_rtm2_wifi_startup(original, compact=True)
+        self.assertTrue(adjusted)
+        self.assertLess(len(edited), 1024)
+        self.assertIn(b"post-up /usr/sbin/iw wlan0 set power_save off || true", edited)
+        self.assertIn(b"wlcore/sleep_auth' || true", edited)
+        self.assertIn(b"post-up wpa_supplicant -B -i wlan0", edited)
+        self.assertNotIn(b"stock instructions", edited)
+        self.assertEqual(images.build_rtm2_wifi_startup(edited, compact=True),
+                         (edited, False))
+
+    def test_rtm3_and_unknown_startups_are_not_given_rtm2_commands(self):
+        rtm3 = (b"# stock instructions\n" * 55 +
+                b"auto wlan0\niface wlan0 inet dhcp\n\tpost-up wireless-startup\n")
+        compacted, adjusted = images.build_rtm2_wifi_startup(rtm3, compact=True)
+        self.assertFalse(adjusted)
+        self.assertLess(len(compacted), 1024)
+        self.assertIn(b"post-up wireless-startup", compacted)
+        self.assertNotIn(b"power_save", compacted)
+        custom = b"auto wlan0\niface wlan0 inet static\n\taddress 10.0.0.1\n"
+        self.assertEqual(images.build_rtm2_wifi_startup(custom, compact=True),
+                         (custom, False))
+
+    def test_partially_adjusted_rtm2_startup_requires_review(self):
+        partial = (b"auto wlan0\niface wlan0 inet dhcp\n"
+                   b"\tpost-up /usr/sbin/iw wlan0 set power_save off || true\n"
+                   b"\tpost-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf\n")
+        with self.assertRaisesRegex(images.ImageError, "partial power-save"):
+            images.build_rtm2_wifi_startup(partial, compact=True)
+
     def test_saved_ssid_updates_password_without_adding_a_duplicate(self):
         existing = (b"update_config=1\n# Keep this comment\n"
                     b"network={\n    ssid=4a49424f\n    key_mgmt=NONE\n}\n"
@@ -82,6 +116,14 @@ class CombinedEditTests(unittest.TestCase):
                                 images.VAR_MODE_PATH, writable=True)
             images._run_debugfs(source, "write " + str(wifi_file) + " " +
                                 images.VAR_WIFI_PATH, writable=True)
+            interfaces_file = work / "interfaces"
+            interfaces_file.write_bytes(
+                b"# stock instructions\n" * 55 +
+                b"auto wlan0\niface wlan0 inet dhcp\n"
+                b"\tpost-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf\n")
+            images._run_debugfs(source, "mkdir /etc/network", writable=True)
+            images._run_debugfs(source, "write " + str(interfaces_file) + " " +
+                                images.VAR_INTERFACES_PATH, writable=True)
             original_hash = images.sha256_file(source)
 
             result = images.edit_mode_wifi(source, edited, "developer", "Test Wi-Fi",
@@ -89,10 +131,15 @@ class CombinedEditTests(unittest.TestCase):
 
             self.assertEqual(result["previous_mode"], "oobe")
             self.assertEqual(result["network_count"], 2)
+            self.assertTrue(result["rtm2_wifi_startup_adjusted"])
             self.assertEqual(images.sha256_file(source), original_hash)
             mode = images._extract(edited, images.VAR_MODE_PATH, work / "check-mode")
             wifi = images._extract(edited, images.VAR_WIFI_PATH, work / "check-wifi")
+            interfaces = images._extract(edited, images.VAR_INTERFACES_PATH,
+                                         work / "check-interfaces")
             self.assertEqual(json.loads(mode)["mode"], "developer")
             self.assertLess(len(wifi), 1024)
             self.assertIn(b"ssid=4a49424f", wifi)
             self.assertIn(b"ssid=546573742057692d4669", wifi)
+            self.assertLess(len(interfaces), 1024)
+            self.assertIn(b"iw wlan0 set power_save off", interfaces)

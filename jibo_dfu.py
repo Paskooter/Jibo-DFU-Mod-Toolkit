@@ -2773,6 +2773,7 @@ def configure_wifi_file_live(ssid, password=None, open_network=False, partition=
                              guided=False):
     try:
         details = {}
+        startup_edit = _rtm2_wifi_startup_file_edit(port, dfu_util) if partition == "var" else False
         def save_network(current):
             replacement, details["wifi_network_count"] = images.build_wifi_config(
                 current, ssid, password, open_network, compact=True)
@@ -2780,12 +2781,29 @@ def configure_wifi_file_live(ssid, password=None, open_network=False, partition=
         transaction = FileTransaction((partition,), port, dfu_util, out, guided=guided)
         transaction.transform(partition, images.VAR_WIFI_PATH, save_network,
                               description="saved Wi-Fi network {!r}".format(ssid))
+        if startup_edit:
+            transaction.transform(partition, images.VAR_INTERFACES_PATH,
+                                  lambda current: images.build_rtm2_wifi_startup(current)[0],
+                                  description="RTM2 TI radio startup")
         result = transaction.commit(confirmation)
         result.update(details)
         result["ssid"] = ssid
+        result["rtm2_wifi_startup_adjusted"] = any(
+            write["path"] == images.VAR_INTERFACES_PATH for write in result.get("writes", ()))
         return result
     finally:
         password = None
+
+
+def _rtm2_wifi_startup_file_edit(port, dfu_util):
+    """Check the current startup hook before planning a fast Wi-Fi transaction."""
+    try:
+        current = read_partition_file_live(images.VAR_INTERFACES_PATH, "var", port, dfu_util)
+    except FileRpcStatusError as exc:
+        if exc.status == 2:
+            return False
+        raise
+    return images.build_rtm2_wifi_startup(current)[1]
 
 
 def set_mode_wifi_file_live(mode, ssid, password=None, open_network=False,
@@ -2807,13 +2825,20 @@ def set_mode_wifi_file_live(mode, ssid, password=None, open_network=False,
             current, ssid, password, open_network, compact=True)
         return replacement
     try:
+        startup_edit = _rtm2_wifi_startup_file_edit(port, dfu_util)
         transaction = FileTransaction(("var",), port, dfu_util, out, guided=guided)
         transaction.transform("var", images.VAR_MODE_PATH, change_mode,
                               description="robot mode to " + mode)
         transaction.transform("var", images.VAR_WIFI_PATH, save_network,
                               description="saved Wi-Fi network {!r}".format(ssid))
+        if startup_edit:
+            transaction.transform("var", images.VAR_INTERFACES_PATH,
+                                  lambda current: images.build_rtm2_wifi_startup(current)[0],
+                                  description="RTM2 TI radio startup")
         result = transaction.commit(confirmation)
         result.update(details, mode=mode, ssid=ssid)
+        result["rtm2_wifi_startup_adjusted"] = any(
+            write["path"] == images.VAR_INTERFACES_PATH for write in result.get("writes", ()))
         return result
     finally:
         password = None
@@ -2877,10 +2902,15 @@ def configure_wifi_live(ssid, password=None, open_network=False, port=None,
         edit = images.edit_wifi(before, candidate, ssid, password, open_network,
                                 compact=True)
         print("Planned Wi-Fi change: save SSID " + ssid + "; a matching saved network is updated.")
+        if edit["rtm2_wifi_startup_adjusted"]:
+            print("The stock RTM2 startup hook was found; the later TI radio settings will be saved with Wi-Fi.")
+        operation = ("save Wi-Fi network and adjust RTM2 radio startup"
+                     if edit["rtm2_wifi_startup_adjusted"] else "save Wi-Fi network")
         result = _write_candidate(candidate, before, directory, port, dfu_util,
-                                  confirmation, "save Wi-Fi network",
+                                  confirmation, operation,
                                   state["baseline"], state["before_sha256"], state["baseline_sha256"])
         result["wifi_network_count"] = edit["network_count"]
+        result["rtm2_wifi_startup_adjusted"] = edit["rtm2_wifi_startup_adjusted"]
         return result
     except (DfuError, images.ImageError) as exc:
         _raise_live_operation_error(directory, "save Wi-Fi network", state, exc)
@@ -2907,12 +2937,17 @@ def set_mode_wifi_live(mode, ssid, password=None, open_network=False,
             print("Replayed the ext4 journal on the temporary working image before editing. The saved backup was not changed.")
         print("Mode change: " + edit["previous_mode"] + " → " + mode)
         print("Planned Wi-Fi change: save SSID " + ssid + "; a matching saved network is updated.")
+        if edit["rtm2_wifi_startup_adjusted"]:
+            print("The stock RTM2 startup hook was found; the later TI radio settings will be saved with Wi-Fi.")
+        operation = ("set mode, save Wi-Fi network, and adjust RTM2 radio startup"
+                     if edit["rtm2_wifi_startup_adjusted"] else "set mode and save Wi-Fi network")
         result = _write_candidate(candidate, before, directory, port, dfu_util,
-                                  confirmation, "set mode and save Wi-Fi network",
+                                  confirmation, operation,
                                   state["baseline"], state["before_sha256"],
                                   state["baseline_sha256"])
         result.update(current_mode=edit["previous_mode"], new_mode=mode,
                       wifi_network_count=edit["network_count"], ssid=ssid,
+                      rtm2_wifi_startup_adjusted=edit["rtm2_wifi_startup_adjusted"],
                       journal_replayed_on_temporary_copy=edit.get(
                           "journal_replayed_on_temporary_copy", False))
         return result

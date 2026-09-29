@@ -13,6 +13,7 @@ import tempfile
 MODE_VALUES = ("normal", "int-developer", "developer", "oobe")
 VAR_MODE_PATH = "/jibo/mode.json"
 VAR_WIFI_PATH = "/etc/wpa_supplicant.conf"
+VAR_INTERFACES_PATH = "/etc/network/interfaces"
 FACTORY_CAMERA_PATHS = (
     "/jibo/lps/CameraModelParamsL.json",
     "/jibo/lps/CameraModelParamsR.json",
@@ -485,6 +486,75 @@ def build_wifi_config(existing, ssid, password=None, open_network=False,
     return result, count
 
 
+_RTM2_WLAN_START = "post-up wpa_supplicant -B -i wlan0 -c /var/etc/wpa_supplicant.conf"
+_RTM3_WLAN_START = "post-up wireless-startup"
+_RTM2_WIFI_SLEEP_AUTH = "/sys/kernel/debug/ieee80211/phy0/wlcore/sleep_auth"
+
+
+def build_rtm2_wifi_startup(existing, compact=False):
+    """Adjust the stock RTM2 hook, keeping other network interfaces intact."""
+    try:
+        text = existing.decode("utf-8")
+    except (AttributeError, UnicodeDecodeError) as exc:
+        raise ImageError("The network interfaces file is not valid UTF-8.") from exc
+    lines = text.splitlines(keepends=True)
+    in_wlan0 = False
+    start_index = None
+    rtm3_start = False
+    has_power_save = False
+    has_sleep_auth = False
+    for index, line in enumerate(lines):
+        active = line.split("#", 1)[0].strip()
+        if re.match(r"^(?:iface|auto|allow-\S+)\s+", active):
+            in_wlan0 = bool(re.fullmatch(r"iface\s+wlan0\s+inet\s+dhcp", active))
+        if not in_wlan0:
+            continue
+        if active == _RTM2_WLAN_START:
+            if start_index is not None:
+                raise ImageError("The RTM2 wlan0 startup appears more than once; no change was made.")
+            start_index = index
+        if active == _RTM3_WLAN_START:
+            rtm3_start = True
+        has_power_save |= "iw wlan0 set power_save off" in active
+        has_sleep_auth |= _RTM2_WIFI_SLEEP_AUTH in active
+    changed = False
+    if start_index is not None:
+        if has_power_save != has_sleep_auth:
+            raise ImageError("The wlan0 startup has a partial power-save change; review it manually.")
+        if not has_power_save:
+            original = lines[start_index]
+            indent = original[:len(original) - len(original.lstrip())]
+            newline = "\r\n" if original.endswith("\r\n") else "\n"
+            commands = (
+                indent + "post-up /usr/sbin/iw wlan0 set power_save off || true" + newline,
+                indent + "post-up /bin/sh -c 'echo 0 > " + _RTM2_WIFI_SLEEP_AUTH + "' || true" + newline,
+            )
+            lines[start_index:start_index] = commands
+            changed = True
+    if compact and (start_index is not None or rtm3_start):
+        # The stock file is two 1 KiB blocks of mostly comments. Preserve its
+        # active directives so later file-RPC reads and edits fit one block.
+        lines = [line for line in lines if line.strip() and
+                 not line.lstrip().startswith("#")]
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += "\n"
+    return "".join(lines).encode("utf-8"), changed
+
+
+def _adjust_rtm2_wifi_startup(image, temp, compact=False):
+    """Patch the stock RTM2 wlan0 hook when a Wi-Fi edit is already in progress."""
+    work = Path(temp)
+    original = _extract(image, VAR_INTERFACES_PATH, work / "interfaces", optional=True)
+    if original is None:
+        return False, None
+    replacement, adjusted = build_rtm2_wifi_startup(original, compact=compact)
+    if replacement != original:
+        _replace_file(image, VAR_INTERFACES_PATH, replacement, temp)
+        if _extract(image, VAR_INTERFACES_PATH, work / "final-interfaces") != replacement:
+            raise ImageError("The RTM2 Wi-Fi startup edit did not survive image readback.")
+    return adjusted, replacement
+
+
 def edit_wifi(source, destination, ssid, password=None, open_network=False,
               compact=False):
     source, destination, repaired = _copy_for_edit(source, destination)
@@ -503,11 +573,18 @@ def edit_wifi(source, destination, ssid, password=None, open_network=False,
                 _run_debugfs(destination, "set_inode_field " + VAR_WIFI_PATH + " gid 0", writable=True)
             else:
                 _replace_file(destination, VAR_WIFI_PATH, replacement, temp)
+            startup_adjusted, startup_expected = _adjust_rtm2_wifi_startup(
+                destination, temp, compact=compact)
             _replay_journal_on_copy(destination)
             verified = _extract(destination, VAR_WIFI_PATH, Path(temp) / "verified")
             if verified != replacement:
                 raise ImageError("The edited Wi-Fi file did not survive image readback.")
+            if (startup_expected is not None and
+                    _extract(destination, VAR_INTERFACES_PATH,
+                             Path(temp) / "checked-interfaces") != startup_expected):
+                raise ImageError("The network startup file did not survive image readback.")
         return {"image": str(destination), "network_count": count,
+                "rtm2_wifi_startup_adjusted": startup_adjusted,
                 "sha256": sha256_file(destination),
                 "journal_replayed_on_temporary_copy": repaired}
     except Exception:
@@ -536,13 +613,20 @@ def edit_mode_wifi(source, destination, mode, ssid, password=None,
                 _put_factory_file(destination, VAR_WIFI_PATH, wifi_bytes, temp, 0o644)
             else:
                 _replace_file(destination, VAR_WIFI_PATH, wifi_bytes, temp)
+            startup_adjusted, startup_expected = _adjust_rtm2_wifi_startup(
+                destination, temp, compact=True)
             _replay_journal_on_copy(destination)
             final_mode = _json_mode(_extract(destination, VAR_MODE_PATH, work / "final-mode"))
             final_wifi = _extract(destination, VAR_WIFI_PATH, work / "final-wifi")
             if final_mode["mode"] != mode or final_wifi != wifi_bytes:
                 raise ImageError("The combined mode and Wi-Fi edit did not survive image readback.")
+            if (startup_expected is not None and
+                    _extract(destination, VAR_INTERFACES_PATH,
+                             work / "checked-interfaces") != startup_expected):
+                raise ImageError("The network startup file did not survive image readback.")
         return {"image": str(destination), "previous_mode": previous,
                 "mode": mode, "network_count": count,
+                "rtm2_wifi_startup_adjusted": startup_adjusted,
                 "sha256": sha256_file(destination),
                 "journal_replayed_on_temporary_copy": repaired}
     except Exception:

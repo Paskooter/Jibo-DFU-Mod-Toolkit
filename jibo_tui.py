@@ -56,7 +56,8 @@ def _offer_full_var_edit(error, includes_wifi=False):
         prompt = "This file's ext4 layout cannot be edited by the current RAM loader."
         detail = "The full transfer reads and writes 500 MiB of var, then checks the result."
         if includes_wifi:
-            detail = ("Stock RTM Wi-Fi files can span four blocks; the quick writer handles one. "
+            detail = ("Stock RTM Wi-Fi and network startup files can span multiple blocks; "
+                      "the quick writer handles one. "
                       + detail)
     return select_option(
         "Fast file edit unavailable",
@@ -545,9 +546,13 @@ def _result_summary(action, result):
     elif action == "configure-wifi":
         lines = ["Saved Wi-Fi network: {!r}.".format(result["ssid"])
                  if result.get("ssid") else "Wi-Fi configuration updated."]
+        if result.get("rtm2_wifi_startup_adjusted"):
+            lines.append("RTM2 TI radio startup was adjusted; restart the robot to try Wi-Fi.")
     elif action == "set-mode-wifi":
         lines = ["Robot mode set to {}.".format(result.get("mode") or result.get("new_mode")),
                  "Saved Wi-Fi network: {!r}.".format(result.get("ssid"))]
+        if result.get("rtm2_wifi_startup_adjusted"):
+            lines.append("RTM2 TI radio startup was adjusted; restart the robot to try Wi-Fi.")
     elif action == "backup-var":
         lines = ["Var backup is ready."]
         if result.get("image"):

@@ -58,3 +58,26 @@ This option restores the camera files documented in the archived flashing
 guide. The guide also runs `imu_test_calib` as a separate physical calibration
 step. Its output was not present in the inspected `var` backups, so copying
 `var` files cannot substitute for performing that test if it is needed.
+
+## Wi-Fi after an RTM2 flash
+
+The stock RTM2 `var` image starts `wpa_supplicant` directly from
+`/etc/network/interfaces`. The later RTM3 image runs `wireless-startup` first;
+that script disables TI radio power saving and the wlcore sleep mode before
+starting the same supplicant file. Both images store Wi-Fi credentials in
+`/var/etc/wpa_supplicant.conf`. The toolkit keeps a fresh flash stock until
+you choose **Add or update a Wi-Fi network** or **Set mode and configure
+Wi-Fi**. At that point, it recognizes the RTM2 startup hook and includes the
+two RTM3 radio commands in the same reviewed Wi-Fi change. The original
+`var` backup is retained, and a full transfer checks the edited image by
+readback. Stock RTM2 network files span multiple 1 KiB blocks, so the quick
+file editor will offer the full `var` transfer on the first edit. The full
+edit also trims comment-only lines from stock network files; later edits can
+use the quick path if the filesystem journal is clean.
+
+This adjustment has been checked against the stock RTM2 and RTM3 images and
+an ext4 image check, but association has not yet been verified on a live
+robot. A WPA2/WPA3 mixed router is another possible source of failure; a
+2.4 GHz WPA2-Personal test network can help distinguish router security from
+the RTM2 startup path. The toolkit currently writes WPA-PSK credentials, so
+it uses the WPA2 side of a mixed network; WPA3-only operation is unverified.
