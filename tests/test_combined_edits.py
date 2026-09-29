@@ -1,6 +1,7 @@
 """Checks for the single-pass mode and Wi-Fi var edit."""
 
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,37 @@ import jibo_images as images
 
 
 class CombinedEditTests(unittest.TestCase):
+    def test_saved_ssid_updates_password_without_adding_a_duplicate(self):
+        existing = (b"update_config=1\n# Keep this comment\n"
+                    b"network={\n    ssid=4a49424f\n    key_mgmt=NONE\n}\n"
+                    b"network={\n    ssid=\"Test Wi-Fi\"\n    key_mgmt=WPA-PSK\n"
+                    b"    psk=oldpassword\n}\n")
+        replacement, count = images.build_wifi_config(
+            existing, "Test Wi-Fi", "corrected-password")
+        expected_psk = hashlib.pbkdf2_hmac(
+            "sha1", b"corrected-password", b"Test Wi-Fi", 4096, dklen=32).hex()
+        self.assertEqual(count, 2)
+        self.assertEqual(len(images._network_blocks(replacement.decode())), 2)
+        self.assertIn(b"# Keep this comment", replacement)
+        self.assertIn(b"network={\n    ssid=4a49424f\n    key_mgmt=NONE\n}", replacement)
+        self.assertIn(b"ssid=546573742057692d4669", replacement)
+        self.assertIn(("psk=" + expected_psk).encode(), replacement)
+        self.assertNotIn(b"oldpassword", replacement)
+        self.assertNotIn(b"corrected-password", replacement)
+
+    def test_existing_ssid_can_change_between_open_and_protected(self):
+        original = b"network={\n    ssid=4a49424f\n    key_mgmt=NONE\n}\n"
+        protected, count = images.build_wifi_config(
+            original, "JIBO", "newpassword", compact=True)
+        self.assertEqual(count, 1)
+        self.assertIn(b"key_mgmt=WPA-PSK", protected)
+        self.assertIn(b"psk=", protected)
+        opened, count = images.build_wifi_config(
+            protected, "JIBO", open_network=True, compact=True)
+        self.assertEqual(count, 1)
+        self.assertIn(b"key_mgmt=NONE", opened)
+        self.assertNotIn(b"psk=", opened)
+
     def test_compaction_keeps_active_wifi_settings_and_existing_network(self):
         existing = (b"ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n"
                     b"update_config=1\n"

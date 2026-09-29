@@ -316,9 +316,9 @@ def edit_mode(source, destination, mode):
         raise
 
 
-def _network_blocks(text):
-    """Return balanced network={...} blocks without interpreting their secrets."""
-    blocks = []
+def _network_block_spans(text):
+    """Return balanced network={...} positions without interpreting secrets."""
+    spans = []
     depth = 0
     start = None
     quoted = False
@@ -353,11 +353,15 @@ def _network_blocks(text):
             if depth < 0:
                 raise ImageError("Wi-Fi configuration has unmatched braces.")
             if depth == 0 and start is not None:
-                blocks.append(text[start:index + 1])
+                spans.append((start, index + 1))
                 start = None
     if quoted or depth != 0:
         raise ImageError("Wi-Fi configuration has an unfinished string or network block.")
-    return blocks
+    return spans
+
+
+def _network_blocks(text):
+    return [text[start:end] for start, end in _network_block_spans(text)]
 
 
 def _decode_ssid(value):
@@ -394,30 +398,26 @@ def _decode_ssid(value):
     return None
 
 
-def _existing_ssids(blocks):
-    values = set()
-    for block in blocks:
-        match = re.search(r"^\s*ssid\s*=\s*(.*)$", block, re.MULTILINE)
-        if match:
-            value = match.group(1).strip()
-            if value.startswith('"'):
+def _block_ssid(block):
+    match = re.search(r"^\s*ssid\s*=\s*(.*)$", block, re.MULTILINE)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    if value.startswith('"'):
+        escaped = False
+        closing = None
+        for index in range(1, len(value)):
+            if escaped:
                 escaped = False
-                closing = None
-                for index in range(1, len(value)):
-                    if escaped:
-                        escaped = False
-                    elif value[index] == "\\":
-                        escaped = True
-                    elif value[index] == '"':
-                        closing = index
-                        break
-                value = value[:closing + 1] if closing is not None else value
-            else:
-                value = value.split("#", 1)[0].strip()
-            decoded = _decode_ssid(value)
-            if decoded is not None:
-                values.add(decoded)
-    return values
+            elif value[index] == "\\":
+                escaped = True
+            elif value[index] == '"':
+                closing = index
+                break
+        value = value[:closing + 1] if closing is not None else value
+    else:
+        value = value.split("#", 1)[0].strip()
+    return _decode_ssid(value)
 
 
 def build_wifi_config(existing, ssid, password=None, open_network=False,
@@ -438,9 +438,7 @@ def build_wifi_config(existing, ssid, password=None, open_network=False,
         # can use its one-block writer when the filesystem is clean.
         text = "\n".join(line for line in text.splitlines()
                          if line.strip() and not line.lstrip().startswith("#")) + "\n"
-    blocks = _network_blocks(text)
-    if ssid_bytes in _existing_ssids(blocks):
-        raise ImageError("That SSID already exists in the config; remove or replace its saved network before adding it again.")
+    spans = _network_block_spans(text)
     if open_network:
         if password not in (None, ""):
             raise ImageError("An open network cannot have a password.")
@@ -456,13 +454,35 @@ def build_wifi_config(existing, ssid, password=None, open_network=False,
             raise ImageError("WPA password must be 8 to 63 printable ASCII characters.")
         psk = hashlib.pbkdf2_hmac("sha1", password_bytes, ssid_bytes, 4096, dklen=32).hex()
         settings = "    key_mgmt=WPA-PSK\n    psk=" + psk + "\n"
-    addition = "network={\n    ssid=" + ssid_bytes.hex() + "\n" + settings + "}\n"
-    if text and not text.endswith("\n"):
-        text += "\n"
-    result = (text + addition).encode("utf-8", errors="surrogateescape")
-    if len(_network_blocks(result.decode("utf-8", errors="strict"))) != len(blocks) + 1:
+    network = "network={\n    ssid=" + ssid_bytes.hex() + "\n" + settings + "}"
+    matched = 0
+    parts = []
+    cursor = 0
+    for start, end in spans:
+        block = text[start:end]
+        parts.append(text[cursor:start])
+        if _block_ssid(block) == ssid_bytes:
+            parts.append(network)
+            matched += 1
+        else:
+            parts.append(block)
+        cursor = end
+    parts.append(text[cursor:])
+    if matched:
+        result_text = "".join(parts)
+        count = len(spans)
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        result_text = text + network + "\n"
+        count = len(spans) + 1
+    result = result_text.encode("utf-8")
+    verified_blocks = _network_blocks(result_text)
+    if (len(verified_blocks) != count or
+            sum(_block_ssid(block) == ssid_bytes for block in verified_blocks)
+            != (matched or 1)):
         raise ImageError("Generated Wi-Fi configuration failed structural validation.")
-    return result, len(blocks) + 1
+    return result, count
 
 
 def edit_wifi(source, destination, ssid, password=None, open_network=False,

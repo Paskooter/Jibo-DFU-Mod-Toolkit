@@ -2773,12 +2773,12 @@ def configure_wifi_file_live(ssid, password=None, open_network=False, partition=
                              guided=False):
     try:
         details = {}
-        def add_network(current):
+        def save_network(current):
             replacement, details["wifi_network_count"] = images.build_wifi_config(
                 current, ssid, password, open_network, compact=True)
             return replacement
         transaction = FileTransaction((partition,), port, dfu_util, out, guided=guided)
-        transaction.transform(partition, images.VAR_WIFI_PATH, add_network,
+        transaction.transform(partition, images.VAR_WIFI_PATH, save_network,
                               description="saved Wi-Fi network {!r}".format(ssid))
         result = transaction.commit(confirmation)
         result.update(details)
@@ -2802,7 +2802,7 @@ def set_mode_wifi_file_live(mode, ssid, password=None, open_network=False,
             return current
         data["mode"] = mode
         return (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
-    def add_network(current):
+    def save_network(current):
         replacement, details["wifi_network_count"] = images.build_wifi_config(
             current, ssid, password, open_network, compact=True)
         return replacement
@@ -2810,7 +2810,7 @@ def set_mode_wifi_file_live(mode, ssid, password=None, open_network=False,
         transaction = FileTransaction(("var",), port, dfu_util, out, guided=guided)
         transaction.transform("var", images.VAR_MODE_PATH, change_mode,
                               description="robot mode to " + mode)
-        transaction.transform("var", images.VAR_WIFI_PATH, add_network,
+        transaction.transform("var", images.VAR_WIFI_PATH, save_network,
                               description="saved Wi-Fi network {!r}".format(ssid))
         result = transaction.commit(confirmation)
         result.update(details, mode=mode, ssid=ssid)
@@ -2854,7 +2854,14 @@ def _password_from_args(args):
         if value.endswith("\r"):
             value = value[:-1]
         return value
-    return getpass.getpass("Wi-Fi password (hidden): ")
+    while True:
+        password = getpass.getpass("Wi-Fi password (hidden): ")
+        repeated = getpass.getpass("Confirm Wi-Fi password (hidden): ")
+        if password == repeated:
+            return password
+        print("Passwords do not match. Enter both again; no Wi-Fi change has been made.",
+              file=sys.stderr)
+        password = repeated = None
 
 
 def configure_wifi_live(ssid, password=None, open_network=False, port=None,
@@ -2869,14 +2876,14 @@ def configure_wifi_live(ssid, password=None, open_network=False, port=None,
         before = state["before"]
         edit = images.edit_wifi(before, candidate, ssid, password, open_network,
                                 compact=True)
-        print("Planned Wi-Fi change: add SSID " + ssid + "; existing networks are preserved.")
+        print("Planned Wi-Fi change: save SSID " + ssid + "; a matching saved network is updated.")
         result = _write_candidate(candidate, before, directory, port, dfu_util,
-                                  confirmation, "add Wi-Fi network",
+                                  confirmation, "save Wi-Fi network",
                                   state["baseline"], state["before_sha256"], state["baseline_sha256"])
         result["wifi_network_count"] = edit["network_count"]
         return result
     except (DfuError, images.ImageError) as exc:
-        _raise_live_operation_error(directory, "add Wi-Fi network", state, exc)
+        _raise_live_operation_error(directory, "save Wi-Fi network", state, exc)
     finally:
         password = None
 
@@ -2899,9 +2906,9 @@ def set_mode_wifi_live(mode, ssid, password=None, open_network=False,
         if edit.get("journal_replayed_on_temporary_copy"):
             print("Replayed the ext4 journal on the temporary working image before editing. The saved backup was not changed.")
         print("Mode change: " + edit["previous_mode"] + " → " + mode)
-        print("Planned Wi-Fi change: add SSID " + ssid + "; existing networks are preserved.")
+        print("Planned Wi-Fi change: save SSID " + ssid + "; a matching saved network is updated.")
         result = _write_candidate(candidate, before, directory, port, dfu_util,
-                                  confirmation, "set mode and add Wi-Fi network",
+                                  confirmation, "set mode and save Wi-Fi network",
                                   state["baseline"], state["before_sha256"],
                                   state["baseline_sha256"])
         result.update(current_mode=edit["previous_mode"], new_mode=mode,
@@ -2910,7 +2917,7 @@ def set_mode_wifi_live(mode, ssid, password=None, open_network=False,
                           "journal_replayed_on_temporary_copy", False))
         return result
     except (DfuError, images.ImageError) as exc:
-        _raise_live_operation_error(directory, "set mode and add Wi-Fi network", state, exc)
+        _raise_live_operation_error(directory, "set mode and save Wi-Fi network", state, exc)
     finally:
         password = None
 
@@ -3018,7 +3025,7 @@ def main(argv=None):
     mode_edit.add_argument("image", type=Path)
     mode_edit.add_argument("--mode", required=True, choices=images.MODE_VALUES)
     mode_edit.add_argument("--out", type=Path)
-    wifi_edit = sub.add_parser("edit-wifi", help="Add a Wi-Fi network to a local var image")
+    wifi_edit = sub.add_parser("edit-wifi", help="Add or update Wi-Fi in a local var image")
     wifi_edit.add_argument("image", type=Path)
     wifi_edit.add_argument("--ssid", required=True)
     wifi_edit.add_argument("--open-network", action="store_true")
@@ -3030,7 +3037,7 @@ def main(argv=None):
     _add_dfu_argument(mode_live)
     _add_operation_argument(mode_live)
     _add_confirmation_argument(mode_live)
-    wifi_live = sub.add_parser("configure-wifi", help="Save or reuse a backup, add Wi-Fi, and check the result")
+    wifi_live = sub.add_parser("configure-wifi", help="Save or reuse a backup, add or update Wi-Fi, and check the result")
     wifi_live.add_argument("--ssid", required=True)
     wifi_live.add_argument("--open-network", action="store_true")
     wifi_live.add_argument("--password-stdin", action="store_true", help="Read the protected network password from stdin")
@@ -3069,7 +3076,7 @@ def main(argv=None):
     _add_operation_argument(mode_file)
     mode_file.add_argument("--yes", action="store_true", help="Confirm the reviewed file replacement plan")
     wifi_file = sub.add_parser("configure-wifi-file",
-                               help="Add Wi-Fi by changing its existing file")
+                               help="Add or update Wi-Fi in its existing file")
     wifi_file.add_argument("--ssid", required=True)
     wifi_file.add_argument("--partition", default="var", choices=FILE_LEVEL_PARTITIONS)
     wifi_file.add_argument("--open-network", action="store_true")

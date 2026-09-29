@@ -14,6 +14,26 @@ import jibo_images as images
 
 
 class SafeWorkflowTests(unittest.TestCase):
+    def test_interactive_wifi_password_requires_matching_entry(self):
+        args = SimpleNamespace(open_network=False, password_stdin=False)
+        messages = io.StringIO()
+        with patch.object(j.getpass, "getpass", side_effect=(
+                "firstpass", "different", "correctpass", "correctpass")) as prompt, \
+                patch.object(j.sys, "stderr", messages):
+            password = j._password_from_args(args)
+        self.assertEqual(password, "correctpass")
+        self.assertEqual(prompt.call_count, 4)
+        self.assertIn("Passwords do not match", messages.getvalue())
+        self.assertNotIn("firstpass", messages.getvalue())
+
+    def test_scripted_wifi_password_still_reads_one_line(self):
+        args = SimpleNamespace(open_network=False, password_stdin=True)
+        with patch.object(j.sys, "stdin", io.StringIO("scriptedpass\n")), \
+                patch.object(j.getpass, "getpass") as prompt:
+            password = j._password_from_args(args)
+        self.assertEqual(password, "scriptedpass")
+        prompt.assert_not_called()
+
     def test_guided_menu_requires_terminal_instead_of_numbered_fallback(self):
         display = io.StringIO()
         with patch("jibo_tui.run", return_value=None), patch.object(j.sys, "stderr", display):

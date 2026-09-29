@@ -540,6 +540,33 @@ class CursesPromptTests(unittest.TestCase):
                          ("Test Wi-Fi", None, True, "1-1"))
         self.assertTrue(calls["guided"])
 
+    def test_wifi_password_mismatch_retries_before_calling_backend(self):
+        calls = []
+        api = SimpleNamespace(configure_wifi_live=lambda *args, **kwargs:
+                              calls.append((args, kwargs)) or {"status": "verified"})
+        readiness = jibo_tui.Readiness("dfu-ready", (), port="1-1")
+        with patch.object(jibo_tui, "text_input", side_effect=(
+                "Test Wi-Fi", "badpass11", "badpass12", "correctpass", "correctpass")) as prompt, \
+                patch.object(jibo_tui, "select_option", side_effect=(
+                    "protected", "retry")) as select:
+            result = jibo_tui.execute_action(api, "configure-wifi", readiness)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], ("Test Wi-Fi", "correctpass", False))
+        self.assertEqual(select.call_args.args[0], "Passwords do not match")
+        self.assertTrue(all(call.kwargs["password"] for call in prompt.call_args_list[1:]))
+
+    def test_wifi_password_mismatch_can_cancel_without_backend_call(self):
+        api = SimpleNamespace(configure_wifi_live=lambda *_args, **_kwargs:
+                              self.fail("backend called after password mismatch"))
+        with patch.object(jibo_tui, "text_input", side_effect=(
+                "Test Wi-Fi", "badpass11", "badpass12")), \
+                patch.object(jibo_tui, "select_option", side_effect=(
+                    "protected", "cancel")):
+            result = jibo_tui.execute_action(
+                api, "configure-wifi", jibo_tui.Readiness("dfu-ready", ()))
+        self.assertEqual(result["status"], "cancelled")
+
     def test_wifi_action_falls_back_for_unsupported_file_layout(self):
         class UnsupportedFileLayout(Exception):
             status = 3
@@ -571,7 +598,8 @@ class CursesPromptTests(unittest.TestCase):
         readiness = jibo_tui.Readiness(
             "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
         with patch.object(jibo_tui, "_select_mode", return_value="developer"), \
-                patch.object(jibo_tui, "text_input", side_effect=("Test Wi-Fi", "secret123")), \
+                patch.object(jibo_tui, "text_input", side_effect=(
+                    "Test Wi-Fi", "secret123", "secret123")), \
                 patch.object(jibo_tui, "select_option", return_value="protected"):
             result = jibo_tui.execute_action(api, "set-mode-wifi", readiness)
         self.assertEqual(result["status"], "verified")

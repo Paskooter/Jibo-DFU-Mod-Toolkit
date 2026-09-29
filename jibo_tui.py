@@ -195,10 +195,10 @@ def build_menu_items(readiness, update_packages=()):
                  is_rcm and readiness.shofel_dfu_available, shofel_dfu_reason),
         MenuItem("set-mode", "Set robot mode" + (" (quick edit)" if _can_edit_var_files(readiness)
                                                else ""), is_dfu, connection_reason),
-        MenuItem("configure-wifi", "Add a Wi-Fi network" +
+        MenuItem("configure-wifi", "Add or update a Wi-Fi network" +
                  (" (quick edit)" if _can_edit_var_files(readiness) else ""),
                  is_dfu, connection_reason),
-        MenuItem("set-mode-wifi", "Set mode and add Wi-Fi" +
+        MenuItem("set-mode-wifi", "Set mode and configure Wi-Fi" +
                  (" (quick edit)" if _can_edit_var_files(readiness) else ""),
                  is_dfu, connection_reason),
         MenuItem("flash-update", "Install an official update package",
@@ -479,6 +479,29 @@ def text_input(title, prompt, default="", password=False, detail=""):
         return None
     return curses.wrapper(lambda screen: _text_session(
         screen, title, prompt, default, password, detail))
+
+
+def _confirmed_wifi_password(title):
+    while True:
+        password = text_input(title, "Wi-Fi password:", password=True,
+                              detail="The password is hidden while you type.")
+        if password is None:
+            return None
+        repeated = text_input(title, "Confirm Wi-Fi password:", password=True,
+                              detail="Enter the same password again.")
+        if repeated is None:
+            return None
+        if password == repeated:
+            return password
+        password = repeated = None
+        choice = select_option(
+            "Passwords do not match",
+            (("retry", "Enter the password again"),
+             ("cancel", "Cancel Wi-Fi setup")),
+            prompt="The two passwords differed. No Wi-Fi change was made.",
+            initial="retry")
+        if choice != "retry":
+            return None
 
 
 def confirm_action(title, message, phrase=None):
@@ -913,16 +936,15 @@ def execute_action(api, key, readiness):
         open_network = kind == "open"
         password = None
         if not open_network:
-            password = text_input("Configure Wi-Fi", "Wi-Fi password:", password=True,
-                                  detail="The password is hidden while you type.")
+            password = _confirmed_wifi_password("Configure Wi-Fi")
             if password is None:
                 return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
         direct_edit = _can_edit_var_files(readiness)
         confirmation = lambda plan: confirm_action(
             "Confirm Wi-Fi change",
-            _confirmation_details(plan, "Review the file change before adding this network."
+            _confirmation_details(plan, "Review the file change before saving this network."
                                   if plan.get("changes") else
-                                  "Review the var write plan before adding this network."))
+                                  "Review the var write plan before saving this network."))
         try:
             if direct_edit:
                 try:
@@ -939,10 +961,10 @@ def execute_action(api, key, readiness):
         finally:
             password = None
     if key == "set-mode-wifi":
-        mode = _select_mode("Set mode and add Wi-Fi")
+        mode = _select_mode("Set mode and configure Wi-Fi")
         if mode is None:
             return {"status": "cancelled", "message": "No mode selected."}
-        ssid = text_input("Set mode and add Wi-Fi", "Wi-Fi network name (SSID):")
+        ssid = text_input("Set mode and configure Wi-Fi", "Wi-Fi network name (SSID):")
         if ssid is None:
             return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
         kind = select_option(
@@ -954,8 +976,7 @@ def execute_action(api, key, readiness):
         open_network = kind == "open"
         password = None
         if not open_network:
-            password = text_input("Set mode and add Wi-Fi", "Wi-Fi password:", password=True,
-                                  detail="The password is hidden while you type.")
+            password = _confirmed_wifi_password("Set mode and configure Wi-Fi")
             if password is None:
                 return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
         confirmation = lambda plan: confirm_action(
@@ -1043,7 +1064,7 @@ def execute_action(api, key, readiness):
     if key == "edit-backup":
         choice = select_option(
             "Edit a local var backup",
-            (("mode", "Change mode"), ("wifi", "Add Wi-Fi network"),
+            (("mode", "Change mode"), ("wifi", "Add or update Wi-Fi network"),
              ("inspect", "Inspect image")),
             prompt="Choose a local image action.",
             detail="These actions create no robot writes.")
@@ -1061,7 +1082,7 @@ def execute_action(api, key, readiness):
                 return {"status": "cancelled", "message": "No mode selected."}
             return api.images.edit_mode(source, api._default_edit_path(source), mode)
 
-        ssid = text_input("Add Wi-Fi to a local image", "Wi-Fi network name (SSID):")
+        ssid = text_input("Configure Wi-Fi in a local image", "Wi-Fi network name (SSID):")
         if ssid is None:
             return {"status": "cancelled", "message": "Wi-Fi edit was cancelled."}
         kind = select_option(
@@ -1073,8 +1094,7 @@ def execute_action(api, key, readiness):
         open_network = kind == "open"
         password = None
         if not open_network:
-            password = text_input("Add Wi-Fi to a local image", "Wi-Fi password:", password=True,
-                                  detail="The password is hidden while you type.")
+            password = _confirmed_wifi_password("Configure Wi-Fi in a local image")
             if password is None:
                 return {"status": "cancelled", "message": "Wi-Fi edit was cancelled."}
         try:
