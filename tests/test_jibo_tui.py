@@ -207,7 +207,7 @@ class TuiReadinessTests(unittest.TestCase):
     def test_enabled_item_is_returned_for_dispatch(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
         app = jibo_tui.TerminalMenu(api)
-        screen = FakeScreen([curses.KEY_DOWN] * 4 + [
+        screen = FakeScreen([curses.KEY_DOWN] * 5 + [
                              curses.KEY_ENTER])
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
@@ -561,6 +561,65 @@ class CursesPromptTests(unittest.TestCase):
             result = jibo_tui.execute_action(api, "configure-wifi", readiness)
         self.assertEqual(calls, ["file", "full"])
         self.assertEqual(result["status"], "verified")
+
+    def test_combined_action_uses_one_fast_transaction(self):
+        calls = []
+        def file_edit(mode, ssid, password, open_network, **kwargs):
+            calls.append((mode, ssid, password, open_network, kwargs))
+            return {"status": "verified", "mode": mode, "ssid": ssid}
+        api = SimpleNamespace(set_mode_wifi_file_live=file_edit)
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="developer"), \
+                patch.object(jibo_tui, "text_input", side_effect=("Test Wi-Fi", "secret123")), \
+                patch.object(jibo_tui, "select_option", return_value="protected"):
+            result = jibo_tui.execute_action(api, "set-mode-wifi", readiness)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ("developer", "Test Wi-Fi", "secret123", False))
+        self.assertEqual(calls[0][4]["port"], "1-1")
+        self.assertTrue(calls[0][4]["guided"])
+
+    def test_combined_action_falls_back_to_one_full_var_operation(self):
+        class UnsupportedFileLayout(Exception):
+            status = 3
+
+        calls = []
+        def file_edit(*_args, **_kwargs):
+            calls.append("file")
+            raise UnsupportedFileLayout()
+        def full_edit(mode, ssid, password, open_network, **kwargs):
+            calls.append("full")
+            self.assertEqual((mode, ssid, password, open_network),
+                             ("oobe", "Test Wi-Fi", None, True))
+            self.assertEqual(kwargs["port"], "1-1")
+            return {"status": "verified", "new_mode": mode, "ssid": ssid}
+        api = SimpleNamespace(FileRpcStatusError=UnsupportedFileLayout,
+                              set_mode_wifi_file_live=file_edit,
+                              set_mode_wifi_live=full_edit)
+        readiness = jibo_tui.Readiness(
+            "dfu-ready", (), port="1-1", alt_names=tuple(jibo_tui.FILE_LEVEL_VAR_ALTS))
+        with patch.object(jibo_tui, "_select_mode", return_value="oobe"), \
+                patch.object(jibo_tui, "text_input", return_value="Test Wi-Fi"), \
+                patch.object(jibo_tui, "select_option", side_effect=("open", "full")):
+            result = jibo_tui.execute_action(api, "set-mode-wifi", readiness)
+        self.assertEqual(calls, ["file", "full"])
+        self.assertEqual(result["status"], "verified")
+
+    def test_update_menu_offers_fresh_with_calibration(self):
+        from pathlib import Path
+        from unittest.mock import Mock
+
+        flash = Mock(return_value={"status": "transferred"})
+        api = SimpleNamespace(_update_candidates=lambda _folder: [Path("rtm.tar.bz2")],
+                              flash_update=flash)
+        with patch.object(jibo_tui, "select_option", side_effect=("0", "factory")) as choose:
+            result = jibo_tui._run_update(api, port="1-1")
+        self.assertEqual(result["status"], "transferred")
+        choices = choose.call_args_list[1].args[1]
+        self.assertIn(("factory", "Fresh setup with this robot's saved calibration"), choices)
+        self.assertTrue(flash.call_args.kwargs["fresh_with_calibration"])
+        self.assertFalse(flash.call_args.kwargs["preserve_var"])
 
 
 if __name__ == "__main__":

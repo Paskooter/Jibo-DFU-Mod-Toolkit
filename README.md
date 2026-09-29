@@ -7,6 +7,16 @@ A guided Linux terminal tool for Jibo recovery, backups, mode and Wi-Fi settings
 
 The guided menu enables DFU entry when the robot is in RCM and partition actions after it appears in DFU. The launchers below open that menu. The `.pyz` package is generated locally and reused on later runs.
 
+## Quick path: stock Jibo to int-developer
+
+If you are here to mod a stock robot, use the guided menu to change its existing installation to `int-developer` mode. **If the robot has not joined your Wi-Fi yet, configure Wi-Fi in the toolkit too:** changing the mode alone does not give it a network connection.
+
+1. Start the toolkit with `./run.sh` on Linux or `.\run.ps1` from PowerShell on a Windows PC with WSL 2. Connect one robot by USB and put it in RCM/APX mode.
+2. Choose **Enter DFU with ShofEL (RAM loader)**. Wait for the menu to show the robot in DFU. The included RAM entry profile is Meerkat Rev02; see [hardware coverage](#hardware-results-and-remaining-work) before using it on another board revision.
+3. If the robot already has your Wi-Fi saved, choose **Set robot mode** and select **int-developer**. If it has never connected to your Wi-Fi, choose **Set mode and add Wi-Fi**, select **int-developer**, then enter your Wi-Fi name and password. That action applies both settings together.
+4. Review and confirm the change. The toolkit saves or reuses a `var` rollback backup and checks the result. If the quick file edit is unavailable, choose the offered full `var` transfer and leave the robot connected until readback finishes.
+5. When the toolkit reports the change verified, restart the robot normally.
+
 ## Linux quick start
 
 On an x86_64 Linux system (including WSL 2), clone the repository and run the launcher:
@@ -63,13 +73,17 @@ To rebuild the loader itself, extract `vendor/jibo-ram-dfu-v1-source.tar.gz` and
 
 ## Using the menu
 
+See [RTM images and factory calibration](docs/rtm-images-and-calibration.md)
+for the archived RTM packages and the factory's calibration steps.
+
 With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refreshes the robot state and available actions automatically when USB changes; `r` also refreshes manually. The current loader uses the Meerkat Rev02 RAM profile confirmed on Moth, so select it only for a robot whose hardware profile matches. Once DFU is active, the menu offers:
 
 | Action | What it does |
 | --- | --- |
 | Set robot mode | Chooses `normal`, `developer`, `int-developer`, or `oobe`; saves or reuses one rollback backup, edits only `/jibo/mode.json`, and checks the file and its permissions. |
 | Add a Wi-Fi network | Saves or reuses the `var` backup, adds the network to the existing `/var/etc/wpa_supplicant.conf`, and checks the file and its permissions. |
-| Install an official update package | Selects a package from `./updates` and either preserves current `var` settings or replaces `var` for fresh setup. Checks live GPT sizes, saves or reuses one `var` rollback backup, and writes the stock compact ext4 images. First boot grows the flashed filesystems to their partition sizes. Preserving `var` updates only its existing resize script so an old completion marker cannot skip that step. The normal path accepts DFU's completed transfer; `flash-update --verify-readback` checks the transferred image bytes. Other partitions are restored from the package and are not backed up first. |
+| Set mode and add Wi-Fi | Changes both settings in one reviewed file transaction when the fast writer supports both files. If it does not, one full `var` read, edit, write, and readback handles both changes. |
+| Install an official update package | Selects a package from `./updates` and preserves current `var`, replaces it for fresh setup, or creates fresh `var` with this robot's saved identity and camera calibration in OOBE mode. Checks live GPT sizes, saves or reuses one `var` rollback backup, and writes compact ext4 images. First boot grows the flashed filesystems to their partition sizes. Preserving `var` updates only its existing resize script so an old completion marker cannot skip that step. The normal path accepts DFU's completed transfer; `flash-update --verify-readback` checks the transferred image bytes. Other partitions are restored from the package and are not backed up first. |
 | Save or check a var backup | Reads the 500 MiB `var` partition and saves a SHA-256 manifest. Reuses a verified existing backup for the same DFU device unless refreshed. |
 | More tools and local images | Checks the partition layout; backs up or restores chosen partitions; writes an edited `var` image; or inspects and edits a local backup. Local image edits do not change the robot. |
 
@@ -79,7 +93,7 @@ The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transf
 
 Compact preserve-`var` flashing currently accepts the known 13.0.0 first-boot script. It checks the selected package's script and rootfs boot hook before writing. Older scripts can format `rootfsB` during first boot, so an unrecognized script is rejected rather than rearmed. The file editor now handles the resize script's legacy one-block mapping. If a different layout fails its safety checks, the toolkit reads the current 500 MiB `var`, edits a temporary copy, writes it back after the compact package images, and checks the new script and permissions before reset. The temporary image is removed when the operation ends; the existing rollback backup is reused.
 
-The included loader supports bounded changes to existing files. It reads the target file once before the change, then checks the file and its ownership and permissions after writing. The first `var` change saves a rollback image; later `var` changes reuse any verified `var` image for the same robot, even if the live filesystem has changed. Other partitions are backed up only when selected. The file writer currently handles only existing regular files of at most 4 KiB in one allocated block, mapped by one extent or one legacy direct pointer. When a mode or Wi-Fi file uses an unsupported layout, the menu offers the slower full-`var` edit as an explicit choice, with cancel selected by default. Full image writes and update packages still use partition transfers. See [the file-level protocol](firmware/file-level-protocol.md). An earlier direct mode-file write passed content and metadata readback; the new direct-pointer path and a direct Wi-Fi write have not yet been checked on hardware.
+The included loader supports bounded changes to existing files. It reads the target file once before the change, then checks the file and its ownership and permissions after writing. The first `var` change saves a rollback image; later `var` changes reuse any verified `var` image for the same robot, even if the live filesystem has changed. Other partitions are backed up only when selected. The file writer currently handles only existing regular files of at most 4 KiB in one allocated block, mapped by one extent or one legacy direct pointer. Stock RTM Wi-Fi configs may occupy four 1 KiB blocks because of comments; a full-`var` Wi-Fi edit removes comment-only lines and blank lines while keeping active settings and saved networks. That can make later file edits fit in one block. When a mode or Wi-Fi file uses an unsupported layout, or `var` has an unclean ext4 journal, the menu offers the slower full-`var` edit as an explicit choice, with cancel selected by default. The journal check protects direct writes and remains in force after a robot boot until Linux cleanly unmounts `var` or the full transfer replays the journal on a local copy. Full image writes and update packages still use partition transfers. See [the file-level protocol](firmware/file-level-protocol.md). An earlier direct mode-file write passed content and metadata readback; the new direct-pointer path and a direct Wi-Fi write have not yet been checked on hardware.
 
 **Selectable backup and restore:** In **More tools**, choose **Back up selected partitions** and mark individual GPT partitions, or select all. Existing verified copies for the same robot are reused. The resulting `backup-set.json` lists the saved images without making duplicate copies. **Restore selected partitions** lets you choose all or a subset from that set. It checks the robot identity, live GPT extents, image sizes and hashes before asking for confirmation, then reads every restored partition back to check it. These are the GPT partitions exposed for complete DFU transfer. The loader's raw `emmc-*` alternatives are read-only; this flow does not restore the raw GPT, gaps between partitions, or eMMC Boot0/Boot1. A byte-for-byte full-chip restore is not available.
 

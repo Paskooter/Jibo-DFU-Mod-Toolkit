@@ -186,7 +186,7 @@ class UpdatePackageTests(unittest.TestCase):
              manifest, names, alt_output, operation) = self._resume_fixture(root)
             uploads = []
 
-            def upload(_tool, _port, name, _size, _destination):
+            def upload(_tool, _port, name, _size, _destination, _alternative_size=None):
                 uploads.append(name)
                 return hashes[name]
 
@@ -222,7 +222,7 @@ class UpdatePackageTests(unittest.TestCase):
              manifest, names, alt_output, operation) = self._resume_fixture(root)
             calls = {}
 
-            def upload(_tool, _port, name, _size, _destination):
+            def upload(_tool, _port, name, _size, _destination, _alternative_size=None):
                 calls[name] = calls.get(name, 0) + 1
                 if name == "rootfsA" and calls[name] == 1:
                     return "f" * 64
@@ -304,7 +304,7 @@ class UpdatePackageTests(unittest.TestCase):
                  root, first_candidate_hash=old_hash)
             calls = {}
 
-            def upload(_tool, _port, name, _size, _destination):
+            def upload(_tool, _port, name, _size, _destination, _alternative_size=None):
                 calls[name] = calls.get(name, 0) + 1
                 return old_hash if name == "rootfsA" and calls[name] == 1 else hashes[name]
 
@@ -340,7 +340,7 @@ class UpdatePackageTests(unittest.TestCase):
             legacy.pop("resize_tag")
             manifest.write_text(json.dumps(legacy))
 
-            def upload(_tool, _port, name, _size, _destination):
+            def upload(_tool, _port, name, _size, _destination, _alternative_size=None):
                 return old_hash if name == "rootfsA" else hashes[name]
 
             patches = self._patch_resume_context(
@@ -386,7 +386,8 @@ class UpdatePackageTests(unittest.TestCase):
                     "candidate_sha256": expected_hash, "status": "write started"}]}))
             readback_paths = []
 
-            def upload(_tool, _port, _name, _size, destination):
+            def upload(_tool, _port, _name, _size, destination, alternative_size=None):
+                self.assertEqual(alternative_size, 1024)
                 readback_paths.append(Path(destination))
                 Path(destination).write_bytes(payload)
                 return hashlib.sha256(payload).hexdigest()
@@ -433,8 +434,8 @@ class UpdatePackageTests(unittest.TestCase):
             chunks = {"skills-000": payload[:1024], "skills-001": payload[1024:]}
             reads = []
 
-            def upload(_tool, _port, alternative, size, destination):
-                reads.append((alternative, size))
+            def upload(_tool, _port, alternative, size, destination, alternative_size=None):
+                reads.append((alternative, size, alternative_size))
                 piece = chunks[alternative]
                 self.assertEqual(len(piece), size)
                 Path(destination).write_bytes(piece)
@@ -449,7 +450,7 @@ class UpdatePackageTests(unittest.TestCase):
             self.assertEqual(result["status"], "match")
             self.assertEqual(result["size_bytes"], 1536)
             self.assertEqual(result["partition_capacity_bytes"], 4096)
-            self.assertEqual(reads, [("skills-000", 1024), ("skills-001", 512)])
+            self.assertEqual(reads, [("skills-000", 1024, 1024), ("skills-001", 512, 1024)])
 
     def test_gpt_layout_parser_returns_exact_partition_extents(self):
         layout = updates.parse_gpt_layout_prefix(make_gpt_prefix())
@@ -592,7 +593,7 @@ class UpdatePackageTests(unittest.TestCase):
                     written[alternative] = Path(argv[argv.index("-D") + 1]).read_bytes()
                     download_sizes[alternative] = download_size
 
-            def upload(_dfu_util, _port, alternative, size, destination):
+            def upload(_dfu_util, _port, alternative, size, destination, _alternative_size=None):
                 payload = written[alternative]
                 if len(payload) != size:
                     raise AssertionError("{} transferred {} bytes; expected {}".format(
@@ -664,7 +665,7 @@ class UpdatePackageTests(unittest.TestCase):
             with patch.object(toolkit, "SKILLS_CHUNK_BYTES", 1024):
                 chunks = toolkit._expected_skills_chunks(len(payload))
 
-            def upload(_tool, _port, alternative, size, destination):
+            def upload(_tool, _port, alternative, size, destination, _alternative_size=None):
                 data = pieces[alternative]
                 self.assertEqual(len(data), size)
                 Path(destination).write_bytes(data)
@@ -795,6 +796,24 @@ class UpdatePackageTests(unittest.TestCase):
                                          text=True, capture_output=True)
             self.assertEqual(final_check.returncode, 0, final_check.stdout + final_check.stderr)
             self.assertEqual(updates._filesystem_geometry(target), (1024, skills_capacity // 1024))
+
+    def test_rtm3_first_boot_resize_runs_through_rcs(self):
+        files = {
+            "/etc/inittab": b"::sysinit:/etc/init.d/rcS\n",
+            "/etc/init.d/rcS": (b"for i in /etc/init.d/S??* ;do\n"
+                                 b"    $i start\n"
+                                 b"done\n"),
+            "/etc/init.d/S03fs-resize": (
+                b"#!/bin/sh\ncase \"$1\" in\n    start)\n"
+                b"        /var/etc/first_boot_resize\n"
+                b"        /bin/mv /var/etc/first_boot_resize "
+                b"/var/etc/first_boot_resize.done\n        ;;\nesac\n"),
+        }
+        with patch.object(updates, "_read_ext4_file",
+                          side_effect=lambda _image, path, _description: files[path]):
+            self.assertTrue(updates._runs_first_boot_resize(Path("rootfs.ext4")))
+            files["/etc/init.d/S03fs-resize"] = b"#!/bin/sh\nexit 0\n"
+            self.assertFalse(updates._runs_first_boot_resize(Path("rootfs.ext4")))
 
     def test_preserved_var_resize_script_is_tagged_and_skips_var_fsck(self):
         tag = "0123456789abcdef0123456789abcdef"
@@ -1089,6 +1108,209 @@ class CompactFlashIntegrationTests(unittest.TestCase):
             saved = json.loads(Path(result["manifest"]).read_text())
             self.assertEqual(saved["first_boot_resize_rearm"]["method"], "full-var-image")
             self.assertEqual(saved["first_boot_resize_rearm"]["status"], "verified")
+
+
+class FactoryFreshVarTests(unittest.TestCase):
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
+                         "e2fsprogs is required for factory var tests")
+    def test_factory_fresh_var_keeps_only_robot_identity_and_camera_calibration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stock, backup, result = (root / name for name in
+                                     ("stock.ext4", "backup.ext4", "result.ext4"))
+            for image in (stock, backup):
+                with image.open("wb") as stream:
+                    stream.truncate(8 * 1024 * 1024)
+                subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", str(image)],
+                               check=True, capture_output=True)
+                for directory in ("/jibo", "/jibo/lps", "/etc"):
+                    subprocess.run(["debugfs", "-w", "-R", "mkdir " + directory,
+                                    str(image)], check=True, capture_output=True)
+
+            def put(image, path, content):
+                host = root / "payload"
+                host.write_bytes(content)
+                subprocess.run(["debugfs", "-w", "-R",
+                                "write {} {}".format(host, path), str(image)],
+                               check=True, capture_output=True)
+
+            for path in toolkit.images.FACTORY_CAMERA_PATHS:
+                put(stock, path, b'{"value":"default"}')
+                put(backup, path, b'{"value":"calibrated"}')
+            put(backup, "/jibo/identity.json", json.dumps({
+                "name": "Aero-Root-Okra-Knit", "serial_number": "BOJW-1000-0001-0002-0003",
+                "cpuid": "123", "wifi_mac": "00:11:22:33:44:55"}).encode())
+            put(backup, "/etc/wpa_supplicant.conf", b"old-user-network")
+            put(stock, "/etc/wpa_supplicant.conf", b"stock-network-template")
+            put(stock, "/etc/hostname", b"jibo\n")
+            put(stock, "/etc/hosts", b"127.0.0.1 localhost\n")
+            self.assertTrue(toolkit.images.factory_calibration_available(backup, stock))
+            built = toolkit.images.build_factory_fresh_var(stock, backup, result)
+            self.assertEqual(result.stat().st_size, stock.stat().st_size)
+            self.assertEqual(built["mode"], "oobe")
+            self.assertFalse(built["camera_matches_stock"])
+            for path in toolkit.images.FACTORY_CAMERA_PATHS:
+                self.assertEqual(toolkit.images._extract(
+                    result, path, root / "out"), b'{"value":"calibrated"}')
+                self.assertEqual(toolkit.images._extract(
+                    stock, path, root / "out"), b'{"value":"default"}')
+            self.assertEqual(toolkit.images._extract(
+                result, "/jibo/mode.json", root / "out"), b'{"mode":"oobe"}')
+            self.assertEqual(toolkit.images._extract(
+                result, "/etc/wpa_supplicant.conf", root / "out"), b"stock-network-template")
+            self.assertIsNone(toolkit.images._extract(
+                stock, "/jibo/identity.json", root / "out", optional=True))
+            self.assertEqual(toolkit.images._file_metadata(
+                result, "/jibo/identity.json")["mode"], "0100600")
+            for path in toolkit.images.FACTORY_CAMERA_PATHS:
+                subprocess.run(["debugfs", "-w", "-R", "rm " + path, str(backup)],
+                               check=True, capture_output=True)
+                put(backup, path, b'{ "value" : "default" }')
+            self.assertTrue(toolkit.images.factory_calibration_available(backup, stock))
+            stock_matched = toolkit.images.build_factory_fresh_var(
+                stock, backup, root / "stock-matched.ext4")
+            self.assertTrue(stock_matched["camera_matches_stock"])
+
+    def test_calibrated_flash_writes_edited_var_after_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "release" / "flash_jibo" / "output" / "images"
+            folder.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (folder / filename).write_bytes(b"package placeholder")
+            stock = root / "stock.img"
+            stock.write_bytes(b"S" * 512)
+            calibrated = root / "calibrated.img"
+            calibrated.write_bytes(b"C" * 512)
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = dict(updates.KNOWN_CAPACITIES)
+            capacities["skills"] = 10_991_139_328
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"]
+            events = []
+            backup = {"image": "backup.img", "sha256": "a" * 64,
+                      "manifest": "backup-manifest.json"}
+
+            def save_backup(*_args, **_kwargs):
+                events.append("backup")
+                return backup
+
+            def build(*_args):
+                events.append("calibrate")
+                return {"image": str(calibrated), "sha256": toolkit._sha256_file(calibrated),
+                        "calibration_files": list(toolkit.images.FACTORY_CAMERA_PATHS)}
+
+            def transfer(argv, **_kwargs):
+                events.append("write-" + argv[argv.index("-a") + 1])
+                if argv[argv.index("-a") + 1] == "var":
+                    self.assertIn(str(calibrated), argv)
+
+            with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", names, "device", "")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", side_effect=save_backup), \
+                    patch.object(toolkit, "_select_factory_calibration_backup", return_value=backup), \
+                    patch.object(toolkit.images, "build_factory_fresh_var", side_effect=build), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: stock for name in toolkit.UPDATE_ORDER})), \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", return_value=""):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    flash = toolkit.flash_update(root / "release", False, port="1-1",
+                                                 dfu_util="dfu-util", confirmation="FLASH UPDATE",
+                                                 fresh_with_calibration=True)
+            self.assertEqual(events[:2], ["backup", "calibrate"])
+            self.assertEqual(events[-1], "write-var")
+            manifest = json.loads(Path(flash["manifest"]).read_text())
+            self.assertEqual(manifest["factory_calibration"]["candidate_sha256"],
+                             toolkit._sha256_file(calibrated))
+            self.assertIn("camera calibration", flash["var_policy"])
+
+    def test_calibrated_flash_refuses_missing_real_calibration_before_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "release" / "flash_jibo" / "output" / "images"
+            folder.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (folder / filename).write_bytes(b"package placeholder")
+            stock = root / "stock.img"
+            stock.write_bytes(b"S" * 512)
+            operation = root / "operation"
+            operation.mkdir()
+            capacities = dict(updates.KNOWN_CAPACITIES)
+            capacities["skills"] = 10_991_139_328
+            names = ["rootfsA", "rootfsB", "services", "skills", "var", "emmc-000"]
+            backup = {"image": "backup.img", "sha256": "a" * 64,
+                      "manifest": "backup-manifest.json"}
+            with patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", names, "device", "")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value=backup) as save, \
+                    patch.object(toolkit, "_select_factory_calibration_backup",
+                                 side_effect=toolkit.DfuError("no calibration")), \
+                    patch.object(toolkit.updates, "prepare_compact_images",
+                                 return_value=compact_set({name: stock for name in toolkit.UPDATE_ORDER})), \
+                    patch.object(toolkit, "run_with_progress") as transfer:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    with self.assertRaisesRegex(toolkit.DfuError, "no calibration"):
+                        toolkit.flash_update(root / "release", False, port="1-1",
+                                             dfu_util="dfu-util", confirmation="FLASH UPDATE",
+                                             fresh_with_calibration=True)
+            self.assertEqual(save.call_count, 1)
+            self.assertTrue(save.call_args.kwargs["refresh"])
+            transfer.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("mke2fs"), "e2fsprogs is required for backup matching")
+    def test_calibration_backup_must_match_connected_robot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tag = "serial-sha256:" + "a" * 64
+            sources = []
+            for index, owner in enumerate((tag, "serial-sha256:" + "b" * 64)):
+                directory = root / ("var-backup-" + str(index))
+                directory.mkdir()
+                image = directory / "var.img"
+                with image.open("wb") as stream:
+                    stream.truncate(8 * 1024 * 1024)
+                subprocess.run(["mke2fs", "-F", "-q", "-t", "ext4", str(image)],
+                               check=True, capture_output=True)
+                digest = toolkit._sha256_file(image)
+                manifest = directory / "backup-manifest.json"
+                manifest.write_text(json.dumps({"kind": "jibo-var-backup", "device_tag": owner,
+                                                "sha256": digest, "image": "var.img"}))
+                sources.append({"image": str(image), "sha256": digest,
+                                "manifest": str(manifest)})
+            with patch.object(toolkit, "BACKUP_ROOT", root), \
+                    patch.object(toolkit, "EXPECTED_VAR_SIZE", 8 * 1024 * 1024), \
+                    patch.object(toolkit.images, "factory_calibration_available",
+                                 return_value=True):
+                selected = toolkit._select_factory_calibration_backup(
+                    tag, sources[1], root / "stock.ext4")
+            self.assertEqual(selected["manifest"], sources[0]["manifest"])
+
+            # A current backup with the required files takes precedence.
+            newer_manifest = Path(sources[1]["manifest"])
+            newer = json.loads(newer_manifest.read_text())
+            newer["device_tag"] = tag
+            newer_manifest.write_text(json.dumps(newer))
+            with patch.object(toolkit, "BACKUP_ROOT", root), \
+                    patch.object(toolkit, "EXPECTED_VAR_SIZE", 8 * 1024 * 1024), \
+                    patch.object(toolkit.images, "factory_calibration_available",
+                                 return_value=True):
+                selected = toolkit._select_factory_calibration_backup(
+                    tag, sources[1], root / "stock.ext4")
+            self.assertEqual(selected["manifest"], sources[1]["manifest"])
+
+            # If its files are missing or invalid, an older matching backup is usable.
+            with patch.object(toolkit, "BACKUP_ROOT", root), \
+                    patch.object(toolkit, "EXPECTED_VAR_SIZE", 8 * 1024 * 1024), \
+                    patch.object(toolkit.images, "factory_calibration_available",
+                                 side_effect=lambda image, _stock: image == sources[0]["image"]):
+                selected = toolkit._select_factory_calibration_backup(
+                    tag, sources[1], root / "stock.ext4")
+            self.assertEqual(selected["manifest"], sources[0]["manifest"])
 
 
 if __name__ == "__main__":

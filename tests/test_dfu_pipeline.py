@@ -539,6 +539,24 @@ class TransferCommandTests(unittest.TestCase):
         self.assertEqual(write[1:], [helper, "-d", "0955:701a", "--path", "1-1", "-a", "var",
                                      "-D", "/tmp/var.img"])
 
+    def test_prefix_read_covers_the_whole_alternative_only_in_the_helper(self):
+        with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "pipelined"}), \
+                patch.object(toolkit, "_usbfs_available", return_value=True):
+            helper = toolkit._partition_transfer_argv("dfu-util", "1-1", "rootfsA", "-U",
+                                                      Path("/tmp/a.img"), 838860800, 1048576000)
+        with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "dfu-util"}):
+            fallback = toolkit._partition_transfer_argv("dfu-util", "1-1", "rootfsA", "-U",
+                                                        Path("/tmp/a.img"), 838860800, 1048576000)
+        self.assertEqual(helper[-4:], ["-Z", "1048576000", "--prefix", "838860800"])
+        self.assertEqual(fallback[-2:], ["-Z", "838860800"])
+
+    def test_prefix_sink_keeps_only_leading_bytes(self):
+        kept = bytearray()
+        sink = pipeline._prefix_sink(kept.extend, 5000)
+        for block in (b"a" * 4096, b"b" * 4096, b"c" * 4096):
+            sink(block)
+        self.assertEqual(bytes(kept), b"a" * 4096 + b"b" * 904)
+
     def test_environment_selects_dfu_util(self):
         with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "dfu-util"}):
             argv = toolkit._partition_transfer_argv("dfu-util", "1-1", "var", "-U",

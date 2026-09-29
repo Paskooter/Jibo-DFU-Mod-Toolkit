@@ -79,7 +79,7 @@ class DfuError(Exception):
 
 
 class FileRpcStatusError(DfuError):
-    def __init__(self, status):
+    def __init__(self, status, detail=None):
         self.status = status
         if status == 3:
             message = "The file or ext4 filesystem uses a layout the RAM loader does not support (file mailbox status 3)."
@@ -90,6 +90,8 @@ class FileRpcStatusError(DfuError):
                        "the guided menu also offers a full-var transfer.")
         else:
             message = "The file mailbox rejected the request with status {}.".format(status)
+        if detail:
+            message += " " + detail
         super().__init__(message)
 
 
@@ -353,11 +355,14 @@ def _usbfs_available():
     return Path("/dev/bus/usb").is_dir()
 
 
-def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=None):
+def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=None,
+                             alternative_size=None):
     """Build a whole-alternative read (-U) or write (-D) command.
 
     The pipelined helper queues DFU requests instead of waiting a USB round
-    trip for each block. JIBO_DFU_TRANSFER=dfu-util selects dfu-util.
+    trip for each block. JIBO_DFU_TRANSFER=dfu-util selects dfu-util. A read
+    of the first size bytes of a larger alternative still reads the helper's
+    whole alternative_size, so the loader's read cursor ends at the start.
     """
     mode = os.environ.get("JIBO_DFU_TRANSFER", "pipelined")
     if mode not in ("pipelined", "dfu-util"):
@@ -366,6 +371,9 @@ def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=Non
     if option == "-U":
         argv += ["-Z", str(size)]
     if mode == "pipelined" and PIPELINE_HELPER.is_file() and _usbfs_available():
+        if option == "-U" and alternative_size is not None and alternative_size != size:
+            argv[-1] = str(alternative_size)
+            argv += ["--prefix", str(size)]
         return [sys.executable, str(PIPELINE_HELPER)] + argv
     return [dfu_util] + argv
 
@@ -542,13 +550,17 @@ def _upload_var(dfu_util, port, destination):
         raise
 
 
-def _upload_partition(dfu_util, port, partition, size, destination):
-    """Read exactly one named DFU partition into a private local file."""
+def _upload_partition(dfu_util, port, partition, size, destination, alternative_size=None):
+    """Read the first size bytes of one named DFU partition into a private local file.
+
+    alternative_size is the partition's whole size when size is only a prefix.
+    """
     destination = Path(destination)
     destination.unlink(missing_ok=True)
     try:
         run_with_progress(
-            _partition_transfer_argv(dfu_util, port, partition, "-U", destination, size),
+            _partition_transfer_argv(dfu_util, port, partition, "-U", destination, size,
+                                     alternative_size),
             timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size),
             progress_path=destination, progress_size=size)
         if destination.stat().st_size != size:
@@ -1115,7 +1127,7 @@ def _upload_skills_prefix(dfu_util, port, transfer_size, chunks, workdir=None):
         destination = Path(temporary) / "chunk.img"
         for chunk in selected_chunks:
             _upload_partition(dfu_util, port, chunk["name"],
-                              chunk["transfer_bytes"], destination)
+                              chunk["transfer_bytes"], destination, chunk["size_bytes"])
             with destination.open("rb") as stream:
                 _copy_exact(stream, _NullWriter(), chunk["transfer_bytes"], digest)
     return digest.hexdigest()
@@ -1219,7 +1231,8 @@ def _write_skills_chunks(dfu_util, port, candidate, capacity, chunks,
                 if verify_readback:
                     readback = temporary / "readback.img"
                     actual_hash = _upload_partition(dfu_util, port, chunk["name"],
-                                                    chunk["transfer_bytes"], readback)
+                                                    chunk["transfer_bytes"], readback,
+                                                    chunk["size_bytes"])
                     chunk_record["readback_sha256"] = actual_hash
                     if actual_hash != expected_hash:
                         chunk_record["status"] = "readback mismatch"
@@ -1560,6 +1573,42 @@ def _find_verified_backup(device_tag=None, expected_sha256=None):
     return None
 
 
+def _select_factory_calibration_backup(device_tag, preferred, stock_var):
+    """Choose verified calibration from this robot, preferring its rollback backup."""
+    candidates = [preferred]
+    if _has_unique_device_tag(device_tag) and BACKUP_ROOT.is_dir():
+        manifests = sorted(BACKUP_ROOT.rglob("backup-manifest.json"),
+                           key=lambda path: path.stat().st_mtime if path.exists() else 0,
+                           reverse=True)
+        for manifest in manifests:
+            if manifest.is_symlink() or manifest.parent.is_symlink() or \
+                    str(manifest) == str(preferred.get("manifest")):
+                continue
+            try:
+                record = json.loads(manifest.read_text())
+                tags = set(record.get("device_tags", ()))
+                tags.add(record.get("device_tag"))
+                if record.get("kind") != "jibo-var-backup" or device_tag not in tags:
+                    continue
+                image = manifest.parent / Path(record.get("image", "var.img")).name
+                if image.is_symlink() or not image.is_file():
+                    continue
+                candidates.append({"image": str(image), "sha256": record.get("sha256"),
+                                   "manifest": str(manifest)})
+            except (OSError, ValueError, TypeError):
+                continue
+    for backup in candidates:
+        try:
+            if _has_unique_device_tag(device_tag):
+                _verify_var_backup_for_robot(backup, device_tag)
+            if images.factory_calibration_available(backup["image"], stock_var):
+                return backup
+        except (DfuError, OSError, ValueError, TypeError):
+            continue
+    raise DfuError("No verified var backup for this robot contains its identity and camera "
+                   "calibration. No partition write was attempted.")
+
+
 def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
     """Associate a stable loader identity only after a full-image hash match."""
     if not _has_unique_device_tag(device_tag):
@@ -1823,8 +1872,10 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
 
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, resume_from=None,
-                 verify_readback=False):
+                 verify_readback=False, fresh_with_calibration=False):
     """Install compact official ext4 prefixes and resize them on first boot."""
+    if preserve_var and fresh_with_calibration:
+        raise DfuError("Preserving var and creating fresh var with calibration are separate choices.")
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
@@ -1855,9 +1906,12 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         resume_record = _validate_resume_manifest(
             resume_from, package, preserve_var, capacities, partitions)
         legacy_resume = resume_record.get("_legacy_full_image_resume", False)
+    var_policy = ("preserve current configuration" if preserve_var else
+                  "fresh package var with matching robot identity and camera calibration"
+                  if fresh_with_calibration else
+                  "replace with package var image (fresh setup and lost local settings)")
     plan = {"package": str(package.source), "version": package.version,
-            "usb_port": port, "var_policy": "preserve current configuration" if preserve_var else
-            "replace with package var image (fresh setup and lost local settings)",
+            "usb_port": port, "var_policy": var_policy,
             "image_strategy": "compact-prefix-v1",
             "filesystem_resize": ("Transfer compact stock image prefixes; first boot expands rootfs, services, and skills while var data is preserved." if preserve_var else
                                    "Transfer compact stock image prefixes; target init expands the filesystems at first boot."),
@@ -1883,6 +1937,8 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         print("Each written source prefix will be read back and compared with the package image.")
     if preserve_var:
         print("Var data stays in place; first boot expands rootfs, services, and skills.")
+    elif fresh_with_calibration:
+        print("Fresh var will include this robot's identity and camera calibration, with OOBE mode and no old Wi-Fi or user data.")
     if resume_record is None:
         print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
     else:
@@ -1930,7 +1986,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             compact_images = _call_with_progress(
                 lambda: updates.prepare_compact_images(package, preserve_var, capacities, prepared_dir),
                 "Preparing compact partition images on this computer")
-            prepared = compact_images.images
+            prepared = dict(compact_images.images)
             missing_candidates = [name for name in partitions if name not in prepared]
             if missing_candidates:
                 raise DfuError("The update package did not prepare: " + ", ".join(missing_candidates))
@@ -1976,10 +2032,34 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             else:
                 record["status"] = "backing up var"
                 _private_write(record_path, record)
-                # Even a preserve-var update gets one reusable rollback image of var.
-                var_backup = backup_var(port, dfu_util)
+                # A calibrated fresh flash captures the current var first;
+                # other policies keep their existing reusable-backup behavior.
+                var_backup = (backup_var(port, dfu_util, refresh=True)
+                              if fresh_with_calibration else backup_var(port, dfu_util))
                 record["backups"]["var"] = var_backup
                 _private_write(record_path, record)
+
+            if fresh_with_calibration:
+                record["status"] = "preparing fresh var with calibration"
+                _private_write(record_path, record)
+                source = _select_factory_calibration_backup(
+                    device_tag, record["backups"]["var"], prepared["var"])
+                calibrated = images.build_factory_fresh_var(
+                    prepared["var"], source["image"],
+                    Path(prepared_dir) / "factory-fresh-var.ext4")
+                prepared["var"] = Path(calibrated["image"])
+                candidate_hashes["var"] = calibrated["sha256"]
+                record["factory_calibration"] = {
+                    "source_manifest": str(source["manifest"]),
+                    "source_sha256": source["sha256"],
+                    "files": calibrated["calibration_files"],
+                    "identity_restored": True, "mode": "oobe",
+                    "camera_matches_stock": calibrated.get("camera_matches_stock"),
+                    "candidate_sha256": calibrated["sha256"]}
+                _private_write(record_path, record)
+                if calibrated.get("camera_matches_stock"):
+                    print("The selected var backup's camera files match this package's defaults; "
+                          "the saved files and robot identity were copied into fresh var.", flush=True)
 
             var_resize_image = None
             if preserve_var and resize_method == "full-var-image":
@@ -2021,7 +2101,8 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         with tempfile.TemporaryDirectory(prefix="readback-", dir=directory) as readback_dir:
                             readback = Path(readback_dir) / "partition.img"
                             actual = _upload_partition(dfu_util, port, name,
-                                                       transfer_sizes[name], readback)
+                                                       transfer_sizes[name], readback,
+                                                       capacities[name])
                 if verify_readback:
                     entry["readback_sha256"] = actual
                     if actual != digest:
@@ -2053,7 +2134,8 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                         with tempfile.TemporaryDirectory(prefix="resume-readback-", dir=directory) as readback_dir:
                             readback = Path(readback_dir) / "partition.img"
                             actual = _upload_partition(
-                                dfu_util, port, name, transfer_sizes[name], readback)
+                                dfu_util, port, name, transfer_sizes[name], readback,
+                                capacities[name])
                     entry["resume_readback_sha256"] = actual
                     if actual == digest:
                         entry["candidate_sha256"] = digest
@@ -2144,7 +2226,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         record["status"] = "verified; reset pending" if verify_readback else "transferred; reset pending"
         _private_write(record_path, record)
         try:
-            run([dfu_util, "-d", "0955:701a", "--path", port, "-e", "-R"], timeout=60)
+            # Without -a, dfu-util sees one DFU interface per alternate and refuses to detach.
+            run([dfu_util, "-d", "0955:701a", "--path", port, "-a", MARKER, "-e", "-R"],
+                timeout=60)
             record["status"] = "verified; reset requested" if verify_readback else "transferred; reset requested"
         except DfuError as exc:
             record["status"] = "verified; reset not confirmed" if verify_readback else "transferred; reset not confirmed"
@@ -2204,7 +2288,7 @@ def verify_update_write(manifest, partition, port=None, dfu_util=None):
     else:
         with tempfile.TemporaryDirectory(prefix="jibo-verify-update-") as temporary:
             actual_hash = _upload_partition(dfu_util, port, partition, transfer_size,
-                                            Path(temporary) / "readback.img")
+                                            Path(temporary) / "readback.img", expected_capacity)
     return {"status": "match" if actual_hash == expected_hash else "mismatch",
             "partition": partition, "size_bytes": transfer_size,
             "partition_capacity_bytes": expected_capacity,
@@ -2508,9 +2592,9 @@ class FileTransaction:
                 if not isinstance(edit["content"], bytes) or not (0 < len(edit["content"]) <= FILE_LEVEL_MAX_BYTES):
                     raise DfuError("A replacement must contain 1 to {} bytes.".format(FILE_LEVEL_MAX_BYTES))
                 if len(edit["content"]) > before_stat["allocated_bytes"]:
-                    raise DfuError("{} needs {} bytes but has only {} bytes allocated; this in-place writer cannot grow files."
-                                   .format(edit["path"], len(edit["content"]),
-                                           before_stat["allocated_bytes"]))
+                    raise FileRpcStatusError(3, "{} needs {} bytes but has only {} bytes allocated."
+                                             .format(edit["path"], len(edit["content"]),
+                                                     before_stat["allocated_bytes"]))
                 change = {"partition": edit["partition"], "path": edit["path"],
                           "description": edit.get("description"),
                           "before_size_bytes": len(current),
@@ -2567,6 +2651,8 @@ class FileTransaction:
             record.update(status="write started", changes=changes)
             _private_write(record_path, record)
             for edit, change in zip(self.edits, changes):
+                if change["before_sha256"] == change["candidate_sha256"]:
+                    continue
                 if self.guided:
                     print("Updating {}…".format(edit.get("description") or edit["path"]), flush=True)
                 write_entry = {**change, "status": "write started"}
@@ -2689,7 +2775,7 @@ def configure_wifi_file_live(ssid, password=None, open_network=False, partition=
         details = {}
         def add_network(current):
             replacement, details["wifi_network_count"] = images.build_wifi_config(
-                current, ssid, password, open_network)
+                current, ssid, password, open_network, compact=True)
             return replacement
         transaction = FileTransaction((partition,), port, dfu_util, out, guided=guided)
         transaction.transform(partition, images.VAR_WIFI_PATH, add_network,
@@ -2697,6 +2783,37 @@ def configure_wifi_file_live(ssid, password=None, open_network=False, partition=
         result = transaction.commit(confirmation)
         result.update(details)
         result["ssid"] = ssid
+        return result
+    finally:
+        password = None
+
+
+def set_mode_wifi_file_live(mode, ssid, password=None, open_network=False,
+                            port=None, dfu_util=None, out=None,
+                            confirmation=None, guided=False):
+    """Change both files in one reviewed file transaction when supported."""
+    if mode not in images.MODE_VALUES:
+        raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
+    details = {}
+    def change_mode(current):
+        data = images._json_mode(current)
+        details["previous_mode"] = data["mode"]
+        if data["mode"] == mode:
+            return current
+        data["mode"] = mode
+        return (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+    def add_network(current):
+        replacement, details["wifi_network_count"] = images.build_wifi_config(
+            current, ssid, password, open_network, compact=True)
+        return replacement
+    try:
+        transaction = FileTransaction(("var",), port, dfu_util, out, guided=guided)
+        transaction.transform("var", images.VAR_MODE_PATH, change_mode,
+                              description="robot mode to " + mode)
+        transaction.transform("var", images.VAR_WIFI_PATH, add_network,
+                              description="saved Wi-Fi network {!r}".format(ssid))
+        result = transaction.commit(confirmation)
+        result.update(details, mode=mode, ssid=ssid)
         return result
     finally:
         password = None
@@ -2750,7 +2867,8 @@ def configure_wifi_live(ssid, password=None, open_network=False, port=None,
     try:
         state = _prepare_current_and_baseline(dfu_util, port, device_tag, directory)
         before = state["before"]
-        edit = images.edit_wifi(before, candidate, ssid, password, open_network)
+        edit = images.edit_wifi(before, candidate, ssid, password, open_network,
+                                compact=True)
         print("Planned Wi-Fi change: add SSID " + ssid + "; existing networks are preserved.")
         result = _write_candidate(candidate, before, directory, port, dfu_util,
                                   confirmation, "add Wi-Fi network",
@@ -2759,6 +2877,40 @@ def configure_wifi_live(ssid, password=None, open_network=False, port=None,
         return result
     except (DfuError, images.ImageError) as exc:
         _raise_live_operation_error(directory, "add Wi-Fi network", state, exc)
+    finally:
+        password = None
+
+
+def set_mode_wifi_live(mode, ssid, password=None, open_network=False,
+                       port=None, dfu_util=None, out=None, confirmation=None):
+    """Apply both changes with one var read, one write, and one readback."""
+    if mode not in images.MODE_VALUES:
+        raise DfuError("Mode must be one of: " + ", ".join(images.MODE_VALUES))
+    dfu_util = dfu_util or tool("dfu-util")
+    port, _, device_tag = _dfu_context(port, dfu_util)
+    directory = _new_operation_dir(out, "set-mode-wifi")
+    state = None
+    candidate = directory / "edited-var.img"
+    try:
+        state = _prepare_current_and_baseline(dfu_util, port, device_tag, directory)
+        before = state["before"]
+        edit = images.edit_mode_wifi(before, candidate, mode, ssid,
+                                     password, open_network)
+        if edit.get("journal_replayed_on_temporary_copy"):
+            print("Replayed the ext4 journal on the temporary working image before editing. The saved backup was not changed.")
+        print("Mode change: " + edit["previous_mode"] + " → " + mode)
+        print("Planned Wi-Fi change: add SSID " + ssid + "; existing networks are preserved.")
+        result = _write_candidate(candidate, before, directory, port, dfu_util,
+                                  confirmation, "set mode and add Wi-Fi network",
+                                  state["baseline"], state["before_sha256"],
+                                  state["baseline_sha256"])
+        result.update(current_mode=edit["previous_mode"], new_mode=mode,
+                      wifi_network_count=edit["network_count"], ssid=ssid,
+                      journal_replayed_on_temporary_copy=edit.get(
+                          "journal_replayed_on_temporary_copy", False))
+        return result
+    except (DfuError, images.ImageError) as exc:
+        _raise_live_operation_error(directory, "set mode and add Wi-Fi network", state, exc)
     finally:
         password = None
 
@@ -2940,6 +3092,8 @@ def main(argv=None):
     policy = flash.add_mutually_exclusive_group(required=True)
     policy.add_argument("--preserve-var", action="store_true", help="Keep current identity, mode, Wi-Fi, and user settings")
     policy.add_argument("--fresh-var", action="store_true", help="Replace var with the package image for fresh setup")
+    policy.add_argument("--fresh-var-with-calibration", action="store_true",
+                        help="Use fresh package var with this robot's saved identity and camera calibration")
     _add_device_arguments(flash)
     _add_dfu_argument(flash)
     _add_operation_argument(flash)
@@ -3074,7 +3228,9 @@ def main(argv=None):
             result = flash_update(args.package, args.preserve_var, args.port,
                                   tool("dfu-util", args.dfu_util), args.operation_dir,
                                   UPDATE_CONFIRMATION if args.yes else args.confirm,
-                                  args.dry_run, args.resume_from, args.verify_readback)
+                                  args.dry_run, args.resume_from, args.verify_readback,
+                                  **({"fresh_with_calibration": True}
+                                     if args.fresh_var_with_calibration else {}))
         elif args.command == "verify-update-write":
             result = verify_update_write(args.manifest, args.partition, args.port,
                                          tool("dfu-util", args.dfu_util))

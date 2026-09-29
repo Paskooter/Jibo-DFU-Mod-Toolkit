@@ -262,6 +262,33 @@ class SafeWorkflowTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "failed before write")
             self.assertEqual({item.name for item in operation_dir.iterdir()}, {"write-manifest.json"})
 
+    def test_combined_full_var_edit_reads_and_writes_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            operation_dir.mkdir()
+            before = operation_dir / "current-var.img"
+            baseline = operation_dir / "baseline.img"
+            edit_result = {"previous_mode": "oobe", "network_count": 2,
+                           "journal_replayed_on_temporary_copy": True}
+            with patch.object(j, "_dfu_context", return_value=("1-1", ["var"], "device")), \
+                    patch.object(j, "_new_operation_dir", return_value=operation_dir), \
+                    patch.object(j, "_prepare_current_and_baseline", return_value={
+                        "before": before, "before_sha256": "current-hash",
+                        "baseline": baseline, "baseline_sha256": "baseline-hash"}) as prepare, \
+                    patch.object(j.images, "edit_mode_wifi", return_value=edit_result) as edit, \
+                    patch.object(j, "_write_candidate", return_value={
+                        "status": "verified"}) as write, redirect_stdout(io.StringIO()):
+                result = j.set_mode_wifi_live("developer", "Test Wi-Fi", open_network=True,
+                                              port="1-1", dfu_util="dfu-util",
+                                              confirmation=True)
+            prepare.assert_called_once()
+            edit.assert_called_once_with(before, operation_dir / "edited-var.img",
+                                         "developer", "Test Wi-Fi", None, True)
+            write.assert_called_once()
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(result["wifi_network_count"], 2)
+            self.assertEqual(result["new_mode"], "developer")
+
 
 if __name__ == "__main__":
     unittest.main()

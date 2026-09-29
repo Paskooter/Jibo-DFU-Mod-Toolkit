@@ -407,6 +407,28 @@ def _read_ext4_file(image: Path, internal_path: str, description: str) -> bytes:
     return result.stdout
 
 
+def _runs_first_boot_resize(rootfs: Path) -> bool:
+    """Recognize the direct and RTM3 init paths to the var resize script."""
+    inittab = _read_ext4_file(rootfs, "/etc/inittab", "the target rootfs /etc/inittab")
+    if re.search(rb"(?m)^\s*::sysinit:/var/etc/first_boot_resize\s*$", inittab):
+        return True
+    if not re.search(rb"(?m)^\s*::sysinit:/etc/init\.d/rcS\s*$", inittab):
+        return False
+
+    rc_s = _read_ext4_file(rootfs, "/etc/init.d/rcS", "the target rootfs rcS script")
+    if not re.search(rb"for\s+i\s+in\s+/etc/init\.d/S\?\?\*\s*;\s*do", rc_s) or \
+            not re.search(rb"(?m)^\s*\$i\s+start\s*$", rc_s):
+        return False
+
+    hook = _read_ext4_file(rootfs, "/etc/init.d/S03fs-resize",
+                           "the target rootfs first-boot resize hook")
+    return hook.startswith(b"#!/bin/sh\n") and \
+        re.search(rb"(?m)^\s*start\)\s*$", hook) is not None and \
+        re.search(rb"(?m)^\s*/var/etc/first_boot_resize\s*$", hook) is not None and \
+        re.search(rb"(?m)^\s*/bin/mv\s+/var/etc/first_boot_resize\s+"
+                  rb"/var/etc/first_boot_resize\.done\s*$", hook) is not None
+
+
 def _restore_ext4_write_time(source: Path, output: Path) -> None:
     """Remove resize2fs's wall-clock stamp from classic 1 KiB ext4 images.
 
@@ -772,10 +794,8 @@ def prepare_compact_images(
                                            "the stock first-boot resize script")
             if not stock_script.startswith(b"#!/bin/sh\n"):
                 raise UpdateError("The package var image has no readable /etc/first_boot_resize script.")
-            inittab = _read_ext4_file(Path(image_paths["rootfs.ext4"]), "/etc/inittab",
-                                      "the target rootfs /etc/inittab")
-            if not re.search(rb"(?m)^\s*::sysinit:/var/etc/first_boot_resize\s*$", inittab):
-                raise UpdateError("The target rootfs does not run /var/etc/first_boot_resize during sysinit; "
+            if not _runs_first_boot_resize(Path(image_paths["rootfs.ext4"])):
+                raise UpdateError("The target rootfs does not run /var/etc/first_boot_resize during startup; "
                                   "compact filesystems would not be expanded on boot.")
 
             files = {

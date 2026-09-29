@@ -273,6 +273,95 @@ class FileDfuTests(unittest.TestCase):
             self.assertIn("Updating robot mode to developer", display.getvalue())
             self.assertNotIn("device_tag", display.getvalue())
 
+    def test_combined_mode_wifi_file_edit_uses_one_backup_and_two_verified_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            mode_path = j.images.VAR_MODE_PATH
+            wifi_path = j.images.VAR_WIFI_PATH
+            files = {
+                mode_path: b'{"mode":"oobe"}\n',
+                wifi_path: b'ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n'
+                           b'update_config=1\n# stock documentation\n',
+            }
+            events = []
+            def metadata(_tool, _port, _partition, path, _directory, **_kwargs):
+                events.append("stat:" + path)
+                return {"inode": 12 if path == mode_path else 13,
+                        "size_bytes": len(files[path]), "allocated_bytes": 1024,
+                        "uid": 0, "gid": 0, "mode": 0o100644, "nlink": 1,
+                        "mapping_count": 1, "ext4_uuid": "ab" * 16}
+            def read(_tool, _port, _partition, path, _directory, **_kwargs):
+                events.append("read:" + path)
+                return files[path]
+            def backup(*_args):
+                events.append("backup")
+                return {"image": "/backup/var.img", "sha256": "baseline",
+                        "manifest": "/backup/manifest.json", "status": "backup complete"}
+            def send(_tool, _port, _partition, request, _directory, _label, **_kwargs):
+                _magic, operation, path_size, content_size, _request_id = j.FILE_RPC_HEADER.unpack_from(request)
+                self.assertEqual(operation, j.FILE_RPC_WRITE)
+                start = j.FILE_RPC_HEADER.size
+                path = request[start:start + path_size].decode()
+                content = request[start + path_size + j.FILE_WRITE_PRECONDITION.size:]
+                self.assertEqual(len(content), content_size)
+                events.append("write:" + path)
+                files[path] = content
+            with patch.object(j, "_file_loader_context", return_value=(
+                    "1-2", [j.MARKER, "var"], "serial-sha256:robot", "")), \
+                    patch.object(j, "_read_gpt_layout", return_value={
+                        "var": {"first_lba": 100, "last_lba": 107, "size_bytes": 4096}}), \
+                    patch.object(j, "_stat_partition_file_rpc", side_effect=metadata), \
+                    patch.object(j, "_read_partition_file_rpc", side_effect=read), \
+                    patch.object(j, "_partition_file_backup", side_effect=backup), \
+                    patch.object(j, "_file_request_transfer", side_effect=send), \
+                    patch.object(j, "_upload_file_response", return_value=b""), \
+                    patch.object(j, "_new_operation_dir", side_effect=lambda _out, _prefix: (
+                        operation_dir.mkdir(mode=0o700), operation_dir)[1]):
+                result = j.set_mode_wifi_file_live(
+                    "developer", "Test Wi-Fi", open_network=True,
+                    port="1-2", dfu_util="dfu-util", confirmation=True, guided=True)
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(result["mode"], "developer")
+            self.assertEqual(result["wifi_network_count"], 1)
+            self.assertEqual(len(result["writes"]), 2)
+            self.assertEqual(events.count("backup"), 1)
+            self.assertLess(events.index("read:" + wifi_path), events.index("backup"))
+            self.assertLess(events.index("backup"), events.index("write:" + mode_path))
+            self.assertEqual(json.loads(files[mode_path])["mode"], "developer")
+            self.assertNotIn(b"stock documentation", files[wifi_path])
+            self.assertIn(b"ssid=546573742057692d4669", files[wifi_path])
+
+    def test_combined_fast_edit_fails_before_mode_write_if_wifi_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            operation_dir = Path(temporary) / "operation"
+            mode_metadata = {"inode": 12, "size_bytes": 16,
+                             "allocated_bytes": 1024, "uid": 0, "gid": 0,
+                             "mode": 0o100644, "nlink": 1, "mapping_count": 1,
+                             "ext4_uuid": "ab" * 16}
+            def metadata(_tool, _port, _partition, path, _directory, **_kwargs):
+                if path == j.images.VAR_WIFI_PATH:
+                    raise j.FileRpcStatusError(3)
+                return mode_metadata
+            with patch.object(j, "_file_loader_context", return_value=(
+                    "1-2", [j.MARKER, "var"], "serial-sha256:robot", "")), \
+                    patch.object(j, "_read_gpt_layout", return_value={
+                        "var": {"first_lba": 100, "last_lba": 107, "size_bytes": 4096}}), \
+                    patch.object(j, "_stat_partition_file_rpc", side_effect=metadata), \
+                    patch.object(j, "_read_partition_file_rpc",
+                                 return_value=b'{"mode":"oobe"}\n'), \
+                    patch.object(j, "_partition_file_backup") as backup, \
+                    patch.object(j, "_file_request_transfer") as send, \
+                    patch.object(j, "_new_operation_dir", side_effect=lambda _out, _prefix: (
+                        operation_dir.mkdir(mode=0o700), operation_dir)[1]):
+                with self.assertRaises(j.FileRpcStatusError):
+                    j.set_mode_wifi_file_live(
+                        "developer", "Test Wi-Fi", open_network=True,
+                        port="1-2", dfu_util="dfu-util", confirmation=True)
+            backup.assert_not_called()
+            send.assert_not_called()
+            record = json.loads((operation_dir / "file-transaction.json").read_text())
+            self.assertEqual(record["status"], "failed before write")
+
     def test_unchanged_file_does_not_create_backup_or_write(self):
         with tempfile.TemporaryDirectory() as temporary:
             operation_dir = Path(temporary) / "operation"

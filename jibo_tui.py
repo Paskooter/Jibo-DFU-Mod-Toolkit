@@ -195,6 +195,9 @@ def build_menu_items(readiness, update_packages=()):
         MenuItem("configure-wifi", "Add a Wi-Fi network" +
                  (" (quick edit)" if _can_edit_var_files(readiness) else ""),
                  is_dfu, connection_reason),
+        MenuItem("set-mode-wifi", "Set mode and add Wi-Fi" +
+                 (" (quick edit)" if _can_edit_var_files(readiness) else ""),
+                 is_dfu, connection_reason),
         MenuItem("flash-update", "Install an official update package",
                  is_dfu and not missing_update and bool(packages), update_reason),
         MenuItem("backup-var", "Save or check a var backup", is_dfu, connection_reason),
@@ -516,6 +519,9 @@ def _result_summary(action, result):
     elif action == "configure-wifi":
         lines = ["Saved Wi-Fi network: {!r}.".format(result["ssid"])
                  if result.get("ssid") else "Wi-Fi configuration updated."]
+    elif action == "set-mode-wifi":
+        lines = ["Robot mode set to {}.".format(result.get("mode") or result.get("new_mode")),
+                 "Saved Wi-Fi network: {!r}.".format(result.get("ssid"))]
     elif action == "backup-var":
         lines = ["Var backup is ready."]
         if result.get("image"):
@@ -731,6 +737,7 @@ def _action_hint(key):
         "backup-var": "Read the robot's var partition and save one reusable local rollback image.",
         "set-mode": "Choose a mode; review the proposed change and confirm before writing.",
         "configure-wifi": "Enter a network; review the proposed change and confirm before writing.",
+        "set-mode-wifi": "Choose a mode and network; apply both in one reviewed operation.",
         "flash-update": "Choose a package and var policy; review the flash plan before confirming.",
         "write-var": "Select an edited image; review and confirm before writing.",
         "inspect-backup": "Read mode and Wi-Fi presence from a local image without showing credentials.",
@@ -829,10 +836,12 @@ def _run_update(api, port=None):
     policy_key = select_option(
         "Choose var handling",
         (("preserve", "Preserve current var and robot settings"),
-         ("fresh", "Use package var for a fresh setup")),
+         ("fresh", "Use package var for a fresh setup"),
+         ("factory", "Fresh setup with this robot's saved calibration")),
         prompt="Choose how the update handles the var partition.",
         detail=("Preserve keeps the current robot identity, mode, Wi-Fi, and user configuration.\n"
-                "Fresh replaces those settings with the package image."))
+                "Fresh replaces those settings with the package image.\n"
+                "Fresh with calibration restores this robot's identity and camera calibration, sets OOBE mode, and clears old Wi-Fi and user data."))
     if policy_key is None:
         return {"status": "cancelled", "message": "No var policy selected."}
     package = packages[int(package_key)]
@@ -840,7 +849,8 @@ def _run_update(api, port=None):
         "Confirm full-flash update",
         _confirmation_details(plan, "Review the package, var policy, and partitions before writing."))
     return api.flash_update(package, preserve_var=policy_key == "preserve", port=port,
-                            confirmation=confirmation)
+                            confirmation=confirmation,
+                            fresh_with_calibration=policy_key == "factory")
 
 
 def execute_action(api, key, readiness):
@@ -921,6 +931,44 @@ def execute_action(api, key, readiness):
                         return {"status": "cancelled", "message": "Wi-Fi was not changed."}
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
+        finally:
+            password = None
+    if key == "set-mode-wifi":
+        mode = _select_mode("Set mode and add Wi-Fi")
+        if mode is None:
+            return {"status": "cancelled", "message": "No mode selected."}
+        ssid = text_input("Set mode and add Wi-Fi", "Wi-Fi network name (SSID):")
+        if ssid is None:
+            return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
+        kind = select_option(
+            "Choose network type",
+            (("protected", "Protected WPA/WPA2 network"), ("open", "Open network")),
+            prompt="Choose the security type for this network.")
+        if kind is None:
+            return {"status": "cancelled", "message": "No network type selected."}
+        open_network = kind == "open"
+        password = None
+        if not open_network:
+            password = text_input("Set mode and add Wi-Fi", "Wi-Fi password:", password=True,
+                                  detail="The password is hidden while you type.")
+            if password is None:
+                return {"status": "cancelled", "message": "Wi-Fi setup was cancelled."}
+        confirmation = lambda plan: confirm_action(
+            "Confirm mode and Wi-Fi change",
+            _confirmation_details(plan, "Review both changes before writing to the robot."))
+        try:
+            if _can_edit_var_files(readiness):
+                try:
+                    return api.set_mode_wifi_file_live(
+                        mode, ssid, password, open_network, port=readiness.port,
+                        confirmation=confirmation, guided=True)
+                except Exception as exc:
+                    if not _needs_full_var_fallback(api, exc):
+                        raise
+                    if not _offer_full_var_edit(exc):
+                        return {"status": "cancelled", "message": "Mode and Wi-Fi were not changed."}
+            return api.set_mode_wifi_live(mode, ssid, password, open_network,
+                                          port=readiness.port, confirmation=confirmation)
         finally:
             password = None
     if key == "flash-update":

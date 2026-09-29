@@ -95,6 +95,17 @@ class EntryTests(unittest.TestCase):
             None, "FLASH UPDATE", False, manifest, False,
         )
 
+    def test_flash_update_cli_selects_fresh_calibrated_var(self):
+        with patch.object(j, "tool", return_value="/usr/bin/dfu-util"), \
+                patch.object(j, "flash_update", return_value={"status": "verified"}) as flash, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(j.main([
+                "flash-update", str(self.root / "package.tar.bz2"),
+                "--fresh-var-with-calibration", "--yes",
+            ]), 0)
+        self.assertFalse(flash.call_args.args[1])
+        self.assertTrue(flash.call_args.kwargs["fresh_with_calibration"])
+
 
 if __name__ == "__main__":
     unittest.main()

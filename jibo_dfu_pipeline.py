@@ -621,9 +621,29 @@ class _Session:
         return False
 
 
+def _prefix_sink(write, keep):
+    """Pass on only the first keep bytes of an upload."""
+    remaining = [keep]
+
+    def sink(data):
+        if remaining[0] > 0:
+            piece = data[:remaining[0]]
+            write(piece)
+            remaining[0] -= len(piece)
+    return sink
+
+
 def upload(port, alternate, destination, size, depth=DEFAULT_UPLOAD_DEPTH, progress=None,
-           transfer_size=None):
-    """Read one DFU alternative of known size into a new private file."""
+           transfer_size=None, prefix=None):
+    """Read one DFU alternative of known size into a new private file.
+
+    With prefix, only that many leading bytes are saved. The alternative is
+    still read to its end: stopping early would leave this loader's read
+    cursor mid-alternative, and its next read or write would fail.
+    """
+    keep = size if prefix is None else prefix
+    if not 0 <= keep <= size:
+        raise DfuTransferError("The prefix must be between 0 and {} bytes.".format(size))
     destination = Path(destination)
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     completed = False
@@ -635,7 +655,8 @@ def upload(port, alternate, destination, size, depth=DEFAULT_UPLOAD_DEPTH, progr
                 block_size = session.block_size(transfer_size)
                 try:
                     received = _upload_stream(session.device, session.interface, block_size,
-                                              size, stream.write, depth, progress)
+                                              size, _prefix_sink(stream.write, keep), depth,
+                                              progress)
                 except DfuTransferError as exc:
                     raise DfuTransferError(str(exc) + _recovery_note(
                         session.device, session.interface)) from exc
@@ -695,6 +716,8 @@ def main(argv=None):
     direction.add_argument("-U", "--upload", type=Path, help="read the alternative into a new file")
     direction.add_argument("-D", "--download", type=Path, help="write this file to the alternative")
     parser.add_argument("-Z", "--upload-size", type=int, help="exact byte size of the alternative")
+    parser.add_argument("--prefix", type=int,
+                        help="save only this many leading bytes; the whole alternative is still read")
     parser.add_argument("--depth", type=int, default=DEFAULT_UPLOAD_DEPTH,
                         help="DFU_UPLOAD requests kept queued (default {})".format(DEFAULT_UPLOAD_DEPTH))
     parser.add_argument("--write-depth", type=int,
@@ -715,7 +738,7 @@ def main(argv=None):
                 args.alt, args.upload_size, args.depth), flush=True)
             count, transfer_size = upload(args.path, args.alt, args.upload, args.upload_size,
                                           args.depth, _ProgressPrinter("Upload", args.upload_size),
-                                          transfer_size=args.transfer_size)
+                                          transfer_size=args.transfer_size, prefix=args.prefix)
             print("Upload done.\nReceived a total of {} bytes in {}-byte blocks".format(
                 count, transfer_size), flush=True)
         else:
