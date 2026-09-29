@@ -2,6 +2,7 @@
 """Create a single Linux x86_64 Python zip application from explicit inputs."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -98,6 +99,22 @@ def main():
         if not candidate_loader_hash_matches(data[name], digest):
             parser.error(name + " does not embed exactly the pinned RAM loader hash.")
     data["loader.bin"] = loader
+
+    patch_sha = hashlib.sha256(_read_file(
+        parser, "ShofEL entry patch", ROOT / "patches/shofel2-dfu-entry.patch")).hexdigest()
+    manifest_path = args.shofel2.parent / "candidate-entry-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        files = manifest["files_sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error("ShofEL entry build manifest is missing or invalid: " + str(exc))
+    if manifest.get("patch_sha256") != patch_sha or \
+            manifest.get("loader_sha256") != digest or \
+            manifest.get("loader_size") != len(loader) or \
+            any(files.get(name) != hashlib.sha256(data["tools/" + name]).hexdigest()
+                for name in ("shofel2_t124", "intermezzo.bin", "dfu_stage2.bin")):
+        parser.error("ShofEL entry helper does not match the current patch and loader.")
+    data["entry-patch.sha256"] = (patch_sha + "\n").encode()
 
     sources = {
         "jibo_dfu.py": ROOT / "jibo_dfu.py",

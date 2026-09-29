@@ -1,5 +1,6 @@
 """Checks for stale or unusable cached packages; no USB access is needed."""
 
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,10 +19,16 @@ class CachedPackageTests(unittest.TestCase):
         self.source.mkdir()
         for name in check_package.SOURCES:
             (self.source / name).write_bytes(("content of " + name).encode())
+        patch_path = self.source / "patches/shofel2-dfu-entry.patch"
+        patch_path.parent.mkdir()
+        patch_path.write_bytes(b"test entry patch")
 
     def create_package(self, capability="1"):
         loader_hash = bytes.fromhex(check_package.PINNED_LOADER_SHA256)
         with zipfile.ZipFile(self.package, "w") as archive:
+            archive.writestr("entry-patch.sha256", hashlib.sha256(
+                (self.source / "patches/shofel2-dfu-entry.patch").read_bytes()
+            ).hexdigest() + "\n")
             for name in check_package.SOURCES:
                 archive.write(self.source / name, name)
             archive.write(check_package.ROOT / "assets/loader.bin", "loader.bin")
@@ -47,6 +54,13 @@ class CachedPackageTests(unittest.TestCase):
         ready, reason = check_package.check_package(self.package, self.source)
         self.assertFalse(ready)
         self.assertIn("jibo_tui.py", reason)
+
+    def test_changed_entry_patch_requires_rebuild(self):
+        self.create_package()
+        (self.source / "patches/shofel2-dfu-entry.patch").write_bytes(b"new entry patch")
+        ready, reason = check_package.check_package(self.package, self.source)
+        self.assertFalse(ready)
+        self.assertIn("entry patch has changed", reason)
 
 
 if __name__ == "__main__":

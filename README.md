@@ -12,9 +12,9 @@ The guided menu enables DFU entry when the robot is in RCM and partition actions
 If you are here to mod a stock robot, use the guided menu to change its existing installation to `int-developer` mode. **If the robot has not joined your Wi-Fi yet, configure Wi-Fi in the toolkit too:** changing the mode alone does not give it a network connection.
 
 1. Start the toolkit with `./run.sh` on Linux or `.\run.ps1` from PowerShell on a Windows PC with WSL 2. Connect one robot by USB and put it in RCM/APX mode.
-2. Choose **Enter DFU with ShofEL (RAM loader)**. Wait for the menu to show the robot in DFU. The included RAM entry profile is Meerkat Rev02; see [hardware coverage](#hardware-results-and-remaining-work) before using it on another board revision.
+2. Choose **Enter DFU with ShofEL (RAM loader)**. Wait for the menu to show the robot in DFU. The included Meerkat Rev02 entry selects RAM slot 2 or 3 from the hardware strap; slot 3 has only offline checks so far. See [hardware coverage](#hardware-results-and-remaining-work) for other revisions.
 3. If the robot already has your Wi-Fi saved, choose **Set robot mode** and select **int-developer**. If it has never connected to your Wi-Fi, choose **Set mode and add Wi-Fi**, select **int-developer**, then enter your Wi-Fi name and password. That action applies both settings together.
-4. Review and confirm the change. The toolkit saves or reuses a `var` rollback backup and checks the result. If the quick file edit is unavailable, choose the offered full `var` transfer and leave the robot connected until readback finishes.
+4. Review and confirm the change. The toolkit saves or reuses a `var` rollback backup and checks the result. After a fresh RTM flash, the stock Wi-Fi file can be too large for the quick editor; if the menu offers a full `var` transfer, choose it and leave the robot connected until readback finishes.
 5. When the toolkit reports the change verified, restart the robot normally.
 
 ## Linux quick start
@@ -35,13 +35,35 @@ The first build needs an internet connection for ShofEL and package installation
 
 ## Windows with WSL
 
-Use a Windows laptop with an **existing WSL 2 Linux distribution** and [usbipd-win](https://github.com/dorssel/usbipd-win) installed. The PowerShell launcher does not install WSL. Open PowerShell in the downloaded or cloned toolkit folder and run:
+Use an x64 Windows PC with WSL 2 and Ubuntu. For a first-time setup, open **PowerShell as Administrator** and install WSL with Ubuntu 22.04 LTS:
 
 ```powershell
-.\run.ps1
+wsl --install -d Ubuntu-22.04
 ```
 
-It selects a WSL 2 distribution, shares and attaches a connected Jibo USB device, then runs `run.sh` inside WSL. The robot can change from APX (`0955:7740`) to DFU (`0955:701a`); the launcher watches both USB identities while the menu is open. Sharing a new USB identity may show a Windows administrator prompt. Run `.\run.ps1 -ManualUsb` if you prefer to attach from another PowerShell window with `usbipd bind --busid <BUSID>` (administrator) and `usbipd attach --wsl --busid <BUSID>`. The Linux `./run.sh` also works directly inside WSL with manual USB attachment. If PowerShell's script policy blocks the launcher, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1` for that invocation.
+Restart Windows if prompted, then open **Ubuntu 22.04** once to create its Linux username and password. In PowerShell, update WSL and check that Ubuntu shows `VERSION 2`:
+
+```powershell
+wsl --update
+wsl --list --verbose
+```
+
+If Ubuntu shows `VERSION 1`, run `wsl --set-version Ubuntu-22.04 2`. Install [usbipd-win](https://github.com/dorssel/usbipd-win) from PowerShell with Windows Package Manager, then reopen PowerShell so `usbipd` is on your path:
+
+```powershell
+winget install --interactive --exact dorssel.usbipd-win
+usbipd list
+```
+
+If `winget` is unavailable, install the `.msi` from the [usbipd-win releases](https://github.com/dorssel/usbipd-win/releases). [Microsoft's WSL instructions](https://learn.microsoft.com/windows/wsl/install), [Ubuntu's WSL guide](https://ubuntu.com/wsl/docs/latest/howto/install-ubuntu-wsl2/), and [Microsoft's USB connection guide](https://learn.microsoft.com/windows/wsl/connect-usb) cover the setup and USB prerequisites.
+
+Open PowerShell in the downloaded or cloned toolkit folder and run:
+
+```powershell
+.\run.ps1 -Distro Ubuntu-22.04
+```
+
+The launcher selects that WSL 2 distribution, shares and attaches a connected Jibo USB device, then runs `run.sh` inside WSL. The robot can change from APX (`0955:7740`) to DFU (`0955:701a`); the launcher watches both USB identities while the menu is open. Sharing a new USB identity may show a Windows administrator prompt. Run `.\run.ps1 -Distro Ubuntu-22.04 -ManualUsb` if you prefer to attach from another PowerShell window with `usbipd bind --busid <BUSID>` (administrator) and `usbipd attach --wsl --busid <BUSID>`. The Linux `./run.sh` also works directly inside WSL with manual USB attachment. If PowerShell's script policy blocks the launcher, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Distro Ubuntu-22.04` for that invocation.
 
 macOS support is deferred.
 
@@ -76,7 +98,7 @@ To rebuild the loader itself, extract `vendor/jibo-ram-dfu-v1-source.tar.gz` and
 See [RTM images and factory calibration](docs/rtm-images-and-calibration.md)
 for the archived RTM packages and the factory's calibration steps.
 
-With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refreshes the robot state and available actions automatically when USB changes; `r` also refreshes manually. The current loader uses the Meerkat Rev02 RAM profile confirmed on Moth, so select it only for a robot whose hardware profile matches. Once DFU is active, the menu offers:
+With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The menu refreshes the robot state and available actions automatically when USB changes; `r` also refreshes manually. The current loader uses Meerkat Rev02 RAM slots 2 and 3; only slot 2 has been confirmed on hardware. Select it for a robot whose hardware profile matches. Once DFU is active, the menu offers:
 
 | Action | What it does |
 | --- | --- |
@@ -123,4 +145,6 @@ On Moth, ShofEL started the RAM loader and the robot entered DFU on the same USB
 
 A mode change to `int-developer` has also been confirmed on a connected Jibo. The owner has verified the Windows/WSL USB helper through RCM-to-DFU reattachment, other USB state changes, unplug/replug, and power-off/power-on. On Aero, a compact 13.0.0 package transfer with preserved `var` completed and the robot booted. The first-boot resize tag was written after the script's `set -e` resize sequence. Live SSH inspection found rootfsA, rootfsB, and services ext4 block counts exactly equal to their GPT partition sizes; skills occupies all but 2,560 bytes of its 10,991,139,328-byte partition. `var` retained `int-developer` and its original 500 MiB size. Selectable GPT partition backup and restore are implemented but have not yet been checked end to end on hardware. A raw full eMMC user-area backup and restore are not implemented. The toolkit does not enable SSH.
 
-The current ShofEL entry uses the Meerkat Rev02 SDRAM initialization profile verified on Moth. **Board-profile selection** means choosing RAM initialization parameters before the DFU loader can run. The current `RAM_CODE=2` strap does not distinguish all board revisions, so the toolkit does not guess a profile from USB identity alone. [Jibo's board history](https://pvindex.org/confluence/display/ENG/Boards,+Revisions+and+History) lists multiple JB1001 and JB1014 mainboard revisions, but does not establish how many distinct SDRAM profiles those robots need. Supporting more robots requires a reliable identifier readable before RAM initialization, matching parameter sets, and hardware checks on representative revisions. Automatic selection and coverage beyond the tested profile remain open work.
+The official 5.4.2 and 13.0.0 flash packages each include one `u-boot-flasher.bin` and one base `meerkat_rev02.bct` (plus its signed copy). Their base BCT files are byte-identical, but `bct_dump` shows **two distinct DDR3 configurations**, in RAM slots 2 and 3; two EMC timing fields differ. Jibo's `flash-dfu.sh` passes the BCT and flasher separately to `tegrarcm`, supplying those RAM configurations through the BCT. [Jibo's archived flashing instructions](https://pvindex.org/confluence/display/ENG/Building+a+single+step+flash+system+for+Jibo) also prescribe different build configurations for EVT and DVT2, with an explicit Meerkat Rev02 BCT selection for DVT2. One bundled flasher binary therefore does not establish that every board revision uses the same RAM entry path.
+
+The toolkit's ShofEL entry now selects the official Meerkat Rev02 **RAM slot 2 or 3** profile from the robot's RAM strap and rejects other codes before initializing RAM. The prior slot 2 entry passed live DFU checks on Moth. The new two-slot build passes compilation and offline profile checks, but has not yet been run on a robot with slot 3. [Jibo's board history](https://pvindex.org/confluence/display/ENG/Boards,+Revisions+and+History) identifies shipping JB1014 mainboard revisions, while its [board ID table](https://pvindex.org/confluence/display/ENG/Mainboard+(JB1014)+Board+ID+Resistor+Definitions) describes separate board ID straps; neither source maps those revisions to Tegra `RAM_CODE`. The distribution of slots 2 and 3 among robots is therefore unknown. Earlier EVT hardware also had a different flashing configuration, so coverage of every robot still needs evidence and a live check on a slot 3 unit.

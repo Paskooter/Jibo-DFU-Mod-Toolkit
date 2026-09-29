@@ -26,6 +26,10 @@ TOOLS = ("tools/shofel2_t124", "tools/intermezzo.bin",
 def check_package(path, source_root=ROOT):
     try:
         with zipfile.ZipFile(path) as archive:
+            patch_hash = hashlib.sha256(
+                (source_root / "patches/shofel2-dfu-entry.patch").read_bytes()).hexdigest()
+            if archive.read("entry-patch.sha256").decode().strip() != patch_hash:
+                return False, "the ShofEL entry patch has changed since the package was built"
             for name in SOURCES:
                 if archive.read(name) != (source_root / name).read_bytes():
                     return False, name + " has changed since the package was built"

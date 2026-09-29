@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 from contextlib import redirect_stderr
 from pathlib import Path
 import subprocess
@@ -36,6 +37,19 @@ class PackageTests(unittest.TestCase):
         self.dfu_stage.write_bytes(b"DFU stage payload" + loader_hash)
         self.dfu_util.write_bytes(b"dfu-util executable")
         self.output = self.root / "jibo-tool.pyz"
+        patch_sha = hashlib.sha256(
+            (package.ROOT / "patches/shofel2-dfu-entry.patch").read_bytes()).hexdigest()
+        (self.shofel_dir / "candidate-entry-manifest.json").write_text(json.dumps({
+            "patch_sha256": patch_sha,
+            "loader_sha256": hashlib.sha256(self.padded_loader).hexdigest(),
+            "loader_size": len(self.padded_loader),
+            "files_sha256": {
+                name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for name, path in (("shofel2_t124", self.shofel),
+                                   ("intermezzo.bin", self.intermezzo),
+                                   ("dfu_stage2.bin", self.dfu_stage))
+            },
+        }))
 
     def argv(self, *extra):
         return ["package.py", "--loader", str(self.loader),
@@ -56,7 +70,7 @@ class PackageTests(unittest.TestCase):
         self.run_package()
 
         expected = {
-            "__main__.py", "loader.bin", "README.md", "jibo_dfu.py",
+            "__main__.py", "loader.bin", "entry-patch.sha256", "README.md", "jibo_dfu.py",
             "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py", "jibo_images.py",
             "jibo_updates.py", "jibo_tui.py",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
@@ -71,6 +85,9 @@ class PackageTests(unittest.TestCase):
                              b"DFU stage payload" + hashlib.sha256(self.padded_loader).digest())
             self.assertEqual(archive.read("tools/dfu-util"), b"dfu-util executable")
             self.assertEqual(archive.read("__main__.py").decode(), package.BOOTSTRAP)
+            self.assertEqual(archive.read("entry-patch.sha256").decode().strip(),
+                             hashlib.sha256((package.ROOT / "patches/shofel2-dfu-entry.patch")
+                                            .read_bytes()).hexdigest())
             self.assertFalse(any(name.startswith("bundles/") for name in archive.namelist()))
             for obsolete in ("tools/tegrarcm", "lib/libcryptopp.so", "tools/emmc_server.bin",
                              "tools/dram_probe.bin", "tools/dram_trace.bin"):
@@ -157,6 +174,17 @@ class PackageTests(unittest.TestCase):
         with redirect_stderr(errors), self.assertRaises(SystemExit):
             self.run_package()
         self.assertIn("dfu_stage2.bin does not embed exactly", errors.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_stale_entry_manifest_is_rejected(self):
+        manifest_path = self.shofel_dir / "candidate-entry-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["patch_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest))
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit):
+            self.run_package()
+        self.assertIn("does not match the current patch", errors.getvalue())
         self.assertFalse(self.output.exists())
 
 

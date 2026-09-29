@@ -1,8 +1,8 @@
 diff --git a/Makefile b/Makefile
-index 2e4d38e..51fdd17 100644
+index 2e4d38e..1563c03 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -1,21 +1,43 @@
+@@ -1,21 +1,44 @@
  CFLAGS := -Wall -Werror -I include -MMD
  
 -BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin
@@ -21,6 +21,7 @@ index 2e4d38e..51fdd17 100644
 +test: test_sha256 test_stage2_artifact test_emmc_boot0_protocol
 +	./test_sha256
 +	./test_emmc_boot0_protocol
++	python3 tests/check_ram_profiles.py
 +
 +# Catch a silently garbage-collected stage-2 payload before it can be packaged.
 +NM_ARM = $(TOOLCHAIN_ARM)nm
@@ -48,7 +49,7 @@ index 2e4d38e..51fdd17 100644
  shofel2_t124: $(OBJ_FILES_x86)
  	$(CC_x86) $(CFLAGS_x86) -o $@ $^
  
-@@ -29,20 +51,47 @@ CC_ARM = $(TOOLCHAIN_ARM)gcc
+@@ -29,20 +52,48 @@ CC_ARM = $(TOOLCHAIN_ARM)gcc
  AS_ARM = $(TOOLCHAIN_ARM)as
  OBJCOPY_ARM = $(TOOLCHAIN_ARM)objcopy
  
@@ -72,7 +73,8 @@ index 2e4d38e..51fdd17 100644
 +	-Wno-unused-parameter -Wno-address-of-packed-member -Wno-unused-variable
 +RAMINIT_OBJ_FILES := build/obj_arm/raminit_run.o \
 +	build/obj_arm/raminit_clock.o build/obj_arm/raminit_sdram.o \
-+	build/obj_arm/raminit_params.o build/obj_arm/raminit_timerus.o \
++	build/obj_arm/raminit_params.o build/obj_arm/raminit_params3.o \
++	build/obj_arm/raminit_timerus.o \
 +	build/obj_arm/raminit_lp0.o
 +CFLAGS_ARM += $(RAMINIT_INCLUDES)
 +DFU_STAGE2_SHARED_OBJ_FILES := \
@@ -98,7 +100,7 @@ index 2e4d38e..51fdd17 100644
  build/reset_example.elf: build/obj_arm/reset_example.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
-@@ -61,6 +110,56 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
+@@ -61,6 +112,59 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
  build/intermezzo.elf: build/obj_arm/intermezzo.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
@@ -121,6 +123,9 @@ index 2e4d38e..51fdd17 100644
 +	$(CC_ARM) $(RAMINIT_CFLAGS_ARM) -c -o $@ $<
 +
 +build/obj_arm/raminit_params.o: $(RAMINIT_DIR)/jibo-meerkat-ramcode2-v1.c
++	$(CC_ARM) $(RAMINIT_CFLAGS_ARM) -c -o $@ $<
++
++build/obj_arm/raminit_params3.o: $(RAMINIT_DIR)/jibo-meerkat-ramcode3-v1.c
 +	$(CC_ARM) $(RAMINIT_CFLAGS_ARM) -c -o $@ $<
 +
 +build/obj_arm/raminit_timerus.o: $(RAMINIT_DIR)/timerus.c
@@ -155,7 +160,7 @@ index 2e4d38e..51fdd17 100644
  %.bin: build/%.elf
  	$(OBJCOPY_ARM) -O binary $< $@
  
-@@ -68,9 +167,9 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
+@@ -68,9 +172,9 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
  
  
  clean:
@@ -169,7 +174,7 @@ index 2e4d38e..51fdd17 100644
  	rm -f build/obj_arm/*.d build/obj_x86/*.d
 -
 diff --git a/README.md b/README.md
-index 64a09fe..3bb1222 100644
+index 64a09fe..a8f9cc0 100644
 --- a/README.md
 +++ b/README.md
 @@ -29,6 +29,30 @@ Usage
@@ -196,8 +201,8 @@ index 64a09fe..3bb1222 100644
 +derives eMMC page size from CSD `READ_BL_LEN` and locates the next copy at
 +`PagesPerBct` pages; this verifier requires that copy to begin at byte 8192 so
 +both complete early copies fit in the captured prefix.
-+The verifier compares all normalized SDRAM[2] fields against the bundled
-+Jibo 5.4.2 profile. It rejects any parseable early copy with different
++The verifier compares all normalized SDRAM[2] and SDRAM[3] fields against the
++bundled Jibo 5.4.2 profiles. It rejects any parseable early copy with different
 +parameters. `bct_dump` parseability does not verify BootROM signatures, and
 +copies in later boot0 journal blocks are outside the captured prefix.
      
@@ -210,10 +215,10 @@ index 64a09fe..3bb1222 100644
 -
 diff --git a/STAGE2-PROBE.md b/STAGE2-PROBE.md
 new file mode 100644
-index 0000000..ed306ca
+index 0000000..b7a20fe
 --- /dev/null
 +++ b/STAGE2-PROBE.md
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,136 @@
 +# T124 DRAM probe and DFU-loader route
 +
 +`DRAM_STATUS` is the first stage of a ShofEL-to-DFU route. It launches a
@@ -273,10 +278,11 @@ index 0000000..ed306ca
 +Inside one ShofEL EP1 session, the payload then:
 +
 +1. Reads and reports the raw PMC strap and decoded RAM_CODE. It stops unless
-+   the code is 2 and the host sends the explicit profile token enabled by
++   the code is 2 or 3 and the host sends the explicit profile token enabled by
 +   `--confirm-meerkat-rev02`.
 +2. Calls the vendored Coreboot T124 `sdram_init()` with the generated Jibo
-+   Meerkat RAM_CODE 2 parameters. It deliberately avoids the broad
++   Meerkat parameters for that RAM_CODE. Slot 3 differs from slot 2 in two
++   EMC wait count fields. It deliberately avoids the broad
 +   `clock_init()` path, which also changes USB PLL/UTMIP state. It requires
 +   the expected 2048 MiB range and a passing, restored 16-byte DRAM scratch
 +   check before returning to the receiver. It does not rely on the invalid
@@ -622,7 +628,7 @@ index 5343eaa..6525642 100644
 +    return 0;
 +}
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..be26666 100644
+index 9e49a2f..bd0706b 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -645,7 +651,7 @@ index 9e49a2f..be26666 100644
  
  #include <sys/stat.h>
  #include <time.h>
-@@ -26,9 +32,492 @@ void print_hex_memory( void *mem, size_t size ) {
+@@ -26,9 +32,500 @@ void print_hex_memory( void *mem, size_t size ) {
    printf( "\n" );
  }
  
@@ -852,6 +858,11 @@ index 9e49a2f..be26666 100644
 +    return names[phase];
 +}
 +
++static int jibo_ram_code_supported(uint32_t ram_code)
++{
++    return ram_code == 2u || ram_code == 3u;
++}
++
 +static int run_jibo_raminit(int rcm_usb, int confirm_meerkat_rev02,
 +                            struct jibo_raminit_host_status *status)
 +{
@@ -926,7 +937,8 @@ index 9e49a2f..be26666 100644
 +            return -1;
 +        }
 +
-+        if (event.phase == JIBO_RAMINIT_RAM_CODE && event.value == 2u) {
++        if (event.phase == JIBO_RAMINIT_RAM_CODE &&
++            jibo_ram_code_supported(event.value)) {
 +            const char *profile_token = confirm_meerkat_rev02 ?
 +                JIBO_RAMINIT_PROFILE_MAGIC : "JHLD";
 +            if (send_profile_token(rcm_usb, profile_token) < 0) {
@@ -961,10 +973,12 @@ index 9e49a2f..be26666 100644
 +            (1u << JIBO_RAMINIT_SCRATCH_RESTORE_FLAGS) |
 +            (1u << JIBO_RAMINIT_DONE);
 +        if ((status->seen_phases & required_phases) != required_phases ||
-+            status->done_value != 1u || status->ram_code != 2u ||
++            status->done_value != 1u ||
++            !jibo_ram_code_supported(status->ram_code) ||
 +            ((status->raw_strapping_opt_a & DFU_STAGE2_RAM_CODE_MASK) >>
-+             DFU_STAGE2_RAM_CODE_SHIFT) != 2u ||
-+            status->profile_gate != 1u || status->init_before != 2u ||
++             DFU_STAGE2_RAM_CODE_SHIFT) != status->ram_code ||
++            status->profile_gate != 1u ||
++            status->init_before != status->ram_code ||
 +            status->init_after != 1u ||
 +            status->dram_size_mb != DFU_STAGE2_EXPECTED_DRAM_SIZE_MB ||
 +            status->range_flags != 0x0fu ||
@@ -1135,11 +1149,11 @@ index 9e49a2f..be26666 100644
 +                "\t* --bus-width 8 -> Opt in to a verified 8-bit bus for EMMC_READ only (default: 1-bit).\n"
 +                "\t* DRAM_STATUS -> Reports read-only T124 DRAM/EMC state; tests 16 bytes at 0x80108000 only when the register gate passes.\n"
 +                "\t* DRAM_TRACE -> Reads T124 DRAM/EMC state one operation at a time, with EP1 ACKs between phases.\n"
-+                "\t* DFU_STAGE loader.bin --confirm-meerkat-rev02 [--launch] -> Explicitly confirms the SDRAM profile, initializes RAM, then verifies/stages the pinned 415088-byte RAM DFU image; no eMMC access. SPL launch is compile-time gated.\n"
++                "\t* DFU_STAGE loader.bin --confirm-meerkat-rev02 [--launch] -> Explicitly confirms the SDRAM profile, selects BCT RAM slot 2 or 3 by strap, initializes RAM, then verifies/stages the pinned 415088-byte RAM DFU image; no eMMC access. SPL launch is compile-time gated.\n"
                  "\t* MEM_DUMP address length out_file -> Dumps \"length\" bytes starting from \"address\" to \"out_file\".\n"
                  "\t* READ_FUSES out_file -> Dumps the T124 fuses to \"out_file\" and show them in console.\n"
                  "\t* BOOT_BCT -> Boots BCT without applying locks.\n"
-@@ -38,12 +527,18 @@ void print_help() {
+@@ -38,12 +535,18 @@ void print_help() {
                  "\t* EMMC_READ start_sector num_sectors out_file -> Reads eMMC sectors to file (hex values).\n"
                  "\t* EMMC_WRITE start_sector in_file -> Writes file to eMMC at start_sector (hex value).\n"
                  "\t* EMMC_READ_EXT_CSD out_file -> Reads 512-byte EXT_CSD register (chip health/config info).\n"
@@ -1158,7 +1172,7 @@ index 9e49a2f..be26666 100644
      int _ret_main = -1;
      int rcm_usb = 0;
  
-@@ -53,6 +548,11 @@ int main( int argc, char *argv[] ) {
+@@ -53,6 +556,11 @@ int main( int argc, char *argv[] ) {
  
      char *payload_filename = NULL;
      uint32_t payload_thumb_mode = 1;
@@ -1170,7 +1184,7 @@ index 9e49a2f..be26666 100644
  
      uint8_t *dump = NULL;
      uint32_t dump_start = 0;
-@@ -60,15 +560,60 @@ int main( int argc, char *argv[] ) {
+@@ -60,15 +568,60 @@ int main( int argc, char *argv[] ) {
      char *dump_filename;
      int dump_fd = -1;
      uint8_t do_print_fuse = 0;
@@ -1232,7 +1246,7 @@ index 9e49a2f..be26666 100644
      if ( argc < 2 ) {
          fprintf( stderr, "Error: invalid argument count.\n\n" );
          print_help();
-@@ -106,6 +651,57 @@ int main( int argc, char *argv[] ) {
+@@ -106,6 +659,57 @@ int main( int argc, char *argv[] ) {
          }
          payload_filename = "boot_bct.bin";
  
@@ -1290,7 +1304,7 @@ index 9e49a2f..be26666 100644
      } else if ( !strcmp( argv[1], "PAYLOAD" ) ) {
  
          if ( ( argc != 3 ) && ( argc != 4 ) ) {
-@@ -180,6 +776,16 @@ int main( int argc, char *argv[] ) {
+@@ -180,6 +784,16 @@ int main( int argc, char *argv[] ) {
          sscanf( argv[3], "%x", &emmc_num_sectors );  /* Reusing num_sectors for end_sector */
          emmc_mode = 5;
  
@@ -1307,7 +1321,7 @@ index 9e49a2f..be26666 100644
      } else {
  
          fprintf( stderr, "Error: invalid command.\n\n" );
-@@ -188,6 +794,37 @@ int main( int argc, char *argv[] ) {
+@@ -188,6 +802,37 @@ int main( int argc, char *argv[] ) {
  
      }
  
@@ -1345,7 +1359,7 @@ index 9e49a2f..be26666 100644
    // --------------------
    
  
-@@ -195,11 +832,11 @@ int main( int argc, char *argv[] ) {
+@@ -195,11 +840,11 @@ int main( int argc, char *argv[] ) {
  
      printf( "Waiting T124 to enter RCM mode (ctrl-c to cancel). Note: root permission could be required.\n" );
      printf( "Trying Jetson TK1 (0x7140), Shield TK1 (0x7f40), Jibo (0x7740)...\n" );
@@ -1360,7 +1374,7 @@ index 9e49a2f..be26666 100644
      printf( "K1 in RCM mode connected.\n" );
      if ( rcm_usb < 0 ) {
          fprintf( stderr, "Error: Couldn't open the usb.\n" );
-@@ -251,6 +888,63 @@ int main( int argc, char *argv[] ) {
+@@ -251,6 +896,63 @@ int main( int argc, char *argv[] ) {
  
    //----------------------
  
@@ -1424,7 +1438,7 @@ index 9e49a2f..be26666 100644
  
    // --- MEM DUMP CMD ----
  
-@@ -464,8 +1158,24 @@ int main( int argc, char *argv[] ) {
+@@ -464,8 +1166,24 @@ int main( int argc, char *argv[] ) {
  
          if ( emmc_mode == 2 ) { /* EMMC_READ */
  
@@ -1451,7 +1465,7 @@ index 9e49a2f..be26666 100644
  
              printf( "Reading %u (0x%x) sectors starting from sector %u (0x%x)...\n",
                      emmc_num_sectors, emmc_num_sectors, emmc_start_sector, emmc_start_sector );
-@@ -473,34 +1183,111 @@ int main( int argc, char *argv[] ) {
+@@ -473,34 +1191,111 @@ int main( int argc, char *argv[] ) {
                      (unsigned long long)emmc_num_sectors * EMMC_SECTOR_SIZE,
                      (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0) );
  
@@ -1571,14 +1585,14 @@ index 9e49a2f..be26666 100644
                      time_t elapsed = time(NULL) - start_time;
                      double mb_done = (double)sectors_done * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
                      double mb_total = (double)emmc_num_sectors * EMMC_SECTOR_SIZE / (1024.0 * 1024.0);
-@@ -508,13 +1295,282 @@ int main( int argc, char *argv[] ) {
+@@ -508,13 +1303,282 @@ int main( int argc, char *argv[] ) {
                      printf( "\r  Progress: %.1f / %.1f MB (%.1f%%) [%lds]   ",
                              mb_done, mb_total, pct, (long)elapsed );
                      fflush( stdout );
 +                    next_progress_sector += 8000;
-+                }
-+            }
-+
+                 }
+             }
+ 
 +            struct timespec read_finished;
 +            if ( have_read_start_time && clock_gettime(CLOCK_MONOTONIC, &read_finished) == 0 ) {
 +                double transfer_seconds = (double)(read_finished.tv_sec - read_started.tv_sec) +
@@ -1607,9 +1621,9 @@ index 9e49a2f..be26666 100644
 +                if ( emmc_read_error || emmc_output_error ) {
 +                    printf( "Error: Read or output failed; temporary dump discarded.\n" );
 +                    goto emmc_exit;
-                 }
-             }
- 
++                }
++            }
++
 +            if ( dump_fd >= 0 ) {
 +                if ( close(dump_fd) < 0 ) {
 +                    dump_fd = -1;
@@ -1854,7 +1868,7 @@ index 9e49a2f..be26666 100644
          if ( emmc_mode == 3 ) { /* EMMC_WRITE */
  
              int in_fd = open( emmc_filename, O_RDONLY );
-@@ -546,7 +1602,7 @@ int main( int argc, char *argv[] ) {
+@@ -546,7 +1610,7 @@ int main( int argc, char *argv[] ) {
              time_t start_time = time(NULL);
  
              while ( remaining > 0 ) {
@@ -1863,7 +1877,7 @@ index 9e49a2f..be26666 100644
                  uint32_t batch_bytes = batch * EMMC_SECTOR_SIZE;
  
                  int n = read( in_fd, chunk_buf, batch_bytes );
-@@ -663,6 +1719,15 @@ int main( int argc, char *argv[] ) {
+@@ -663,6 +1727,15 @@ int main( int argc, char *argv[] ) {
          }
  
  emmc_exit:
@@ -1879,7 +1893,7 @@ index 9e49a2f..be26666 100644
          if ( chunk_buf ) {
              free( chunk_buf );
              chunk_buf = NULL;
-@@ -686,8 +1751,8 @@ exit:
+@@ -686,8 +1759,8 @@ exit:
      if ( dump ) free( dump );
      if ( dump_fd > 0 ) close( dump_fd );
      if ( data ) free( data );
@@ -2405,7 +2419,7 @@ index 7d73596..57d8805 100644
 -
 diff --git a/payloads/dfu_stage2.c b/payloads/dfu_stage2.c
 new file mode 100644
-index 0000000..e24d716
+index 0000000..afd7330
 --- /dev/null
 +++ b/payloads/dfu_stage2.c
 @@ -0,0 +1,291 @@
@@ -2514,10 +2528,10 @@ index 0000000..e24d716
 +static int raminit_status_is_valid(const struct jibo_raminit_status *status)
 +{
 +    return status->result == JIBO_RAMINIT_OK &&
-+           status->ram_code == 2u &&
++           (status->ram_code == 2u || status->ram_code == 3u) &&
 +           ((status->raw_strapping_opt_a &
 +             DFU_STAGE2_RAM_CODE_MASK) >>
-+            DFU_STAGE2_RAM_CODE_SHIFT) == 2u &&
++            DFU_STAGE2_RAM_CODE_SHIFT) == status->ram_code &&
 +           status->dram_size_mb == DFU_STAGE2_EXPECTED_DRAM_SIZE_MB &&
 +           status->range_flags == 0x0fu &&
 +           status->scratch_restore_flags == 0xffu &&
@@ -6018,6 +6032,332 @@ index 0000000..1fcb7d9
 +	.McMtsCarveoutSizeMb                        = 0x00000000,
 +	.McMtsCarveoutRegCtrl                       = 0x00000000,
 +};
+diff --git a/payloads/raminit/jibo-meerkat-ramcode3-v1.c b/payloads/raminit/jibo-meerkat-ramcode3-v1.c
+new file mode 100644
+index 0000000..0d125fb
+--- /dev/null
++++ b/payloads/raminit/jibo-meerkat-ramcode3-v1.c
+@@ -0,0 +1,320 @@
++/* Generated by extract_sdram_params.py; do not edit. */
++/* params_sha256: 7aa77b314df08e19cf7018d3372964326e576ddaa0e9a77592d66afe60c18969 */
++#include <stddef.h>
++#define check_member(type, member, offset) \
++	_Static_assert(offsetof(struct type, member) == (offset), \
++		"Coreboot BCT struct member offset mismatch")
++#include "vendor/coreboot-t124/sdram_param.h"
++#undef check_member
++
++const struct sdram_params jibo_ramcode3_sdram_params = {
++	.MemoryType                                 = NvBootMemoryType_Ddr3,
++	.PllMInputDivider                           = 0x00000001,
++	.PllMFeedbackDivider                        = 0x0000002c,
++	.PllMStableTime                             = 0x0000012c,
++	.PllMSetupControl                           = 0x00000000,
++	.PllMSelectDiv2                             = 0x00000000,
++	.PllMPDLshiftPh45                           = 0x00000001,
++	.PllMPDLshiftPh90                           = 0x00000001,
++	.PllMPDLshiftPh135                          = 0x00000001,
++	.PllMKCP                                    = 0x00000000,
++	.PllMKVCO                                   = 0x00000000,
++	.EmcBctSpare0                               = 0x00000000,
++	.EmcBctSpare1                               = 0x00000000,
++	.EmcBctSpare2                               = 0x00000000,
++	.EmcBctSpare3                               = 0x00000000,
++	.EmcBctSpare4                               = 0x00000000,
++	.EmcBctSpare5                               = 0x00000000,
++	.EmcBctSpare6                               = 0x00000000,
++	.EmcBctSpare7                               = 0x00000000,
++	.EmcBctSpare8                               = 0x00000000,
++	.EmcBctSpare9                               = 0x00000000,
++	.EmcBctSpare10                              = 0x00000000,
++	.EmcBctSpare11                              = 0x00000000,
++	.EmcClockSource                             = 0x80000000,
++	.EmcAutoCalInterval                         = 0x001fffff,
++	.EmcAutoCalConfig                           = 0xa1430000,
++	.EmcAutoCalConfig2                          = 0x00000000,
++	.EmcAutoCalConfig3                          = 0x00000000,
++	.EmcAutoCalWait                             = 0x00000190,
++	.EmcAdrCfg                                  = 0x00000000,
++	.EmcPinProgramWait                          = 0x00000001,
++	.EmcPinExtraWait                            = 0x00000000,
++	.EmcTimingControlWait                       = 0x00000000,
++	.EmcRc                                      = 0x00000018,
++	.EmcRfc                                     = 0x00000088,
++	.EmcRfcSlr                                  = 0x00000000,
++	.EmcRas                                     = 0x00000010,
++	.EmcRp                                      = 0x00000006,
++	.EmcR2r                                     = 0x00000000,
++	.EmcW2w                                     = 0x00000000,
++	.EmcR2w                                     = 0x00000006,
++	.EmcW2r                                     = 0x00000009,
++	.EmcR2p                                     = 0x00000002,
++	.EmcW2p                                     = 0x0000000d,
++	.EmcRdRcd                                   = 0x00000006,
++	.EmcWrRcd                                   = 0x00000006,
++	.EmcRrd                                     = 0x00000002,
++	.EmcRext                                    = 0x00000002,
++	.EmcWext                                    = 0x00000000,
++	.EmcWdv                                     = 0x00000003,
++	.EmcWdvMask                                 = 0x00000003,
++	.EmcQUse                                    = 0x00000006,
++	.EmcQuseWidth                               = 0x00000002,
++	.EmcIbdly                                   = 0x00000000,
++	.EmcEInput                                  = 0x00000001,
++	.EmcEInputDuration                          = 0x00000009,
++	.EmcPutermExtra                             = 0x00030000,
++	.EmcPutermWidth                             = 0x00000003,
++	.EmcPutermAdj                               = 0x00000000,
++	.EmcCdbCntl1                                = 0x00000000,
++	.EmcCdbCntl2                                = 0x00000000,
++	.EmcCdbCntl3                                = 0x00000000,
++	.EmcQRst                                    = 0x00000000,
++	.EmcQSafe                                   = 0x00000010,
++	.EmcRdv                                     = 0x00000012,
++	.EmcRdvMask                                 = 0x00000014,
++	.EmcQpop                                    = 0x0000000a,
++	.EmcCtt                                     = 0x00000000,
++	.EmcCttDuration                             = 0x00000003,
++	.EmcRefresh                                 = 0x00000fd6,
++	.EmcBurstRefreshNum                         = 0x00000000,
++	.EmcPreRefreshReqCnt                        = 0x000003f5,
++	.EmcPdEx2Wr                                 = 0x00000002,
++	.EmcPdEx2Rd                                 = 0x0000000b,
++	.EmcPChg2Pden                               = 0x00000001,
++	.EmcAct2Pden                                = 0x00000000,
++	.EmcAr2Pden                                 = 0x00000084,
++	.EmcRw2Pden                                 = 0x00000012,
++	.EmcTxsr                                    = 0x0000008f,
++	.EmcTxsrDll                                 = 0x00000200,
++	.EmcTcke                                    = 0x00000004,
++	.EmcTckesr                                  = 0x00000005,
++	.EmcTpd                                     = 0x00000004,
++	.EmcTfaw                                    = 0x00000010,
++	.EmcTrpab                                   = 0x00000000,
++	.EmcTClkStable                              = 0x00000006,
++	.EmcTClkStop                                = 0x00000006,
++	.EmcTRefBw                                  = 0x00001017,
++	.EmcFbioCfg5                                = 0x104ab098,
++	.EmcFbioCfg6                                = 0x00000000,
++	.EmcFbioSpare                               = 0x00000000,
++	.EmcCfgRsv                                  = 0xff00ff00,
++	.EmcMrs                                     = 0x80000941,
++	.EmcEmrs                                    = 0x80100002,
++	.EmcEmrs2                                   = 0x80200008,
++	.EmcEmrs3                                   = 0x80300000,
++	.EmcMrw1                                    = 0x00000000,
++	.EmcMrw2                                    = 0x00000000,
++	.EmcMrw3                                    = 0x00000000,
++	.EmcMrw4                                    = 0x00000000,
++	.EmcMrwExtra                                = 0x00000000,
++	.EmcWarmBootMrwExtra                        = 0x00000000,
++	.EmcWarmBootExtraModeRegWriteEnable         = 0x00000000,
++	.EmcExtraModeRegWriteEnable                 = 0x00000000,
++	.EmcMrwResetCommand                         = 0x00000000,
++	.EmcMrwResetNInitWait                       = 0x00000000,
++	.EmcMrsWaitCnt                              = 0x013a000e,
++	.EmcMrsWaitCnt2                             = 0x013a000e,
++	.EmcCfg                                     = 0x73300000,
++	.EmcCfg2                                    = 0x0000089d,
++	.EmcCfgPipe                                 = 0x000042a0,
++	.EmcDbg                                     = 0x01000c00,
++	.EmcCmdQ                                    = 0x10004408,
++	.EmcMc2EmcQ                                 = 0x06000404,
++	.EmcDynSelfRefControl                       = 0x80002062,
++	.AhbArbitrationXbarCtrlMemInitDone          = 0x00000001,
++	.EmcCfgDigDll                               = 0xe01200b1,
++	.EmcCfgDigDllPeriod                         = 0x00008000,
++	.EmcDevSelect                               = 0x00000002,
++	.EmcSelDpdCtrl                              = 0x00040000,
++	.EmcDllXformDqs0                            = 0x0000000a,
++	.EmcDllXformDqs1                            = 0x0000000a,
++	.EmcDllXformDqs2                            = 0x0000000a,
++	.EmcDllXformDqs3                            = 0x0000000a,
++	.EmcDllXformDqs4                            = 0x0000000a,
++	.EmcDllXformDqs5                            = 0x0000000a,
++	.EmcDllXformDqs6                            = 0x0000000a,
++	.EmcDllXformDqs7                            = 0x0000000a,
++	.EmcDllXformDqs8                            = 0x0000000a,
++	.EmcDllXformDqs9                            = 0x0000000a,
++	.EmcDllXformDqs10                           = 0x0000000a,
++	.EmcDllXformDqs11                           = 0x0000000a,
++	.EmcDllXformDqs12                           = 0x0000000a,
++	.EmcDllXformDqs13                           = 0x0000000a,
++	.EmcDllXformDqs14                           = 0x0000000a,
++	.EmcDllXformDqs15                           = 0x0000000a,
++	.EmcDllXformQUse0                           = 0x00000000,
++	.EmcDllXformQUse1                           = 0x00000000,
++	.EmcDllXformQUse2                           = 0x00000000,
++	.EmcDllXformQUse3                           = 0x00000000,
++	.EmcDllXformQUse4                           = 0x00000000,
++	.EmcDllXformQUse5                           = 0x00000000,
++	.EmcDllXformQUse6                           = 0x00000000,
++	.EmcDllXformQUse7                           = 0x00000000,
++	.EmcDllXformAddr0                           = 0x00058000,
++	.EmcDllXformAddr1                           = 0x00058000,
++	.EmcDllXformAddr2                           = 0x00000000,
++	.EmcDllXformAddr3                           = 0x00058000,
++	.EmcDllXformAddr4                           = 0x00058000,
++	.EmcDllXformAddr5                           = 0x00000000,
++	.EmcDllXformQUse8                           = 0x00000000,
++	.EmcDllXformQUse9                           = 0x00000000,
++	.EmcDllXformQUse10                          = 0x00000000,
++	.EmcDllXformQUse11                          = 0x00000000,
++	.EmcDllXformQUse12                          = 0x00000000,
++	.EmcDllXformQUse13                          = 0x00000000,
++	.EmcDllXformQUse14                          = 0x00000000,
++	.EmcDllXformQUse15                          = 0x00000000,
++	.EmcDliTrimTxDqs0                           = 0x00000000,
++	.EmcDliTrimTxDqs1                           = 0x00000000,
++	.EmcDliTrimTxDqs2                           = 0x00000000,
++	.EmcDliTrimTxDqs3                           = 0x00000000,
++	.EmcDliTrimTxDqs4                           = 0x00000000,
++	.EmcDliTrimTxDqs5                           = 0x00000000,
++	.EmcDliTrimTxDqs6                           = 0x00000000,
++	.EmcDliTrimTxDqs7                           = 0x00000000,
++	.EmcDliTrimTxDqs8                           = 0x00000000,
++	.EmcDliTrimTxDqs9                           = 0x00000000,
++	.EmcDliTrimTxDqs10                          = 0x00000000,
++	.EmcDliTrimTxDqs11                          = 0x00000000,
++	.EmcDliTrimTxDqs12                          = 0x00000000,
++	.EmcDliTrimTxDqs13                          = 0x00000000,
++	.EmcDliTrimTxDqs14                          = 0x00000000,
++	.EmcDliTrimTxDqs15                          = 0x00000000,
++	.EmcDllXformDq0                             = 0x0000000e,
++	.EmcDllXformDq1                             = 0x0000000e,
++	.EmcDllXformDq2                             = 0x0000000e,
++	.EmcDllXformDq3                             = 0x0000000e,
++	.EmcDllXformDq4                             = 0x0000000e,
++	.EmcDllXformDq5                             = 0x0000000e,
++	.EmcDllXformDq6                             = 0x0000000e,
++	.EmcDllXformDq7                             = 0x0000000e,
++	.WarmBootWait                               = 0x00000002,
++	.EmcCttTermCtrl                             = 0x00000802,
++	.EmcOdtWrite                                = 0x00000000,
++	.EmcOdtRead                                 = 0x00000000,
++	.EmcZcalInterval                            = 0x00020000,
++	.EmcZcalWaitCnt                             = 0x00000042,
++	.EmcZcalMrwCmd                              = 0x80000000,
++	.EmcMrsResetDll                             = 0x00000000,
++	.EmcZcalInitDev0                            = 0x80000011,
++	.EmcZcalInitDev1                            = 0x00000000,
++	.EmcZcalInitWait                            = 0x00000001,
++	.EmcZcalWarmColdBootEnables                 = 0x00000003,
++	.EmcMrwLpddr2ZcalWarmBoot                   = 0x040a00ab,
++	.EmcZqCalDdr3WarmBoot                       = 0x00000000,
++	.EmcZcalWarmBootWait                        = 0x00000001,
++	.EmcMrsWarmBootEnable                       = 0x00000001,
++	.EmcMrsResetDllWait                         = 0x00000000,
++	.EmcMrsExtra                                = 0x80000941,
++	.EmcWarmBootMrsExtra                        = 0x80100002,
++	.EmcEmrsDdr2DllEnable                       = 0x00000000,
++	.EmcMrsDdr2DllReset                         = 0x00000000,
++	.EmcEmrsDdr2OcdCalib                        = 0x00000000,
++	.EmcDdr2Wait                                = 0x00000000,
++	.EmcClkenOverride                           = 0x00000000,
++	.McDisExtraSnapLevels                       = 0x00000000,
++	.EmcExtraRefreshNum                         = 0x00000002,
++	.EmcClkenOverrideAllWarmBoot                = 0x00000000,
++	.McClkenOverrideAllWarmBoot                 = 0x00000000,
++	.EmcCfgDigDllPeriodWarmBoot                 = 0x00000003,
++	.PmcVddpSel                                 = 0x00000002,
++	.PmcVddpSelWait                             = 0x00000002,
++	.PmcDdrPwr                                  = 0x00000003,
++	.PmcDdrCfg                                  = 0x00002002,
++	.PmcIoDpd3Req                               = 0x4fff2f97,
++	.PmcIoDpd3ReqWait                           = 0x00000000,
++	.PmcRegShort                                = 0x00000000,
++	.PmcNoIoPower                               = 0x00000000,
++	.PmcPorDpdCtrlWait                          = 0x00000000,
++	.EmcXm2CmdPadCtrl                           = 0x100002a0,
++	.EmcXm2CmdPadCtrl2                          = 0x770c0000,
++	.EmcXm2CmdPadCtrl3                          = 0x050c0000,
++	.EmcXm2CmdPadCtrl4                          = 0x00000000,
++	.EmcXm2CmdPadCtrl5                          = 0x00111111,
++	.EmcXm2DqsPadCtrl                           = 0x770c1414,
++	.EmcXm2DqsPadCtrl2                          = 0x0123133d,
++	.EmcXm2DqsPadCtrl3                          = 0x51451420,
++	.EmcXm2DqsPadCtrl4                          = 0x00514514,
++	.EmcXm2DqsPadCtrl5                          = 0x00514514,
++	.EmcXm2DqsPadCtrl6                          = 0x51451400,
++	.EmcXm2DqPadCtrl                            = 0x770c2990,
++	.EmcXm2DqPadCtrl2                           = 0x00000000,
++	.EmcXm2DqPadCtrl3                           = 0x00000000,
++	.EmcXm2ClkPadCtrl                           = 0x77ffc085,
++	.EmcXm2ClkPadCtrl2                          = 0x00000505,
++	.EmcXm2CompPadCtrl                          = 0x81f1f108,
++	.EmcXm2VttGenPadCtrl                        = 0x07070004,
++	.EmcXm2VttGenPadCtrl2                       = 0x00000000,
++	.EmcXm2VttGenPadCtrl3                       = 0x016eeeee,
++	.EmcAcpdControl                             = 0x00000000,
++	.EmcSwizzleRank0ByteCfg                     = 0x00002031,
++	.EmcSwizzleRank0Byte0                       = 0x02536147,
++	.EmcSwizzleRank0Byte1                       = 0x32056417,
++	.EmcSwizzleRank0Byte2                       = 0x67253041,
++	.EmcSwizzleRank0Byte3                       = 0x67514203,
++	.EmcSwizzleRank1ByteCfg                     = 0x00002031,
++	.EmcSwizzleRank1Byte0                       = 0x12063547,
++	.EmcSwizzleRank1Byte1                       = 0x71506324,
++	.EmcSwizzleRank1Byte2                       = 0x60257314,
++	.EmcSwizzleRank1Byte3                       = 0x64537210,
++	.EmcDsrVttgenDrv                            = 0x0606003f,
++	.EmcTxdsrvttgen                             = 0x00000000,
++	.EmcBgbiasCtl0                              = 0x00000000,
++	.McEmemAdrCfg                               = 0x00000000,
++	.McEmemAdrCfgDev0                           = 0x00080303,
++	.McEmemAdrCfgDev1                           = 0x00080303,
++	.McEmemAdrCfgBankMask0                      = 0x00001248,
++	.McEmemAdrCfgBankMask1                      = 0x00002490,
++	.McEmemAdrCfgBankMask2                      = 0x00000920,
++	.McEmemAdrCfgBankSwizzle3                   = 0x00000001,
++	.McEmemCfg                                  = 0x00000800,
++	.McEmemArbCfg                               = 0x0f000007,
++	.McEmemArbOutstandingReq                    = 0x80000040,
++	.McEmemArbTimingRcd                         = 0x00000002,
++	.McEmemArbTimingRp                          = 0x00000003,
++	.McEmemArbTimingRc                          = 0x0000000c,
++	.McEmemArbTimingRas                         = 0x00000007,
++	.McEmemArbTimingFaw                         = 0x00000008,
++	.McEmemArbTimingRrd                         = 0x00000001,
++	.McEmemArbTimingRap2Pre                     = 0x00000002,
++	.McEmemArbTimingWap2Pre                     = 0x00000009,
++	.McEmemArbTimingR2R                         = 0x00000002,
++	.McEmemArbTimingW2W                         = 0x00000002,
++	.McEmemArbTimingR2W                         = 0x00000005,
++	.McEmemArbTimingW2R                         = 0x00000006,
++	.McEmemArbDaTurns                           = 0x06050202,
++	.McEmemArbDaCovers                          = 0x0010090c,
++	.McEmemArbMisc0                             = 0x7428180d,
++	.McEmemArbMisc1                             = 0x70000f03,
++	.McEmemArbRing1Throttle                     = 0x001f0000,
++	.McEmemArbOverride                          = 0x10000000,
++	.McEmemArbOverride1                         = 0x00000000,
++	.McEmemArbRsv                               = 0xff00ff00,
++	.McClkenOverride                            = 0x00000000,
++	.McStatControl                              = 0x00000000,
++	.McDisplaySnapRing                          = 0x00000003,
++	.McVideoProtectBom                          = 0xfff00000,
++	.McVideoProtectBomAdrHi                     = 0x00000000,
++	.McVideoProtectSizeMb                       = 0x00000000,
++	.McVideoProtectVprOverride                  = 0xe4bac743,
++	.McVideoProtectVprOverride1                 = 0x00000013,
++	.McVideoProtectGpuOverride0                 = 0x00000000,
++	.McVideoProtectGpuOverride1                 = 0x00000000,
++	.McSecCarveoutBom                           = 0xfff00000,
++	.McSecCarveoutAdrHi                         = 0x00000000,
++	.McSecCarveoutSizeMb                        = 0x00000000,
++	.McVideoProtectWriteAccess                  = 0x00000000,
++	.McSecCarveoutProtectWriteAccess            = 0x00000000,
++	.EmcCaTrainingEnable                        = 0x00000000,
++	.EmcCaTrainingTimingCntl1                   = 0x1f7df7df,
++	.EmcCaTrainingTimingCntl2                   = 0x0000001f,
++	.SwizzleRankByteEncode                      = 0x0000000e,
++	.BootRomPatchControl                        = 0x00000000,
++	.BootRomPatchData                           = 0x00000000,
++	.McMtsCarveoutBom                           = 0xfff00000,
++	.McMtsCarveoutAdrHi                         = 0x00000000,
++	.McMtsCarveoutSizeMb                        = 0x00000000,
++	.McMtsCarveoutRegCtrl                       = 0x00000000,
++};
 diff --git a/payloads/raminit/lp0_stub.c b/payloads/raminit/lp0_stub.c
 new file mode 100644
 index 0000000..7b4f07f
@@ -6034,10 +6374,10 @@ index 0000000..7b4f07f
 +}
 diff --git a/payloads/raminit/raminit_run.c b/payloads/raminit/raminit_run.c
 new file mode 100644
-index 0000000..95d6175
+index 0000000..a511c89
 --- /dev/null
 +++ b/payloads/raminit/raminit_run.c
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,211 @@
 +/*
 + * Single-core T124 experiment: initialize SDRAM from ShofEL's AVP Thumb
 + * payload, reporting and acknowledging every irreversible phase over EP1.
@@ -6056,11 +6396,13 @@ index 0000000..95d6175
 +#include "mc.h"
 +#include "sdram.h"
 +
-+#define RAM_CODE_SLOT             2u
++#define RAM_CODE_SLOT_2           2u
++#define RAM_CODE_SLOT_3           3u
 +#define RAM_CODE_MASK             PMC_STRAPPING_OPT_A_RAM_CODE_MASK
 +#define RAM_CODE_SHIFT            PMC_STRAPPING_OPT_A_RAM_CODE_SHIFT
 +
 +extern const struct sdram_params jibo_ramcode2_sdram_params;
++extern const struct sdram_params jibo_ramcode3_sdram_params;
 +uint32_t sdram_get_ram_code(void);
 +
 +struct ep1_context {
@@ -6168,6 +6510,7 @@ index 0000000..95d6175
 +	struct tegra_pmc_regs *pmc = (struct tegra_pmc_regs *)TEGRA_PMC_BASE;
 +	struct tegra_mc_regs *mc = (struct tegra_mc_regs *)TEGRA_MC_BASE;
 +	uint32_t raw_strap, ram_code, size_mb, ranges, emem_cfg;
++	const struct sdram_params *selected_params;
 +
 +	if (!ep1.in_write || !ep1.out_read || !status)
 +		return JIBO_RAMINIT_BAD_ARGUMENT;
@@ -6194,7 +6537,7 @@ index 0000000..95d6175
 +	status->ram_code = ram_code;
 +	report_phase(&ep1, JIBO_RAMINIT_PMC_STRAPPING_OPT_A, raw_strap);
 +	report_phase(&ep1, JIBO_RAMINIT_RAM_CODE, ram_code);
-+	if (ram_code != RAM_CODE_SLOT ||
++	if ((ram_code != RAM_CODE_SLOT_2 && ram_code != RAM_CODE_SLOT_3) ||
 +	    ram_code != ((raw_strap & RAM_CODE_MASK) >> RAM_CODE_SHIFT)) {
 +		status->result = JIBO_RAMINIT_RAM_CODE_MISMATCH;
 +		report_phase(&ep1, JIBO_RAMINIT_BLOCKED, ram_code);
@@ -6203,22 +6546,24 @@ index 0000000..95d6175
 +	}
 +
 +	/*
-+	 * RAM_CODE 2 does not distinguish Jibo board revisions. Require a
-+	 * deliberate host attestation that this unit matches the Meerkat Rev02
-+	 * profile before touching PLLM, EMC, or MC.
++	 * RAM_CODE selects an entry in the official Meerkat Rev02 BCT. It does
++	 * not by itself identify a board revision. Require deliberate host
++	 * attestation before touching PLLM, EMC, or MC.
 +	 */
 +	if (!receive_token(&ep1, JIBO_RAMINIT_PROFILE_MAGIC)) {
 +		status->result = JIBO_RAMINIT_PROFILE_NOT_CONFIRMED;
 +		report_phase(&ep1, JIBO_RAMINIT_PROFILE_GATE, 0);
-+		report_phase(&ep1, JIBO_RAMINIT_BLOCKED, RAM_CODE_SLOT);
++		report_phase(&ep1, JIBO_RAMINIT_BLOCKED, ram_code);
 +		report_phase(&ep1, JIBO_RAMINIT_DONE, 0);
 +		return (int)status->result;
 +	}
 +	report_phase(&ep1, JIBO_RAMINIT_PROFILE_GATE, 1);
 +
 +	/* Coreboot's clock_sdram is reached from sdram_init; clock_init is skipped. */
-+	report_phase(&ep1, JIBO_RAMINIT_BEFORE_SDRAM_INIT, RAM_CODE_SLOT);
-+	sdram_init(&jibo_ramcode2_sdram_params);
++	selected_params = ram_code == RAM_CODE_SLOT_2 ?
++		&jibo_ramcode2_sdram_params : &jibo_ramcode3_sdram_params;
++	report_phase(&ep1, JIBO_RAMINIT_BEFORE_SDRAM_INIT, ram_code);
++	sdram_init(selected_params);
 +	report_phase(&ep1, JIBO_RAMINIT_AFTER_SDRAM_INIT, 1);
 +
 +	emem_cfg = readl(&mc->emem_cfg);
@@ -12673,14 +13018,343 @@ index 0000000..028cc2c
 +  "source_bct_sha256": "13a1ab266b4fbbad9214270a38f300433b33d9b7cbc1698c71651b7887da7163",
 +  "source_bct_size": 8192
 +}
+diff --git a/scripts/data/jibo-meerkat-ramcode3-v1.json b/scripts/data/jibo-meerkat-ramcode3-v1.json
+new file mode 100644
+index 0000000..a401818
+--- /dev/null
++++ b/scripts/data/jibo-meerkat-ramcode3-v1.json
+@@ -0,0 +1,323 @@
++{
++  "board_profile": "Jibo Meerkat/Tobor; MT41K256M16HA-107E DDR3",
++  "coreboot_struct_sha256": "103ae1459a2115ac7c72ba7aeed4c50dc6dc890dcf3808f7da8c336894280b24",
++  "parameter_count": 309,
++  "parameters": {
++    "AhbArbitrationXbarCtrlMemInitDone": 1,
++    "BootRomPatchControl": 0,
++    "BootRomPatchData": 0,
++    "EmcAcpdControl": 0,
++    "EmcAct2Pden": 0,
++    "EmcAdrCfg": 0,
++    "EmcAr2Pden": 132,
++    "EmcAutoCalConfig": 2705522688,
++    "EmcAutoCalConfig2": 0,
++    "EmcAutoCalConfig3": 0,
++    "EmcAutoCalInterval": 2097151,
++    "EmcAutoCalWait": 400,
++    "EmcBctSpare0": 0,
++    "EmcBctSpare1": 0,
++    "EmcBctSpare10": 0,
++    "EmcBctSpare11": 0,
++    "EmcBctSpare2": 0,
++    "EmcBctSpare3": 0,
++    "EmcBctSpare4": 0,
++    "EmcBctSpare5": 0,
++    "EmcBctSpare6": 0,
++    "EmcBctSpare7": 0,
++    "EmcBctSpare8": 0,
++    "EmcBctSpare9": 0,
++    "EmcBgbiasCtl0": 0,
++    "EmcBurstRefreshNum": 0,
++    "EmcCaTrainingEnable": 0,
++    "EmcCaTrainingTimingCntl1": 528349151,
++    "EmcCaTrainingTimingCntl2": 31,
++    "EmcCdbCntl1": 0,
++    "EmcCdbCntl2": 0,
++    "EmcCdbCntl3": 0,
++    "EmcCfg": 1932525568,
++    "EmcCfg2": 2205,
++    "EmcCfgDigDll": 3759276209,
++    "EmcCfgDigDllPeriod": 32768,
++    "EmcCfgDigDllPeriodWarmBoot": 3,
++    "EmcCfgPipe": 17056,
++    "EmcCfgRsv": 4278255360,
++    "EmcClkenOverride": 0,
++    "EmcClkenOverrideAllWarmBoot": 0,
++    "EmcClockSource": 2147483648,
++    "EmcCmdQ": 268452872,
++    "EmcCtt": 0,
++    "EmcCttDuration": 3,
++    "EmcCttTermCtrl": 2050,
++    "EmcDbg": 16780288,
++    "EmcDdr2Wait": 0,
++    "EmcDevSelect": 2,
++    "EmcDliTrimTxDqs0": 0,
++    "EmcDliTrimTxDqs1": 0,
++    "EmcDliTrimTxDqs10": 0,
++    "EmcDliTrimTxDqs11": 0,
++    "EmcDliTrimTxDqs12": 0,
++    "EmcDliTrimTxDqs13": 0,
++    "EmcDliTrimTxDqs14": 0,
++    "EmcDliTrimTxDqs15": 0,
++    "EmcDliTrimTxDqs2": 0,
++    "EmcDliTrimTxDqs3": 0,
++    "EmcDliTrimTxDqs4": 0,
++    "EmcDliTrimTxDqs5": 0,
++    "EmcDliTrimTxDqs6": 0,
++    "EmcDliTrimTxDqs7": 0,
++    "EmcDliTrimTxDqs8": 0,
++    "EmcDliTrimTxDqs9": 0,
++    "EmcDllXformAddr0": 360448,
++    "EmcDllXformAddr1": 360448,
++    "EmcDllXformAddr2": 0,
++    "EmcDllXformAddr3": 360448,
++    "EmcDllXformAddr4": 360448,
++    "EmcDllXformAddr5": 0,
++    "EmcDllXformDq0": 14,
++    "EmcDllXformDq1": 14,
++    "EmcDllXformDq2": 14,
++    "EmcDllXformDq3": 14,
++    "EmcDllXformDq4": 14,
++    "EmcDllXformDq5": 14,
++    "EmcDllXformDq6": 14,
++    "EmcDllXformDq7": 14,
++    "EmcDllXformDqs0": 10,
++    "EmcDllXformDqs1": 10,
++    "EmcDllXformDqs10": 10,
++    "EmcDllXformDqs11": 10,
++    "EmcDllXformDqs12": 10,
++    "EmcDllXformDqs13": 10,
++    "EmcDllXformDqs14": 10,
++    "EmcDllXformDqs15": 10,
++    "EmcDllXformDqs2": 10,
++    "EmcDllXformDqs3": 10,
++    "EmcDllXformDqs4": 10,
++    "EmcDllXformDqs5": 10,
++    "EmcDllXformDqs6": 10,
++    "EmcDllXformDqs7": 10,
++    "EmcDllXformDqs8": 10,
++    "EmcDllXformDqs9": 10,
++    "EmcDllXformQUse0": 0,
++    "EmcDllXformQUse1": 0,
++    "EmcDllXformQUse10": 0,
++    "EmcDllXformQUse11": 0,
++    "EmcDllXformQUse12": 0,
++    "EmcDllXformQUse13": 0,
++    "EmcDllXformQUse14": 0,
++    "EmcDllXformQUse15": 0,
++    "EmcDllXformQUse2": 0,
++    "EmcDllXformQUse3": 0,
++    "EmcDllXformQUse4": 0,
++    "EmcDllXformQUse5": 0,
++    "EmcDllXformQUse6": 0,
++    "EmcDllXformQUse7": 0,
++    "EmcDllXformQUse8": 0,
++    "EmcDllXformQUse9": 0,
++    "EmcDsrVttgenDrv": 101056575,
++    "EmcDynSelfRefControl": 2147491938,
++    "EmcEInput": 1,
++    "EmcEInputDuration": 9,
++    "EmcEmrs": 2148532226,
++    "EmcEmrs2": 2149580808,
++    "EmcEmrs3": 2150629376,
++    "EmcEmrsDdr2DllEnable": 0,
++    "EmcEmrsDdr2OcdCalib": 0,
++    "EmcExtraModeRegWriteEnable": 0,
++    "EmcExtraRefreshNum": 2,
++    "EmcFbioCfg5": 273330328,
++    "EmcFbioCfg6": 0,
++    "EmcFbioSpare": 0,
++    "EmcIbdly": 0,
++    "EmcMc2EmcQ": 100664324,
++    "EmcMrs": 2147486017,
++    "EmcMrsDdr2DllReset": 0,
++    "EmcMrsExtra": 2147486017,
++    "EmcMrsResetDll": 0,
++    "EmcMrsResetDllWait": 0,
++    "EmcMrsWaitCnt": 20578318,
++    "EmcMrsWaitCnt2": 20578318,
++    "EmcMrsWarmBootEnable": 1,
++    "EmcMrw1": 0,
++    "EmcMrw2": 0,
++    "EmcMrw3": 0,
++    "EmcMrw4": 0,
++    "EmcMrwExtra": 0,
++    "EmcMrwLpddr2ZcalWarmBoot": 67764395,
++    "EmcMrwResetCommand": 0,
++    "EmcMrwResetNInitWait": 0,
++    "EmcOdtRead": 0,
++    "EmcOdtWrite": 0,
++    "EmcPChg2Pden": 1,
++    "EmcPdEx2Rd": 11,
++    "EmcPdEx2Wr": 2,
++    "EmcPinExtraWait": 0,
++    "EmcPinProgramWait": 1,
++    "EmcPreRefreshReqCnt": 1013,
++    "EmcPutermAdj": 0,
++    "EmcPutermExtra": 196608,
++    "EmcPutermWidth": 3,
++    "EmcQRst": 0,
++    "EmcQSafe": 16,
++    "EmcQUse": 6,
++    "EmcQpop": 10,
++    "EmcQuseWidth": 2,
++    "EmcR2p": 2,
++    "EmcR2r": 0,
++    "EmcR2w": 6,
++    "EmcRas": 16,
++    "EmcRc": 24,
++    "EmcRdRcd": 6,
++    "EmcRdv": 18,
++    "EmcRdvMask": 20,
++    "EmcRefresh": 4054,
++    "EmcRext": 2,
++    "EmcRfc": 136,
++    "EmcRfcSlr": 0,
++    "EmcRp": 6,
++    "EmcRrd": 2,
++    "EmcRw2Pden": 18,
++    "EmcSelDpdCtrl": 262144,
++    "EmcSwizzleRank0Byte0": 39018823,
++    "EmcSwizzleRank0Byte1": 839214103,
++    "EmcSwizzleRank0Byte2": 1730490433,
++    "EmcSwizzleRank0Byte3": 1733378563,
++    "EmcSwizzleRank0ByteCfg": 8241,
++    "EmcSwizzleRank1Byte0": 302396743,
++    "EmcSwizzleRank1Byte1": 1901093668,
++    "EmcSwizzleRank1Byte2": 1613067028,
++    "EmcSwizzleRank1Byte3": 1683190288,
++    "EmcSwizzleRank1ByteCfg": 8241,
++    "EmcTClkStable": 6,
++    "EmcTClkStop": 6,
++    "EmcTRefBw": 4119,
++    "EmcTcke": 4,
++    "EmcTckesr": 5,
++    "EmcTfaw": 16,
++    "EmcTimingControlWait": 0,
++    "EmcTpd": 4,
++    "EmcTrpab": 0,
++    "EmcTxdsrvttgen": 0,
++    "EmcTxsr": 143,
++    "EmcTxsrDll": 512,
++    "EmcW2p": 13,
++    "EmcW2r": 9,
++    "EmcW2w": 0,
++    "EmcWarmBootExtraModeRegWriteEnable": 0,
++    "EmcWarmBootMrsExtra": 2148532226,
++    "EmcWarmBootMrwExtra": 0,
++    "EmcWdv": 3,
++    "EmcWdvMask": 3,
++    "EmcWext": 0,
++    "EmcWrRcd": 6,
++    "EmcXm2ClkPadCtrl": 2013249669,
++    "EmcXm2ClkPadCtrl2": 1285,
++    "EmcXm2CmdPadCtrl": 268436128,
++    "EmcXm2CmdPadCtrl2": 1997275136,
++    "EmcXm2CmdPadCtrl3": 84672512,
++    "EmcXm2CmdPadCtrl4": 0,
++    "EmcXm2CmdPadCtrl5": 1118481,
++    "EmcXm2CompPadCtrl": 2180116744,
++    "EmcXm2DqPadCtrl": 1997285776,
++    "EmcXm2DqPadCtrl2": 0,
++    "EmcXm2DqPadCtrl3": 0,
++    "EmcXm2DqsPadCtrl": 1997280276,
++    "EmcXm2DqsPadCtrl2": 19075901,
++    "EmcXm2DqsPadCtrl3": 1363481632,
++    "EmcXm2DqsPadCtrl4": 5326100,
++    "EmcXm2DqsPadCtrl5": 5326100,
++    "EmcXm2DqsPadCtrl6": 1363481600,
++    "EmcXm2VttGenPadCtrl": 117899268,
++    "EmcXm2VttGenPadCtrl2": 0,
++    "EmcXm2VttGenPadCtrl3": 24047342,
++    "EmcZcalInitDev0": 2147483665,
++    "EmcZcalInitDev1": 0,
++    "EmcZcalInitWait": 1,
++    "EmcZcalInterval": 131072,
++    "EmcZcalMrwCmd": 2147483648,
++    "EmcZcalWaitCnt": 66,
++    "EmcZcalWarmBootWait": 1,
++    "EmcZcalWarmColdBootEnables": 3,
++    "EmcZqCalDdr3WarmBoot": 0,
++    "McClkenOverride": 0,
++    "McClkenOverrideAllWarmBoot": 0,
++    "McDisExtraSnapLevels": 0,
++    "McDisplaySnapRing": 3,
++    "McEmemAdrCfg": 0,
++    "McEmemAdrCfgBankMask0": 4680,
++    "McEmemAdrCfgBankMask1": 9360,
++    "McEmemAdrCfgBankMask2": 2336,
++    "McEmemAdrCfgBankSwizzle3": 1,
++    "McEmemAdrCfgDev0": 525059,
++    "McEmemAdrCfgDev1": 525059,
++    "McEmemArbCfg": 251658247,
++    "McEmemArbDaCovers": 1050892,
++    "McEmemArbDaTurns": 100991490,
++    "McEmemArbMisc0": 1948784653,
++    "McEmemArbMisc1": 1879052035,
++    "McEmemArbOutstandingReq": 2147483712,
++    "McEmemArbOverride": 268435456,
++    "McEmemArbOverride1": 0,
++    "McEmemArbRing1Throttle": 2031616,
++    "McEmemArbRsv": 4278255360,
++    "McEmemArbTimingFaw": 8,
++    "McEmemArbTimingR2R": 2,
++    "McEmemArbTimingR2W": 5,
++    "McEmemArbTimingRap2Pre": 2,
++    "McEmemArbTimingRas": 7,
++    "McEmemArbTimingRc": 12,
++    "McEmemArbTimingRcd": 2,
++    "McEmemArbTimingRp": 3,
++    "McEmemArbTimingRrd": 1,
++    "McEmemArbTimingW2R": 6,
++    "McEmemArbTimingW2W": 2,
++    "McEmemArbTimingWap2Pre": 9,
++    "McEmemCfg": 2048,
++    "McMtsCarveoutAdrHi": 0,
++    "McMtsCarveoutBom": 4293918720,
++    "McMtsCarveoutRegCtrl": 0,
++    "McMtsCarveoutSizeMb": 0,
++    "McSecCarveoutAdrHi": 0,
++    "McSecCarveoutBom": 4293918720,
++    "McSecCarveoutProtectWriteAccess": 0,
++    "McSecCarveoutSizeMb": 0,
++    "McStatControl": 0,
++    "McVideoProtectBom": 4293918720,
++    "McVideoProtectBomAdrHi": 0,
++    "McVideoProtectGpuOverride0": 0,
++    "McVideoProtectGpuOverride1": 0,
++    "McVideoProtectSizeMb": 0,
++    "McVideoProtectVprOverride": 3837445955,
++    "McVideoProtectVprOverride1": 19,
++    "McVideoProtectWriteAccess": 0,
++    "MemoryType": "NvBootMemoryType_Ddr3",
++    "PllMFeedbackDivider": 44,
++    "PllMInputDivider": 1,
++    "PllMKCP": 0,
++    "PllMKVCO": 0,
++    "PllMPDLshiftPh135": 1,
++    "PllMPDLshiftPh45": 1,
++    "PllMPDLshiftPh90": 1,
++    "PllMSelectDiv2": 0,
++    "PllMSetupControl": 0,
++    "PllMStableTime": 300,
++    "PmcDdrCfg": 8194,
++    "PmcDdrPwr": 3,
++    "PmcIoDpd3Req": 1342123927,
++    "PmcIoDpd3ReqWait": 0,
++    "PmcNoIoPower": 0,
++    "PmcPorDpdCtrlWait": 0,
++    "PmcRegShort": 0,
++    "PmcVddpSel": 2,
++    "PmcVddpSelWait": 2,
++    "SwizzleRankByteEncode": 14,
++    "WarmBootWait": 2
++  },
++  "params_sha256": "7aa77b314df08e19cf7018d3372964326e576ddaa0e9a77592d66afe60c18969",
++  "ram_code": 3,
++  "schema": "jibo-t124-sdram-params-v1",
++  "sdram_slot": 3,
++  "soc": "Tegra124",
++  "source_bct_sha256": "13a1ab266b4fbbad9214270a38f300433b33d9b7cbc1698c71651b7887da7163",
++  "source_bct_size": 8192
++}
 diff --git a/scripts/verify_boot0_bct.py b/scripts/verify_boot0_bct.py
 new file mode 100644
-index 0000000..1f35081
+index 0000000..0b1ac19
 --- /dev/null
 +++ b/scripts/verify_boot0_bct.py
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,234 @@
 +#!/usr/bin/env python3
-+"""Compare SDRAM[2] in a bounded eMMC boot0 prefix with Jibo's 5.4.2 profile.
++"""Compare SDRAM[2] and SDRAM[3] in early boot0 BCT copies with Jibo's profile.
 +
 +Every parseable early copy must match the normalized official parameters. This
 +does not validate BootROM signatures or journal copies beyond the 16 KiB prefix.
@@ -12695,13 +13369,23 @@ index 0000000..1f35081
 +import tempfile
 +
 +
-+DEFAULT_PROFILE = Path(__file__).resolve().parent / "data/jibo-meerkat-ramcode2-v1.json"
++DEFAULT_PROFILES = {
++    slot: Path(__file__).resolve().parent /
++    ("data/jibo-meerkat-ramcode%d-v1.json" % slot)
++    for slot in (2, 3)
++}
 +PREFIX_SIZE = 16 * 1024
 +BCT_SIZE = 8 * 1024
-+SLOT = 2
++SLOTS = (2, 3)
 +OFFICIAL_BCT_SHA256 = "13a1ab266b4fbbad9214270a38f300433b33d9b7cbc1698c71651b7887da7163"
-+OFFICIAL_PROFILE_PARAMS_SHA256 = "5fe145a7abe61b80df3f79f1d15a0a723b387c3e6b7810c7d2df822fc03f4c85"
-+OFFICIAL_NORMALIZED_SHA256 = "f7b695bfe019819db253ff60621c442b119a0cdb95ee334c2edf73e0be6bb3bd"
++OFFICIAL_PROFILE_PARAMS_SHA256 = {
++    2: "5fe145a7abe61b80df3f79f1d15a0a723b387c3e6b7810c7d2df822fc03f4c85",
++    3: "7aa77b314df08e19cf7018d3372964326e576ddaa0e9a77592d66afe60c18969",
++}
++OFFICIAL_NORMALIZED_SHA256 = {
++    2: "f7b695bfe019819db253ff60621c442b119a0cdb95ee334c2edf73e0be6bb3bd",
++    3: "c248afaf6bd272512f7ccdc38a1e3b79db8333c95d2a9d6b31e0600d1273d254",
++}
 +SLOT_RE = re.compile(r"^SDRAM\[(\d+)\]\.([A-Za-z0-9]+)\s*=\s*(.*);$", re.M)
 +
 +
@@ -12723,27 +13407,28 @@ index 0000000..1f35081
 +    return text
 +
 +
-+def parse_slot2_dump(output, expected_fields):
++def parse_slot_dump(output, expected_fields, slot):
 +    values = {}
 +    for found_slot, name, value in SLOT_RE.findall(output):
-+        if int(found_slot) != SLOT:
++        if int(found_slot) != slot:
 +            continue
 +        if name in values:
-+            raise ValueError("duplicate BCT SDRAM[2] field: " + name)
++            raise ValueError("duplicate BCT SDRAM[%d] field: %s" % (slot, name))
 +        values[name] = value.strip()
 +    if not values:
-+        raise ValueError("bct_dump returned no SDRAM[2] fields")
++        raise ValueError("bct_dump returned no SDRAM[%d] fields" % slot)
 +    missing = sorted(set(expected_fields) - set(values))
 +    extra = sorted(set(values) - set(expected_fields))
 +    if missing or extra:
 +        raise ValueError("BCT/profile field mismatch; missing=%s extra=%s" %
 +                         (missing, extra))
 +    if values.get("MemoryType") != "NvBootMemoryType_Ddr3":
-+        raise ValueError("SDRAM[2] is not DDR3: %s" % values.get("MemoryType"))
++        raise ValueError("SDRAM[%d] is not DDR3: %s" %
++                         (slot, values.get("MemoryType")))
 +    return {name: normalize_value(value) for name, value in values.items()}
 +
 +
-+def extract_slot2(bct_path, bct_dump, expected_fields):
++def extract_slots(bct_path, bct_dump, expected_fields):
 +    raw = bct_path.read_bytes()
 +    if len(raw) != BCT_SIZE:
 +        raise ValueError("%s is %d bytes (expected exactly %d)" %
@@ -12754,27 +13439,28 @@ index 0000000..1f35081
 +    if result.returncode:
 +        raise ValueError("bct_dump failed for %s: %s" %
 +                         (bct_path, result.stdout.strip()))
-+    return parse_slot2_dump(result.stdout, expected_fields)
++    return {slot: parse_slot_dump(result.stdout, expected_fields[slot], slot)
++            for slot in SLOTS}
 +
 +
-+def load_official_profile(profile_path):
++def load_official_profile(profile_path, slot):
 +    data = json.loads(profile_path.read_text())
 +    if data.get("schema") != "jibo-t124-sdram-params-v1" or \
-+            data.get("ram_code") != 2 or data.get("sdram_slot") != SLOT:
++            data.get("ram_code") != slot or data.get("sdram_slot") != slot:
 +        raise ValueError("unexpected official profile schema/slot/RAM_CODE")
 +    if data.get("source_bct_sha256") != OFFICIAL_BCT_SHA256 or \
 +            data.get("source_bct_size") != BCT_SIZE:
 +        raise ValueError("profile provenance does not match official 5.4.2 BCT")
-+    if data.get("params_sha256") != OFFICIAL_PROFILE_PARAMS_SHA256:
++    if data.get("params_sha256") != OFFICIAL_PROFILE_PARAMS_SHA256[slot]:
 +        raise ValueError("official profile metadata hash mismatch")
 +    params = data.get("parameters")
 +    if not isinstance(params, dict) or len(params) != 309 or \
 +            data.get("parameter_count") != 309:
 +        raise ValueError("official profile must contain 309 parameters")
 +    if params.get("MemoryType") != "NvBootMemoryType_Ddr3":
-+        raise ValueError("official SDRAM[2] profile is not DDR3")
++        raise ValueError("official SDRAM[%d] profile is not DDR3" % slot)
 +    params_hash = canonical_parameter_hash(params)
-+    if params_hash != OFFICIAL_NORMALIZED_SHA256:
++    if params_hash != OFFICIAL_NORMALIZED_SHA256[slot]:
 +        raise ValueError("normalized official profile hash mismatch: " + params_hash)
 +    return data, params
 +
@@ -12785,8 +13471,10 @@ index 0000000..1f35081
 +                        help="exactly 16 KiB saved by EMMC_READ_BOOT0_BCT")
 +    parser.add_argument("--bct-dump", type=Path, required=True,
 +                        help="path to NVIDIA bct_dump executable")
-+    parser.add_argument("--profile-json", type=Path, default=DEFAULT_PROFILE,
++    parser.add_argument("--profile-json", type=Path, default=DEFAULT_PROFILES[2],
 +                        help="pinned normalized SDRAM[2] profile JSON")
++    parser.add_argument("--profile-json-slot3", type=Path, default=DEFAULT_PROFILES[3],
++                        help="pinned normalized SDRAM[3] profile JSON")
 +    parser.add_argument("--official-bct", type=Path,
 +                        help="optional official BCT to cross-check the bundled profile")
 +    parser.add_argument("--read-bl-len-exp", type=int, required=True,
@@ -12798,16 +13486,20 @@ index 0000000..1f35081
 +    prefix = args.prefix.read_bytes()
 +    if len(prefix) != PREFIX_SIZE:
 +        parser.error("prefix must be exactly 16384 bytes; got %d" % len(prefix))
-+    for tool_path in (args.bct_dump, args.profile_json):
++    for tool_path in (args.bct_dump, args.profile_json, args.profile_json_slot3):
 +        if not tool_path.is_file():
 +            parser.error("required verifier input is missing: " + str(tool_path))
 +    if not 0 <= args.read_bl_len_exp <= 31:
 +        parser.error("--read-bl-len-exp must be between 0 and 31")
 +
 +    try:
-+        profile, official_params = load_official_profile(args.profile_json)
++        profiles = {
++            2: load_official_profile(args.profile_json, 2),
++            3: load_official_profile(args.profile_json_slot3, 3),
++        }
 +    except (OSError, ValueError, json.JSONDecodeError) as exc:
-+        parser.error("cannot load pinned official SDRAM[2] profile: " + str(exc))
++        parser.error("cannot load pinned official SDRAM profiles: " + str(exc))
++    official_params = {slot: profiles[slot][1] for slot in SLOTS}
 +    if args.official_bct is not None:
 +        try:
 +            official_raw = args.official_bct.read_bytes()
@@ -12819,14 +13511,14 @@ index 0000000..1f35081
 +            with tempfile.TemporaryDirectory(prefix="jibo-official-bct-") as tmp:
 +                official_path = Path(tmp) / "official.bct"
 +                official_path.write_bytes(official_raw)
-+                parsed_official = extract_slot2(official_path, args.bct_dump,
++                parsed_official = extract_slots(official_path, args.bct_dump,
 +                                                official_params)
 +            if parsed_official != official_params:
-+                raise ValueError("official BCT SDRAM[2] differs from bundled profile")
++                raise ValueError("official BCT SDRAM slots differ from bundled profiles")
 +        except (OSError, ValueError, subprocess.SubprocessError) as exc:
 +            parser.error("cannot cross-check official BCT: " + str(exc))
 +    else:
-+        official_hash = profile["source_bct_sha256"]
++        official_hash = profiles[2][0]["source_bct_sha256"]
 +
 +    page_size = 1 << args.read_bl_len_exp
 +    secondary_offset = ((BCT_SIZE + page_size - 1) // page_size) * page_size
@@ -12835,12 +13527,13 @@ index 0000000..1f35081
 +                     "the 16 KiB prefix cannot contain both full copies" %
 +                     secondary_offset)
 +
-+    official_params_hash = canonical_parameter_hash(official_params)
 +    print("Boot0 prefix: %d bytes SHA-256 %s" %
 +          (len(prefix), sha256(prefix)))
-+    print("Official BCT provenance SHA-256 %s; SDRAM[2]: %d normalized fields, "
-+          "parameters SHA-256 %s" %
-+          (official_hash, len(official_params), official_params_hash))
++    print("Official BCT provenance SHA-256 %s" % official_hash)
++    for slot in SLOTS:
++        print("SDRAM[%d]: %d normalized fields, parameters SHA-256 %s" %
++              (slot, len(official_params[slot]),
++               canonical_parameter_hash(official_params[slot])))
 +    print("CSD READ_BL_LEN exponent %d gives %d-byte pages; secondary BCT offset %d." %
 +          (args.read_bl_len_exp, page_size, secondary_offset))
 +
@@ -12856,18 +13549,18 @@ index 0000000..1f35081
 +            candidate_path = tmpdir / ("candidate-%04x.bct" % offset)
 +            candidate_path.write_bytes(copy)
 +            try:
-+                params = extract_slot2(candidate_path, args.bct_dump,
++                params = extract_slots(candidate_path, args.bct_dump,
 +                                       official_params)
 +            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-+                print("offset %d: not a parseable SDRAM[2] BCT (%s)" %
++                print("offset %d: not a parseable SDRAM[2]/[3] BCT (%s)" %
 +                      (offset, exc))
 +                continue
-+            params_hash = canonical_parameter_hash(params)
 +            match = params == official_params
 +            geometry = "; expected secondary-copy location" if offset == secondary_offset else ""
-+            print("offset %d: %s, %d fields, normalized SHA-256 %s%s" %
-+                  (offset, "MATCH" if match else "DIFFERS", len(params),
-+                   params_hash, geometry))
++            print("offset %d: %s, SDRAM[2] SHA-256 %s, SDRAM[3] SHA-256 %s%s" %
++                  (offset, "MATCH" if match else "DIFFERS",
++                   canonical_parameter_hash(params[2]),
++                   canonical_parameter_hash(params[3]), geometry))
 +            if match:
 +                matches.append(offset)
 +            else:
@@ -12881,7 +13574,7 @@ index 0000000..1f35081
 +        print("No parseable early BCT copy matched the official profile.",
 +              file=sys.stderr)
 +        return 1
-+    print("Verified official SDRAM[2] parameters at byte offset(s): %s" %
++    print("Verified official SDRAM[2] and SDRAM[3] parameters at byte offset(s): %s" %
 +          ", ".join(str(offset) for offset in matches))
 +    print("Limit: bct_dump parseability does not establish BootROM signature validity; "
 +          "journal BCT copies beyond this 16 KiB prefix were not examined.")
@@ -12894,12 +13587,59 @@ index 0000000..1f35081
 +    except (OSError, ValueError, subprocess.SubprocessError) as exc:
 +        print("error:", exc, file=sys.stderr)
 +        sys.exit(1)
+diff --git a/tests/check_ram_profiles.py b/tests/check_ram_profiles.py
+new file mode 100644
+index 0000000..bfcfb88
+--- /dev/null
++++ b/tests/check_ram_profiles.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python3
++"""Check that both compiled RAM profiles match their pinned BCT-derived JSON."""
++
++import hashlib
++import json
++from pathlib import Path
++import re
++
++
++ROOT = Path(__file__).resolve().parents[1]
++OFFICIAL_BCT_SHA256 = "13a1ab266b4fbbad9214270a38f300433b33d9b7cbc1698c71651b7887da7163"
++FIELD_RE = re.compile(r"^\s*\.([A-Za-z0-9]+)\s*=\s*([^,]+),$", re.M)
++
++
++def canonical_hash(value):
++    return hashlib.sha256(json.dumps(value, sort_keys=True,
++                                      separators=(",", ":")).encode()).hexdigest()
++
++
++def check_slot(slot):
++    name = "jibo-meerkat-ramcode%d-v1" % slot
++    data = json.loads((ROOT / "scripts/data" / (name + ".json")).read_text())
++    source = (ROOT / "payloads/raminit" / (name + ".c")).read_text()
++    expected_hash = data.pop("params_sha256")
++    assert canonical_hash(data) == expected_hash, "profile metadata hash mismatch"
++    assert data["source_bct_sha256"] == OFFICIAL_BCT_SHA256
++    assert data["source_bct_size"] == 8192
++    assert data["ram_code"] == data["sdram_slot"] == slot
++    assert data["parameter_count"] == len(data["parameters"]) == 309
++    assert "jibo_ramcode%d_sdram_params = {" % slot in source
++    assert "params_sha256: %s" % expected_hash in source
++    fields = dict(FIELD_RE.findall(source))
++    assert len(fields) == len(data["parameters"]), "C field count mismatch"
++    normalized = {key: int(value, 0) if value.startswith("0x") else value
++                  for key, value in fields.items()}
++    assert normalized == data["parameters"], "C parameters differ from pinned JSON"
++
++
++for code in (2, 3):
++    check_slot(code)
++print("RAM slots 2 and 3 match their pinned BCT-derived profiles.")
 diff --git a/tests/check_stage2_artifact.py b/tests/check_stage2_artifact.py
 new file mode 100644
-index 0000000..6d58ba8
+index 0000000..5c55836
 --- /dev/null
 +++ b/tests/check_stage2_artifact.py
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,112 @@
 +#!/usr/bin/env python3
 +"""Fail closed if the linked DFU stage payload lost its loader path."""
 +
@@ -12931,6 +13671,8 @@ index 0000000..6d58ba8
 +    required = {
 +        "entry",
 +        "jibo_init_dram",
++        "jibo_ramcode2_sdram_params",
++        "jibo_ramcode3_sdram_params",
 +        "sha256_init",
 +        "sha256_update",
 +        "sha256_final",

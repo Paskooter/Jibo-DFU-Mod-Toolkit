@@ -47,7 +47,7 @@ def _needs_full_var_fallback(api, error):
             error.status in (3, 4))
 
 
-def _offer_full_var_edit(error):
+def _offer_full_var_edit(error, includes_wifi=False):
     if getattr(error, "status", 3) == 4:
         prompt = "The ext4 journal needs recovery, so the RAM loader refused this file request."
         detail = ("A clean Linux unmount can clear the journal. The full transfer reads and "
@@ -55,6 +55,9 @@ def _offer_full_var_edit(error):
     else:
         prompt = "This file's ext4 layout cannot be edited by the current RAM loader."
         detail = "The full transfer reads and writes 500 MiB of var, then checks the result."
+        if includes_wifi:
+            detail = ("Stock RTM Wi-Fi files can span four blocks; the quick writer handles one. "
+                      + detail)
     return select_option(
         "Fast file edit unavailable",
         (("cancel", "Cancel without changing the robot"),
@@ -862,8 +865,10 @@ def execute_action(api, key, readiness):
             raise RuntimeError("The launch-enabled ShofEL DFU tool and payload are unavailable.")
         if not confirm_action(
                 "Enter DFU with ShofEL",
-                "Use the Meerkat Rev02 SDRAM profile to start the RAM recovery loader "
-                "on USB port {}?\nNo partition write is performed during entry.".format(
+                "Use the Meerkat Rev02 SDRAM profile (RAM slot 2 or 3, selected "
+                "from the robot's strap) to start recovery on USB port {}?\n"
+                "Slot 3 has not been tested on a live robot. No partition write "
+                "is performed during entry.".format(
                     readiness.port)):
             return {"status": "cancelled", "message": "DFU entry was cancelled."}
         return api.enter_shofel_dfu(port=readiness.port,
@@ -927,7 +932,7 @@ def execute_action(api, key, readiness):
                 except Exception as exc:
                     if not _needs_full_var_fallback(api, exc):
                         raise
-                    if not _offer_full_var_edit(exc):
+                    if not _offer_full_var_edit(exc, includes_wifi=True):
                         return {"status": "cancelled", "message": "Wi-Fi was not changed."}
             return api.configure_wifi_live(ssid, password, open_network,
                                            port=readiness.port, confirmation=confirmation)
@@ -965,7 +970,7 @@ def execute_action(api, key, readiness):
                 except Exception as exc:
                     if not _needs_full_var_fallback(api, exc):
                         raise
-                    if not _offer_full_var_edit(exc):
+                    if not _offer_full_var_edit(exc, includes_wifi=True):
                         return {"status": "cancelled", "message": "Mode and Wi-Fi were not changed."}
             return api.set_mode_wifi_live(mode, ssid, password, open_network,
                                           port=readiness.port, confirmation=confirmation)

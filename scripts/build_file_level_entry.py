@@ -49,6 +49,8 @@ def main():
         parser.error("candidate loader is missing: " + str(loader))
     size = loader.stat().st_size
     sha = digest(loader)
+    patch_path = ROOT / "patches/shofel2-dfu-entry.patch"
+    patch_sha = digest(patch_path)
     candidate_manifest = loader.parent / "manifest.json"
     if (not candidate_manifest.is_file() and
             sha == digest(ROOT / "assets/loader.bin")):
@@ -75,7 +77,9 @@ def main():
             generated = False
         if not generated:
             parser.error("existing ShofEL entry helper is not an intact generated build: " + str(out))
-        if built.get("loader_sha256") == sha and built.get("loader_size") == size:
+        if (built.get("loader_sha256") == sha and
+                built.get("loader_size") == size and
+                built.get("patch_sha256") == patch_sha):
             print("Reusing the matching ShofEL entry helper:", out)
             return
         replace_existing = True
@@ -85,8 +89,8 @@ def main():
         work = Path(temp) / "source"
         run("git", "clone", "--no-checkout", args.source, str(work))
         run("git", "checkout", "--detach", SHOFEL_COMMIT, cwd=work)
-        run("git", "apply", "--check", str(ROOT / "patches/shofel2-dfu-entry.patch"), cwd=work)
-        run("git", "apply", str(ROOT / "patches/shofel2-dfu-entry.patch"), cwd=work)
+        run("git", "apply", "--check", str(patch_path), cwd=work)
+        run("git", "apply", str(patch_path), cwd=work)
 
         header = work / "include/dfu_stage2_protocol.h"
         original = header.read_text()
@@ -135,6 +139,7 @@ def main():
             raise RuntimeError("candidate ShofEL host lacks launch support")
         (work / "candidate-entry-manifest.json").write_text(
             json.dumps({"loader_sha256": sha, "loader_size": size,
+                        "patch_sha256": patch_sha,
                         "shofel_commit": SHOFEL_COMMIT, "files_sha256": files},
                        indent=2) + "\n")
         if replace_existing:
