@@ -100,7 +100,7 @@ class TuiReadinessTests(unittest.TestCase):
             [{"port": "1-2", "state": "rcm"}], shofel_dfu=False))
         item = jibo_tui.build_menu_items(unavailable)[0]
         self.assertFalse(item.enabled)
-        self.assertIn("./run.sh", item.reason)
+        self.assertIn("Run the launcher to build it", item.reason)
 
         already_dfu = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-2", "state": "dfu"}], shofel_dfu=True))

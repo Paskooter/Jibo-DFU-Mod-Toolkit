@@ -1,11 +1,11 @@
 # Jibo DFU Mod Toolkit
 
-A guided Linux terminal tool for Jibo recovery, backups, mode and Wi-Fi settings, and official update packages. The workflow has two USB states:
+A guided terminal tool for Jibo recovery, backups, mode and Wi-Fi settings, and official update packages. Linux and WSL provide the verified workflow; macOS has the same workflow, including RCM-to-DFU entry, in an experimental state that has not yet been hardware-verified. The workflow has two USB states:
 
 1. Put the robot in **RCM/APX** (`0955:7740`). The toolkit uses ShofEL to load its recovery program into RAM.
 2. The robot reappears in **DFU** (`0955:701a`). All partition reads and writes use DFU. ShofEL is used only for the RCM-to-DFU entry step.
 
-The guided menu enables DFU entry when the robot is in RCM and partition actions after it appears in DFU. The launchers below open that menu. The `.pyz` package is generated locally and reused on later runs.
+The guided menu enables DFU entry when the robot is in RCM and partition actions after it appears in DFU. The launchers below open that menu. On Linux, the `.pyz` package is generated locally and reused on later runs; on macOS, the launcher runs the Python source with installed native dependencies and builds a native ShofEL entry helper.
 
 ## Quick path: stock Jibo to int-developer
 
@@ -65,7 +65,11 @@ Open PowerShell in the downloaded or cloned toolkit folder and run:
 
 The launcher selects that WSL 2 distribution, shares and attaches a connected Jibo USB device, then runs `run.sh` inside WSL. The robot can change from APX (`0955:7740`) to DFU (`0955:701a`); the launcher watches both USB identities while the menu is open. Sharing a new USB identity may show a Windows administrator prompt. Run `.\run.ps1 -Distro Ubuntu-22.04 -ManualUsb` if you prefer to attach from another PowerShell window with `usbipd bind --busid <BUSID>` (administrator) and `usbipd attach --wsl --busid <BUSID>`. The Linux `./run.sh` also works directly inside WSL with manual USB attachment. If PowerShell's script policy blocks the launcher, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Distro Ubuntu-22.04` for that invocation.
 
-macOS support is deferred.
+## macOS experimental workflow
+
+Intel and Apple silicon Macs can use `./run.sh` for the guided menu, RCM-to-DFU entry, local image tools, and partition operations. The launcher builds a native ShofEL entry helper against libusb, so the workflow matches Linux; **USB transfers and the RCM-to-DFU entry have not yet been verified on Mac hardware**, on either architecture.
+
+Install Python 3.10 or later, `dfu-util`, `libusb`, and `e2fsprogs` using Homebrew (`brew install python dfu-util libusb e2fsprogs`) or MacPorts (`sudo port install python312 dfu-util libusb e2fsprogs`), then run `./run.sh`. MacPorts provides a dependency option for older Intel Macs. See [macOS setup and verification](docs/macos.md) for package-manager selection, architecture requirements, and the initial hardware tests. The launcher checks installed tools, builds the entry helper, and uses `dfu-util` for transfers.
 
 ## Manual build and scripting
 

@@ -1,0 +1,49 @@
+name: macOS portability
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x86_64
+          - runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: brew install python dfu-util libusb e2fsprogs gcc-arm-none-eabi
+      - name: Check native launcher and USB enumeration
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+          /bin/bash -n run.sh run-macos.sh
+          ./run.sh --help
+          ./run.sh detect
+      - name: Verify the native RCM-to-DFU entry helper
+        run: |
+          test -x .build/file-level-entry/shofel2_t124
+          test -s .build/file-level-entry/intermezzo.bin
+          test -s .build/file-level-entry/dfu_stage2.bin
+          test "$(.build/file-level-entry/shofel2_t124 --dfu-stage-capability)" = "dfu-stage-launch=1"
+      - name: Test Mac USB selection and launcher behavior
+        run: python3 -m unittest discover -s tests -p test_macos.py -v
+      - name: Test bounded DFU reads
+        run: python3 -m unittest discover -s tests -p test_dfu_bounded.py -v
+      - name: Test local ext4 update preparation
+        run: |
+          ext4_prefix=$(brew --prefix e2fsprogs)
+          export PATH="$ext4_prefix/sbin:$ext4_prefix/bin:$PATH"
+          python3 -m unittest discover -s tests -p test_updates.py -v

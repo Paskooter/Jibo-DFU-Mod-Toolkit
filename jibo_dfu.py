@@ -50,6 +50,9 @@ SKILLS_SECTOR_SIZE = 512
 SKILLS_CHUNK_SECTORS = 0x200000
 SKILLS_CHUNK_BYTES = SKILLS_SECTOR_SIZE * SKILLS_CHUNK_SECTORS
 DEFAULT_LOADER = ROOT / "loader.bin"
+if not DEFAULT_LOADER.is_file() and (ROOT / "assets" / "loader.bin").is_file():
+    # Source checkouts keep the pinned loader in assets/; packages carry it at the root.
+    DEFAULT_LOADER = ROOT / "assets" / "loader.bin"
 PIPELINE_HELPER = ROOT / "jibo_dfu_pipeline.py"
 
 
@@ -95,7 +98,13 @@ class FileRpcStatusError(DfuError):
         super().__init__(message)
 
 
-def devices(root=Path("/sys/bus/usb/devices")):
+def devices(root=None):
+    if root is None and sys.platform == "darwin":
+        try:
+            return bounded.list_recovery_devices()
+        except bounded.BoundedDfuError as exc:
+            raise DfuError(str(exc)) from exc
+    root = Path(root) if root is not None else Path("/sys/bus/usb/devices")
     found = []
     for path in sorted(root.glob("*")):
         try:
@@ -340,8 +349,10 @@ def _transfer_error_detail(output):
 
 
 def tool(name, override=None):
+    override = override or (os.environ.get("JIBO_DFU_UTIL") if name == "dfu-util" else None)
     candidate = override or str(ROOT / "tools" / name)
-    if Path(candidate).is_file():
+    # Linux packages can leave ELF executables in tools/; Macs use native tools.
+    if (override or sys.platform != "darwin") and Path(candidate).is_file():
         return str(Path(candidate).resolve())
     if override:
         raise DfuError("Tool does not exist: " + override)
@@ -352,7 +363,7 @@ def tool(name, override=None):
 
 
 def _usbfs_available():
-    return Path("/dev/bus/usb").is_dir()
+    return sys.platform.startswith("linux") and Path("/dev/bus/usb").is_dir()
 
 
 def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=None,
@@ -380,13 +391,16 @@ def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=Non
 
 def _shofel_dfu_tool(override=None):
     """Find a matched ShofEL host and launch-enabled RAM payload."""
-    candidate = override or str(ROOT / "tools" / "shofel2_t124")
-    if not Path(candidate).is_file():
+    candidate = override or os.environ.get("JIBO_SHOFEL2") or str(ROOT / "tools" / "shofel2_t124")
+    # tools/ may hold Linux ELF executables from a package build; Macs use a native host.
+    if candidate == str(ROOT / "tools" / "shofel2_t124") and sys.platform == "darwin":
+        candidate = None
+    if not candidate or not Path(candidate).is_file():
         if override:
             raise DfuError("ShofEL host tool does not exist: " + str(override))
         candidate = shutil.which("shofel2_t124")
     if not candidate:
-        raise DfuError("Missing shofel2_t124; install it or provide --shofel.")
+        raise DfuError("Missing shofel2_t124; run the launcher to build it, install it, or provide --shofel.")
     executable = str(Path(candidate).resolve())
     if not os.access(executable, os.X_OK):
         raise DfuError("ShofEL host tool is not executable: " + executable)
@@ -2980,7 +2994,7 @@ def _display_devices():
     found = devices()
     if not found:
         print("No Jibo recovery USB device detected.")
-        print("Connect the robot by USB and enter recovery mode, or check USB forwarding.")
+        print("Connect the robot by USB and put it into recovery mode, or check the USB connection.")
         return found
     for device in found:
         if device["state"] == "rcm":
@@ -2997,7 +3011,7 @@ def _ask_confirmation(prompt, phrase=WRITE_CONFIRMATION):
 
 
 def _add_device_arguments(parser):
-    parser.add_argument("--port", help="Linux USB topology path, for example 1-2")
+    parser.add_argument("--port", help="USB bus-port path from detect, for example 1-2")
 
 
 def _add_dfu_argument(parser):

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Build the local Linux package when needed, then open the Jibo terminal UI.
+# Open the native macOS workflow or build and open the local Linux package.
 set -euo pipefail
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ $(uname -s) == Darwin ]]; then
+  exec /bin/bash "$repo_dir/run-macos.sh" "$@"
+fi
 package=${JIBO_PYZ:-$repo_dir/dist/jibo-dfu-linux-x86_64.pyz}
 loader=${JIBO_LOADER:-$repo_dir/assets/loader.bin}
 shofel_src=${JIBO_SHOFEL_SRC:-$repo_dir/.build/ShofEL2-for-T124}

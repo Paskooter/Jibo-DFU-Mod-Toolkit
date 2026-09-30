@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 from pathlib import Path
 import re
+import sys
 
 
 VID = 0x0955
@@ -115,15 +117,25 @@ _ConfigDescriptorP = ctypes.POINTER(_ConfigDescriptor)
 
 
 def _load_libusb():
-    library_name = ctypes.util.find_library("usb-1.0")
-    if not library_name:
-        raise BoundedDfuError(
-            "libusb-1.0 is required for the bounded DFU read (install the system libusb runtime)."
-        )
-    try:
-        lib = ctypes.CDLL(library_name)
-    except OSError as exc:
-        raise BoundedDfuError("Could not load libusb-1.0: " + str(exc)) from exc
+    override = os.environ.get("JIBO_LIBUSB")
+    candidates = [override] if override else [ctypes.util.find_library("usb-1.0")]
+    if not override and sys.platform == "darwin":
+        # dyld/find_library may not search Homebrew's keg on either architecture.
+        candidates.extend(str(Path(prefix) / "lib/libusb-1.0.dylib") for prefix in (
+            "/opt/homebrew/opt/libusb", "/usr/local/opt/libusb", "/opt/local"))
+    errors = []
+    lib = None
+    for library_name in dict.fromkeys(name for name in candidates if name):
+        try:
+            lib = ctypes.CDLL(library_name)
+            break
+        except OSError as exc:
+            errors.append(str(exc))
+    if lib is None:
+        hint = ("Install libusb with Homebrew or MacPorts and use Python and libusb of the same architecture."
+                if sys.platform == "darwin" else "Install the system libusb runtime.")
+        detail = " " + "; ".join(errors) if errors else ""
+        raise BoundedDfuError("Could not load libusb-1.0. " + hint + detail)
 
     lib.libusb_init.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     lib.libusb_init.restype = ctypes.c_int
@@ -194,12 +206,45 @@ def _check_rc(lib, rc, label):
 def _parse_port(port):
     match = re.fullmatch(r"([0-9]+)-([0-9]+(?:\.[0-9]+)*)", str(port))
     if not match:
-        raise BoundedDfuError("USB port must be a sysfs path such as 1-1 or 1-1.2.")
+        raise BoundedDfuError("USB port must be a bus-port path such as 1-1 or 1-1.2.")
     bus = int(match.group(1))
     ports = tuple(int(item) for item in match.group(2).split("."))
-    if bus < 1 or bus > 255 or not ports or any(number < 1 or number > 255 for number in ports):
-        raise BoundedDfuError("USB port path is outside the supported Linux USB topology range.")
+    minimum_bus = 0 if sys.platform == "darwin" else 1
+    if bus < minimum_bus or bus > 255 or not ports or any(number < 1 or number > 255 for number in ports):
+        raise BoundedDfuError("USB port path is outside the supported USB topology range.")
     return bus, ports
+
+
+def list_recovery_devices(*, libusb=None):
+    """List Jibo USB identities and libusb topology without opening a device."""
+    lib = libusb if libusb is not None else _load_libusb()
+    context = ctypes.c_void_p()
+    _check_rc(lib, lib.libusb_init(ctypes.byref(context)), "Could not initialize libusb")
+    device_list = ctypes.POINTER(_DeviceP)()
+    try:
+        count = lib.libusb_get_device_list(context, ctypes.byref(device_list))
+        _check_rc(lib, count, "Could not list USB devices")
+        found = []
+        for index in range(count):
+            device = device_list[index]
+            descriptor = _DeviceDescriptor()
+            rc = lib.libusb_get_device_descriptor(device, ctypes.byref(descriptor))
+            if rc < 0 or descriptor.idVendor != VID or descriptor.idProduct not in (PID, 0x7740):
+                continue
+            bus = int(lib.libusb_get_bus_number(device))
+            port_numbers = (ctypes.c_uint8 * 8)()
+            length = int(lib.libusb_get_port_numbers(device, port_numbers, len(port_numbers)))
+            _check_rc(lib, length, "Could not read the Jibo USB port path")
+            if not 0 < length <= len(port_numbers):
+                raise BoundedDfuError("The Jibo USB device has no usable port path.")
+            port = str(bus) + "-" + ".".join(str(number) for number in port_numbers[:length])
+            _parse_port(port)
+            found.append({"port": port, "state": "dfu" if descriptor.idProduct == PID else "rcm"})
+        return sorted(found, key=lambda device: _parse_port(device["port"]))
+    finally:
+        if device_list:
+            lib.libusb_free_device_list(device_list, 1)
+        lib.libusb_exit(context)
 
 
 def _verify_sysfs_device(port, sysfs_root):
@@ -378,7 +423,9 @@ def read_dfu_alt_prefix(port, alternate=DEFAULT_ALT_NAME, *, sysfs_root="/sys/bu
         raise BoundedDfuError("The bounded GPT helper only permits the read-only Jibo marker.")
     if libusb is None:
         libusb = _load_libusb()
-    _verify_sysfs_device(port, sysfs_root)
+    _parse_port(port)
+    if sys.platform.startswith("linux"):
+        _verify_sysfs_device(port, sysfs_root)
 
     context = ctypes.c_void_p()
     rc = libusb.libusb_init(ctypes.byref(context))

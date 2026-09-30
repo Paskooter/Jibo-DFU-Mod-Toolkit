@@ -1,8 +1,8 @@
 diff --git a/Makefile b/Makefile
-index 2e4d38e..1563c03 100644
+index 2e4d38e..b37a250 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -1,21 +1,44 @@
+@@ -1,23 +1,48 @@
  CFLAGS := -Wall -Werror -I include -MMD
  
 -BIN_FILES = reset_example.bin jtag_example.bin intermezzo.bin boot_bct.bin mem_dumper_usb_server.bin emmc_server.bin
@@ -32,6 +32,8 @@ index 2e4d38e..1563c03 100644
  
  CC_x86 = gcc
  CFLAGS_x86 := $(CFLAGS)
++LDFLAGS_x86 ?=
++LIBS_x86 ?=
 +DFU_STAGE2_ENABLE_LAUNCH ?= 0
 +CFLAGS_x86 += -DDFU_STAGE2_ENABLE_LAUNCH=$(DFU_STAGE2_ENABLE_LAUNCH)
  # shameless copypasta from https://stackoverflow.com/a/2908351/375416
@@ -47,9 +49,12 @@ index 2e4d38e..1563c03 100644
 +	$(CC_x86) $(CFLAGS_x86) -c -o $@ $<
 +
  shofel2_t124: $(OBJ_FILES_x86)
- 	$(CC_x86) $(CFLAGS_x86) -o $@ $^
+-	$(CC_x86) $(CFLAGS_x86) -o $@ $^
++	$(CC_x86) $(CFLAGS_x86) $(LDFLAGS_x86) -o $@ $^ $(LIBS_x86)
  
-@@ -29,20 +52,48 @@ CC_ARM = $(TOOLCHAIN_ARM)gcc
+ # ------------------------
+ 
+@@ -29,20 +54,48 @@ CC_ARM = $(TOOLCHAIN_ARM)gcc
  AS_ARM = $(TOOLCHAIN_ARM)as
  OBJCOPY_ARM = $(TOOLCHAIN_ARM)objcopy
  
@@ -100,7 +105,7 @@ index 2e4d38e..1563c03 100644
  build/reset_example.elf: build/obj_arm/reset_example.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
-@@ -61,6 +112,59 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
+@@ -61,6 +114,59 @@ build/emmc_server.elf: build/obj_arm/emmc_server.o
  build/intermezzo.elf: build/obj_arm/intermezzo.o
  	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^ -lgcc
  
@@ -160,7 +165,7 @@ index 2e4d38e..1563c03 100644
  %.bin: build/%.elf
  	$(OBJCOPY_ARM) -O binary $< $@
  
-@@ -68,9 +172,9 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
+@@ -68,9 +174,9 @@ build/intermezzo.elf: build/obj_arm/intermezzo.o
  
  
  clean:
@@ -497,23 +502,31 @@ index 0000000..0c711ea
 +        store_be32(digest + i * 4u, ctx->state[i]);
 +}
 diff --git a/exploit/mini_libusb.c b/exploit/mini_libusb.c
-index 5343eaa..6525642 100644
+index 5343eaa..41fcfca 100644
 --- a/exploit/mini_libusb.c
 +++ b/exploit/mini_libusb.c
-@@ -41,7 +41,11 @@ exit:
+@@ -1,5 +1,11 @@
+ #include "mini_libusb.h"
  
- }
- 
--int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
 +int usb_port_path_matches( const char *device_path, const char *selected_path ) {
 +    return !selected_path || ( device_path && !strcmp( device_path, selected_path ) );
 +}
 +
++#if !defined(JIBO_LIBUSB_BACKEND)
++
+ #define SYSFS_MOUNT_PATH	"/sys"
+ #define SYSFS_DEVICE_PATH	SYSFS_MOUNT_PATH "/bus/usb/devices"
+ 
+@@ -41,7 +47,7 @@ exit:
+ 
+ }
+ 
+-int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
 +static int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid, const char *port_path ) {
  
      int ret = -1;
      uint16_t d_vid, d_pid, d_bus, d_num;
-@@ -57,6 +61,9 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
+@@ -57,6 +63,9 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
  
          if ( !isdigit( entry->d_name[0] ) || strchr( entry->d_name, ':' ) )
  			continue;
@@ -523,7 +536,7 @@ index 5343eaa..6525642 100644
          
          if ( !usb_get_att( &d_vid, entry->d_name, "idVendor", 16 ) && ( vid == d_vid ) &&
               !usb_get_att( &d_pid, entry->d_name, "idProduct", 16 ) && ( pid == d_pid ) &&
-@@ -77,12 +84,16 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
+@@ -77,12 +86,16 @@ int usb_find_path_by_vid_pid( char *path, uint16_t vid, uint16_t pid ) {
  }
  
  int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait ) {
@@ -542,7 +555,7 @@ index 5343eaa..6525642 100644
          usleep( 500 );
      } while ( wait && ( ret < 0 ) );
      DEBUG_MSG( "USB Path: %s\n", path );
-@@ -164,10 +175,83 @@ int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data ) {
+@@ -164,10 +177,303 @@ int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data ) {
      bulk_txn.timeout = USB_BULK_TIMEOUT;
      bulk_txn.data = data;
  
@@ -627,8 +640,228 @@ index 5343eaa..6525642 100644
 +
 +    return 0;
 +}
++
++#else /* JIBO_LIBUSB_BACKEND */
++
++/* Portable libusb-1.0 backend for host platforms without Linux USBFS, such
++ * as macOS. The int handles used by the rest of the tool are slots in a tiny
++ * table; this host talks to one RCM device per run. */
++
++#define USB_OPEN_POLL_INTERVAL_US 100000
++
++static libusb_context *usb_context = NULL;
++static libusb_device_handle *usb_handles[2];
++
++static int usb_libusb_ready( void ) {
++    if ( usb_context )
++        return 0;
++    return libusb_init( &usb_context ) == 0 ? 0 : -1;
++}
++
++static libusb_device_handle *usb_handle_at( int usb ) {
++    if ( usb <= 0 || usb > (int)( sizeof( usb_handles ) / sizeof( usb_handles[0] ) ) )
++        return NULL;
++    return usb_handles[usb - 1];
++}
++
++static int usb_port_path_of_device( libusb_device *device, char *path, size_t path_len ) {
++    uint8_t ports[8];
++    int count = libusb_get_port_numbers( device, ports, sizeof( ports ) );
++    if ( count <= 0 )
++        return -1;
++    int bus = libusb_get_bus_number( device );
++    int used = snprintf( path, path_len, "%d-%u", bus, ports[0] );
++    for ( int index = 1; index < count; index++ )
++        used += snprintf( path + used, path_len - (size_t)used, ".%u", ports[index] );
++    if ( used <= 0 || (size_t)used >= path_len )
++        return -1;
++    return 0;
++}
++
++int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait ) {
++    return usb_open_by_vid_pid_port( vid, pid, wait, NULL );
++}
++
++int usb_open_by_vid_pid_port( uint16_t vid, uint16_t pid, uint8_t wait, const char *port_path ) {
++
++    if ( usb_libusb_ready() )
++        return -1;
++
++    int slot = -1;
++    for ( int index = 0; index < (int)( sizeof( usb_handles ) / sizeof( usb_handles[0] ) ); index++ ) {
++        if ( !usb_handles[index] ) {
++            slot = index;
++            break;
++        }
++    }
++    if ( slot < 0 )
++        return -1;
++
++    libusb_device_handle *handle = NULL;
++    do {
++        libusb_device **list = NULL;
++        ssize_t count = libusb_get_device_list( usb_context, &list );
++        if ( count < 0 ) {
++            if ( wait )
++                usleep( USB_OPEN_POLL_INTERVAL_US );
++            continue;
++        }
++        for ( ssize_t index = 0; index < count && !handle; index++ ) {
++            struct libusb_device_descriptor descriptor;
++            char device_path[32];
++            if ( libusb_get_device_descriptor( list[index], &descriptor ) )
++                continue;
++            if ( descriptor.idVendor != vid || descriptor.idProduct != pid )
++                continue;
++            if ( usb_port_path_of_device( list[index], device_path, sizeof( device_path ) ) )
++                continue;
++            if ( !usb_port_path_matches( device_path, port_path ) )
++                continue;
++            if ( libusb_open( list[index], &handle ) )
++                continue;
++            libusb_set_auto_detach_kernel_driver( handle, 1 );
++            (void) libusb_set_configuration( handle, 1 );
++            if ( libusb_claim_interface( handle, 0 ) ) {
++                fprintf( stderr, "USB device %s (0x%04x:0x%04x) could not be claimed; unplug it, reconnect, and retry.\n",
++                         device_path, vid, pid );
++                libusb_close( handle );
++                handle = NULL;
++            }
++        }
++        libusb_free_device_list( list, 1 );
++        if ( handle )
++            DEBUG_MSG( "USB Port Path: slot %d\n", slot + 1 );
++        else if ( wait )
++            usleep( USB_OPEN_POLL_INTERVAL_US );
++    } while ( wait && !handle );
++
++    if ( !handle )
++        return -1;
++
++    usb_handles[slot] = handle;
++    return slot + 1;
++}
++
++int usb_close( int usb ) {
++    libusb_device_handle *handle = usb_handle_at( usb );
++    if ( handle ) {
++        libusb_release_interface( handle, 0 );
++        libusb_close( handle );
++        usb_handles[usb - 1] = NULL;
++    }
++    if ( usb_context && !usb_handle_at( 1 ) && !usb_handle_at( 2 ) ) {
++        libusb_exit( usb_context );
++        usb_context = NULL;
++    }
++    return usb;
++}
++
++int usb_send_control_txn( int usb, uint8_t bRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint16_t len, uint8_t *data, int32_t timeout ) {
++
++    libusb_device_handle *handle = usb_handle_at( usb );
++    if ( !handle )
++        return -1;
++
++    int transferred = libusb_control_transfer( handle, bRequestType, bRequest,
++                                               wValue, wIndex, data, len,
++                                               timeout > 0 ? (unsigned int)timeout : 0 );
++    if ( transferred < 0 ) {
++        fprintf( stderr, "USB control transfer 0x%02x/0x%02x failed: %s\n",
++                 bRequestType, bRequest, libusb_error_name( transferred ) );
++        return -1;
++    }
++
++    return 0;
++}
++
++int usb_send_bulk_txn( int usb, uint32_t ep, uint32_t len, void *data ) {
++
++    libusb_device_handle *handle = usb_handle_at( usb );
++    if ( !handle )
++        return -1;
++
++    int transferred = 0;
++    int ret = libusb_bulk_transfer( handle, (unsigned char)ep, data, (int)len,
++                                   &transferred, USB_BULK_TIMEOUT );
++    if ( ret == 0 && transferred == (int)len )
++        return 0;
++
++    if ( ret < 0 ) {
++        fprintf( stderr, "USB bulk endpoint 0x%02x failed after requesting %u bytes: %s\n",
++                 ep, len, libusb_error_name( ret ) );
++    } else {
++        fprintf( stderr, "USB bulk endpoint 0x%02x short transfer: received %d of %u bytes\n",
++                 ep, transferred, len );
++    }
++
++    return -1;
++}
++
++/* Mirror of the USBFS accumulate loop: collect a stream composed of
++ * consecutive BootROM EP1_IN writes across short-packet completions. */
++int usb_receive_bulk_accumulate( int usb, uint32_t ep, uint32_t len, void *data ) {
++
++    libusb_device_handle *handle = usb_handle_at( usb );
++    if ( !handle )
++        return -1;
++
++    uint32_t received = 0;
++    uint32_t calls = 0;
++    uint32_t zero_length_completions = 0;
++    static int reported_short_chunk = 0;
++
++    while ( received < len ) {
++        uint32_t requested = len - received;
++        int transferred = 0;
++        int ret = libusb_bulk_transfer( handle, (unsigned char)ep,
++                                        (unsigned char *)data + received, (int)requested,
++                                        &transferred, USB_BULK_TIMEOUT );
++        calls++;
++        if ( ret < 0 ) {
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x failed after receiving %u of %u bytes: %s\n",
++                     ep, received, len, libusb_error_name( ret ) );
++            return -1;
++        }
++        if ( (uint32_t)transferred > requested ) {
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x returned invalid length %d for a %u-byte request\n",
++                     ep, transferred, requested );
++            return -1;
++        }
++        if ( transferred == 0 ) {
++            zero_length_completions++;
++            if ( zero_length_completions > 3 ) {
++                fprintf( stderr,
++                         "USB bulk endpoint 0x%02x made no progress after %u of %u bytes (%u zero-length completions)\n",
++                         ep, received, len, zero_length_completions );
++                return -1;
++            }
++        } else {
++            zero_length_completions = 0;
++            received += (uint32_t)transferred;
++            if ( (uint32_t)transferred < requested && !reported_short_chunk ) {
++                fprintf( stderr,
++                         "USB bulk endpoint 0x%02x returned a short chunk (%d of %u bytes); continuing at byte %u\n",
++                         ep, transferred, requested, received );
++                reported_short_chunk = 1;
++            }
++        }
++
++        if ( received < len && calls >= USB_BULK_ACCUMULATE_MAX_CALLS ) {
++            fprintf( stderr,
++                     "USB bulk endpoint 0x%02x exceeded %u requests after receiving %u of %u bytes\n",
++                     ep, USB_BULK_ACCUMULATE_MAX_CALLS, received, len );
++            return -1;
++        }
++    }
++
++    return 0;
++}
++
++#endif /* JIBO_LIBUSB_BACKEND */
 diff --git a/exploit/shofel2_t124.c b/exploit/shofel2_t124.c
-index 9e49a2f..bd0706b 100644
+index 9e49a2f..b183e27 100644
 --- a/exploit/shofel2_t124.c
 +++ b/exploit/shofel2_t124.c
 @@ -2,6 +2,7 @@
@@ -1145,7 +1378,7 @@ index 9e49a2f..bd0706b 100644
  
 -    fprintf( stderr, "shofel2_t124 ( MEM_DUMP | READ_FUSES | BOOT_BCT | PAYLOAD | DUMP_STACK | EMMC_STATUS | EMMC_READ | EMMC_WRITE | EMMC_READ_EXT_CSD | EMMC_ERASE ) [options]\n"
 +    fprintf( stderr, "shofel2_t124 [--usb-port-path PORT] [--bus-width 8] COMMAND [ARGUMENTS]\n"
-+                "\t* --usb-port-path PORT -> Select the exact USB sysfs topology path (for example, 1-2.3).\n"
++                "\t* --usb-port-path PORT -> Select the exact USB bus-port topology path (for example, 1-2.3 or 0-3).\n"
 +                "\t* --bus-width 8 -> Opt in to a verified 8-bit bus for EMMC_READ only (default: 1-bit).\n"
 +                "\t* DRAM_STATUS -> Reports read-only T124 DRAM/EMC state; tests 16 bytes at 0x80108000 only when the register gate passes.\n"
 +                "\t* DRAM_TRACE -> Reads T124 DRAM/EMC state one operation at a time, with EP1 ACKs between phases.\n"
@@ -2317,10 +2550,21 @@ index 0000000..aa0978e
 +
 +#endif
 diff --git a/include/mini_libusb.h b/include/mini_libusb.h
-index 7c55998..329a042 100644
+index 7c55998..c37b294 100644
 --- a/include/mini_libusb.h
 +++ b/include/mini_libusb.h
-@@ -20,6 +20,7 @@
+@@ -13,13 +13,18 @@
+ #include <errno.h>
+ #include <ctype.h>
+ 
++#if !defined(JIBO_LIBUSB_BACKEND)
+ #include <sys/ioctl.h>
+ #include <linux/usbdevice_fs.h>
++#else
++#include <libusb.h>
++#endif
+ 
+ #define USB_CTRL_DEVICE_ENDPOINT_TO_HOST 0x82
  #define USB_CTRL_GET_STATUS 0x00
  
  #define USB_BULK_TIMEOUT 500
@@ -2328,11 +2572,11 @@ index 7c55998..329a042 100644
  
  #if DEBUG
      #define DEBUG_MSG(fmt, ...) do { fprintf( stderr, "%s:%d:%s(): " fmt, \
-@@ -29,9 +30,12 @@
+@@ -29,9 +34,12 @@
  #endif
  
  int usb_open_by_vid_pid( uint16_t vid, uint16_t pid, uint8_t wait );
-+/* port_path is an exact sysfs topology name, such as "1-2.3". */
++/* port_path is an exact bus-port topology name, such as "1-2.3" or "0-3". */
 +int usb_open_by_vid_pid_port( uint16_t vid, uint16_t pid, uint8_t wait, const char *port_path );
 +int usb_port_path_matches( const char *device_path, const char *selected_path );
  int usb_close( int usb );

@@ -160,7 +160,7 @@ def build_menu_items(readiness, update_packages=()):
 
     if readiness.state == "rcm":
         shofel_dfu_reason = ("" if readiness.shofel_dfu_available else
-                             "The DFU entry helper is unavailable. Run ./run.sh to build the toolkit package.")
+                             "The DFU entry helper is unavailable. Run the launcher to build it.")
     elif readiness.state == "multiple":
         shofel_dfu_reason = "Connect one robot at a time."
     elif readiness.state in ("dfu-ready", "dfu-error", "dfu-no-marker",

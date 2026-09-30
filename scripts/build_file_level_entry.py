@@ -4,9 +4,12 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -20,6 +23,7 @@ PINNED_HASH = (
     "    0x04, 0x8c, 0x01, 0x9b, 0x14, 0x79, 0x30, 0xda,\n"
     "    0x35, 0xb9, 0xd6, 0x2e, 0x00, 0xc5, 0xe6, 0x89"
 )
+ARM_PAYLOADS = ("intermezzo.bin", "dfu_stage2.bin")
 
 
 def digest(path):
@@ -34,10 +38,85 @@ def run(*command, cwd=None):
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def host_platform():
+    """Return the host identity that a built shofel2_t124 binary belongs to."""
+    return "-".join((sys.platform, platform.machine()))
+
+
+def candidate_libusb_prefixes():
+    """Return libusb prefixes in the same order the toolkit's libusb loader uses."""
+    prefixes = []
+    override = os.environ.get("JIBO_LIBUSB")
+    if override:
+        prefixes.append(str(Path(override).resolve().parent.parent))
+    prefixes.extend(("/opt/homebrew/opt/libusb", "/usr/local/opt/libusb", "/opt/local"))
+    return list(dict.fromkeys(prefixes))
+
+
+def resolve_libusb_prefix(explicit):
+    for prefix in ([explicit] if explicit else candidate_libusb_prefixes()):
+        if any((Path(prefix) / branch).is_file()
+               for branch in ("lib/libusb-1.0.dylib", "lib/libusb-1.0.so", "lib/libusb-1.0.so.0")):
+            return Path(prefix)
+    raise RuntimeError(
+        "libusb-1.0 development files were not found for the native ShofEL host build. "
+        "Pass --libusb-prefix or set JIBO_LIBUSB to the libusb prefix or dylib path.")
+
+
+def darwin_host_make_variables(libusb_prefix):
+    """Return make overrides that build the ShofEL host with clang and libusb."""
+    for command in ("cc", "clang", "/usr/bin/gcc"):
+        if shutil.which(command):
+            break
+    else:
+        raise RuntimeError("A C compiler is required; install the Xcode Command Line Tools.")
+    prefix = Path(libusb_prefix)
+    includes = ["-I" + str(prefix / "include"), "-I" + str(prefix / "include/libusb-1.0")]
+    return ("CC_x86=" + command,
+            "CFLAGS_x86=-Wall -Werror -I include -MMD -DJIBO_LIBUSB_BACKEND=1 "
+            "-DDFU_STAGE2_ENABLE_LAUNCH=1 " + " ".join(includes),
+            "LIBS_x86=-L" + str(prefix / "lib") + " -lusb-1.0")
+
+
+def copy_reusable_payloads(work, source):
+    """Copy ARM payloads from a verified intact entry build instead of rebuilding."""
+    for name in ARM_PAYLOADS:
+        source_file = Path(source) / name
+        if not source_file.is_file() or source_file.stat().st_size == 0:
+            raise RuntimeError("The reusable entry build is missing " + name)
+        shutil.copy2(source_file, Path(work) / name)
+
+
+def verify_built_pair(work, loader_sha):
+    """Verify the entry pair artifacts and return their digests."""
+    files = {}
+    for name in ("shofel2_t124",) + ARM_PAYLOADS:
+        path = work / name
+        if not path.is_file() or not path.stat().st_size:
+            raise RuntimeError("missing built ShofEL artifact: " + name)
+        files[name] = digest(path)
+    for name in ("shofel2_t124", "dfu_stage2.bin"):
+        binary = (work / name).read_bytes()
+        if binary.count(bytes.fromhex(loader_sha)) != 1 or bytes.fromhex(
+                "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689") in binary:
+            raise RuntimeError("built {} does not contain only the candidate loader hash".format(name))
+    capability = subprocess.check_output(
+        [str(work / "shofel2_t124"), "--dfu-stage-capability"],
+        text=True).strip()
+    if capability != "dfu-stage-launch=1":
+        raise RuntimeError("candidate ShofEL host lacks launch support")
+    return files
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=SHOFEL_REPOSITORY,
                         help="ShofEL Git repository, URL or local directory")
+    parser.add_argument("--libusb-prefix", default=None,
+                        help="libusb prefix for the macOS host build (Homebrew or MacPorts keg)")
+    parser.add_argument("--payloads-from", default=None, type=Path,
+                        help="Reuse the ARM payloads from an intact generated entry build "
+                             "instead of rebuilding them (macOS without an ARM toolchain)")
     parser.add_argument("--loader", type=Path, default=ROOT / "assets/loader.bin")
     parser.add_argument("--out", type=Path, default=ROOT / ".build/file-level-entry")
     args = parser.parse_args()
@@ -64,6 +143,7 @@ def main():
     if not 0 < size < 4 * 1024 * 1024:
         parser.error("candidate loader size is outside the stage-2 DRAM range")
     replace_existing = False
+    reusable_payloads = None
     if out.exists():
         manifest_path = out / "candidate-entry-manifest.json"
         try:
@@ -71,18 +151,29 @@ def main():
             files = built["files_sha256"]
             generated = (built["shofel_commit"] == SHOFEL_COMMIT and
                          all(digest(out / name) == files[name]
-                             for name in ("shofel2_t124", "intermezzo.bin",
-                                          "dfu_stage2.bin")))
+                             for name in ("shofel2_t124",) + ARM_PAYLOADS))
         except (OSError, KeyError, ValueError, TypeError):
             generated = False
         if not generated:
             parser.error("existing ShofEL entry helper is not an intact generated build: " + str(out))
-        if (built.get("loader_sha256") == sha and
-                built.get("loader_size") == size and
-                built.get("patch_sha256") == patch_sha):
+        matches_current = (built.get("loader_sha256") == sha and
+                           built.get("loader_size") == size and
+                           built.get("patch_sha256") == patch_sha)
+        if matches_current and built.get("host_platform") == host_platform():
             print("Reusing the matching ShofEL entry helper:", out)
             return
+        if matches_current:
+            reusable_payloads = out
         replace_existing = True
+    if args.payloads_from:
+        reusable_payloads = Path(args.payloads_from)
+
+    on_darwin = sys.platform == "darwin"
+    if on_darwin and reusable_payloads is None and not shutil.which("arm-none-eabi-gcc"):
+        raise RuntimeError(
+            "The ARM payload build needs arm-none-eabi-gcc (brew install gcc-arm-none-eabi, "
+            "or port install arm-none-eabi-gcc). Alternatively, copy an intact entry build "
+            "from a machine that already built it and rerun with --payloads-from.")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".shofel-entry-", dir=out.parent) as temp:
@@ -120,26 +211,20 @@ def main():
         source = source.replace("expected_sha256[i]", "DFU_STAGE2_EXPECTED_SHA256[i]")
         payload.write_text(source)
 
-        run("make", "-B", "DFU_STAGE2_ENABLE_LAUNCH=1", "all", "test", cwd=work)
-        files = {}
-        for name in ("shofel2_t124", "intermezzo.bin", "dfu_stage2.bin"):
-            path = work / name
-            if not path.is_file() or not path.stat().st_size:
-                raise RuntimeError("missing built ShofEL artifact: " + name)
-            files[name] = digest(path)
-        for name in ("shofel2_t124", "dfu_stage2.bin"):
-            binary = (work / name).read_bytes()
-            if binary.count(bytes.fromhex(sha)) != 1 or bytes.fromhex(
-                    "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689") in binary:
-                raise RuntimeError("built {} does not contain only the candidate loader hash".format(name))
-        capability = subprocess.check_output(
-            [str(work / "shofel2_t124"), "--dfu-stage-capability"],
-            text=True).strip()
-        if capability != "dfu-stage-launch=1":
-            raise RuntimeError("candidate ShofEL host lacks launch support")
+        if on_darwin:
+            host_vars = darwin_host_make_variables(
+                resolve_libusb_prefix(args.libusb_prefix))
+            if reusable_payloads is not None:
+                run("make", "-B", "shofel2_t124", *host_vars, cwd=work)
+                copy_reusable_payloads(work, reusable_payloads)
+            else:
+                run("make", "-B", *host_vars, "all", "test", cwd=work)
+        else:
+            run("make", "-B", "DFU_STAGE2_ENABLE_LAUNCH=1", "all", "test", cwd=work)
+        files = verify_built_pair(work, sha)
         (work / "candidate-entry-manifest.json").write_text(
             json.dumps({"loader_sha256": sha, "loader_size": size,
-                        "patch_sha256": patch_sha,
+                        "patch_sha256": patch_sha, "host_platform": host_platform(),
                         "shofel_commit": SHOFEL_COMMIT, "files_sha256": files},
                        indent=2) + "\n")
         if replace_existing:
