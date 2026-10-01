@@ -78,6 +78,41 @@ def darwin_host_make_variables(libusb_prefix):
             "LIBS_x86=-L" + str(prefix / "lib") + " -lusb-1.0")
 
 
+def validate_payload_source(source, loader_sha, patch_sha, commit):
+    """Verify a reusable ARM payload directory against its pinned manifest.
+
+    Raises RuntimeError when the payloads do not exactly match the current
+    loader, patch, or ShofEL commit, or when their digests differ.
+    """
+    source = Path(source)
+    built = None
+    for manifest_name in ("manifest.json", "candidate-entry-manifest.json"):
+        manifest = source / manifest_name
+        if not manifest.is_file():
+            continue
+        try:
+            built = json.loads(manifest.read_text())
+        except ValueError as exc:
+            raise RuntimeError(str(source) + " has an unreadable payload manifest: " + str(exc))
+        break
+    if built is None:
+        raise RuntimeError(str(source) + " has no payload manifest")
+    if built.get("shofel_commit") != commit:
+        raise RuntimeError(str(source) + " was built from a different ShofEL commit")
+    if built.get("patch_sha256") != patch_sha:
+        raise RuntimeError(str(source) + " was built with a different ShofEL patch")
+    if built.get("loader_sha256") != loader_sha:
+        raise RuntimeError(str(source) + " was built for a different RAM loader")
+    files = built["files_sha256"]
+    for name in ARM_PAYLOADS:
+        path = source / name
+        if not path.is_file() or not path.stat().st_size:
+            raise RuntimeError(str(source) + " is missing " + name)
+        if digest(path) != files[name]:
+            raise RuntimeError(str(source) + "/" + name + " does not match its manifest digest")
+    return source
+
+
 def copy_reusable_payloads(work, source):
     """Copy ARM payloads from a verified intact entry build instead of rebuilding."""
     for name in ARM_PAYLOADS:
@@ -115,8 +150,12 @@ def main():
     parser.add_argument("--libusb-prefix", default=None,
                         help="libusb prefix for the macOS host build (Homebrew or MacPorts keg)")
     parser.add_argument("--payloads-from", default=None, type=Path,
-                        help="Reuse the ARM payloads from an intact generated entry build "
-                             "instead of rebuilding them (macOS without an ARM toolchain)")
+                        help="Reuse the ARM payloads from a manifest-verified payload "
+                             "source instead of rebuilding them (macOS without an ARM "
+                             "toolchain); defaults to the pinned assets/entry-payloads")
+    parser.add_argument("--build-payloads", action="store_true",
+                        help="Build the ARM payloads from source with arm-none-eabi-gcc "
+                             "instead of reusing a verified payload source")
     parser.add_argument("--loader", type=Path, default=ROOT / "assets/loader.bin")
     parser.add_argument("--out", type=Path, default=ROOT / ".build/file-level-entry")
     args = parser.parse_args()
@@ -143,7 +182,9 @@ def main():
     if not 0 < size < 4 * 1024 * 1024:
         parser.error("candidate loader size is outside the stage-2 DRAM range")
     replace_existing = False
-    reusable_payloads = None
+    payload_source = None
+    if args.payloads_from and args.build_payloads:
+        parser.error("--payloads-from and --build-payloads are mutually exclusive")
     if out.exists():
         manifest_path = out / "candidate-entry-manifest.json"
         try:
@@ -159,21 +200,42 @@ def main():
         matches_current = (built.get("loader_sha256") == sha and
                            built.get("loader_size") == size and
                            built.get("patch_sha256") == patch_sha)
-        if matches_current and built.get("host_platform") == host_platform():
+        if matches_current and built.get("host_platform") == host_platform() \
+                and not args.build_payloads:
             print("Reusing the matching ShofEL entry helper:", out)
             return
-        if matches_current:
-            reusable_payloads = out
+        if matches_current and not args.build_payloads:
+            payload_source = out
         replace_existing = True
-    if args.payloads_from:
-        reusable_payloads = Path(args.payloads_from)
 
     on_darwin = sys.platform == "darwin"
-    if on_darwin and reusable_payloads is None and not shutil.which("arm-none-eabi-gcc"):
-        raise RuntimeError(
-            "The ARM payload build needs arm-none-eabi-gcc (brew install gcc-arm-none-eabi, "
-            "or port install arm-none-eabi-gcc). Alternatively, copy an intact entry build "
-            "from a machine that already built it and rerun with --payloads-from.")
+    if on_darwin and not args.build_payloads:
+        if args.payloads_from:
+            try:
+                payload_source = validate_payload_source(
+                    args.payloads_from, sha, patch_sha, SHOFEL_COMMIT)
+            except (RuntimeError, OSError, KeyError) as exc:
+                parser.error(str(exc))
+        elif payload_source is None:
+            # Pinned payloads shipped with the toolkit; validated against the
+            # current loader, patch, and commit before use.
+            try:
+                payload_source = validate_payload_source(
+                    ROOT / "assets" / "entry-payloads", sha, patch_sha, SHOFEL_COMMIT)
+            except (RuntimeError, OSError, KeyError):
+                payload_source = None
+        elif payload_source is not None:
+            try:
+                payload_source = validate_payload_source(
+                    payload_source, sha, patch_sha, SHOFEL_COMMIT)
+            except (RuntimeError, OSError, KeyError) as exc:
+                parser.error(str(exc))
+        if payload_source is None and not shutil.which("arm-none-eabi-gcc"):
+            raise RuntimeError(
+                "The ARM payloads need either the pinned assets/entry-payloads directory "
+                "(missing or stale for this loader and patch) or arm-none-eabi-gcc "
+                "(brew install arm-none-eabi-gcc, bottled for Apple silicon, "
+                "or port install arm-none-eabi-gcc). See docs/macos.md.")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".shofel-entry-", dir=out.parent) as temp:
@@ -214,9 +276,9 @@ def main():
         if on_darwin:
             host_vars = darwin_host_make_variables(
                 resolve_libusb_prefix(args.libusb_prefix))
-            if reusable_payloads is not None:
+            if payload_source is not None:
                 run("make", "-B", "shofel2_t124", *host_vars, cwd=work)
-                copy_reusable_payloads(work, reusable_payloads)
+                copy_reusable_payloads(work, payload_source)
             else:
                 run("make", "-B", *host_vars, "all", "test", cwd=work)
         else:

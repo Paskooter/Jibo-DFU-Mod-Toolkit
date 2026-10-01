@@ -1,0 +1,10 @@
+{
+  "kind": "shofel-entry-arm-payloads",
+  "shofel_commit": "31ac3a260c8a1501869aff6690b3b9ad4904ef58",
+  "patch_sha256": "3331d2abaa35b513feff3d11a75ffb62876f194ef4b059971738457e71bd3fcd",
+  "loader_sha256": "7105edf6d7d9b68e32aef3f2c331a348e0612210cc9bd1c06bb26bba33b8e8c0",
+  "files_sha256": {
+    "intermezzo.bin": "c1989c4f459d4c1be6906548a4846997ca4f8b9b46dedeaf77e2b25068045bcc",
+    "dfu_stage2.bin": "708a8c62628f4c0d326b5d46bb5c03ce90abf7dad407f76ee843e343fd1db49e"
+  }
+}

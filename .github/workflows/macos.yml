@@ -21,9 +21,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install native dependencies
-        run: brew install python dfu-util libusb e2fsprogs gcc-arm-none-eabi
+        run: brew install python dfu-util libusb e2fsprogs
       - name: Check native launcher and USB enumeration
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
@@ -38,6 +38,13 @@ jobs:
           test -s .build/file-level-entry/intermezzo.bin
           test -s .build/file-level-entry/dfu_stage2.bin
           test "$(.build/file-level-entry/shofel2_t124 --dfu-stage-capability)" = "dfu-stage-launch=1"
+      - name: Build the entry payloads from source (Apple silicon)
+        if: matrix.architecture == 'arm64'
+        run: |
+          brew install arm-none-eabi-gcc
+          python3 scripts/build_file_level_entry.py --build-payloads \
+            --source .build/ShofEL2-for-T124 --out "$RUNNER_TEMP/entry-from-source"
+          test "$("$RUNNER_TEMP/entry-from-source/shofel2_t124" --dfu-stage-capability)" = "dfu-stage-launch=1"
       - name: Test Mac USB selection and launcher behavior
         run: python3 -m unittest discover -s tests -p test_macos.py -v
       - name: Test bounded DFU reads

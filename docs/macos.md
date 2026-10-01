@@ -90,17 +90,28 @@ JIBO_MAC_PREFIX=/opt/local ./run.sh detect
 The entry helper consists of a native host program (`shofel2_t124`) plus two ARM
 payloads (`intermezzo.bin`, `dfu_stage2.bin`). The launcher builds the host
 with `cc` against libusb on first run and reuses the intact pair afterwards.
-The ARM payloads are device code, not Mac code, and can come from either:
 
-- a **reuse of an existing intact entry build** (the default when one is
-  present, for example after copying the repository from your Linux machine),
-  or
-- a **native payload build** with `arm-none-eabi-gcc`
-  (`brew install gcc-arm-none-eabi` or `port install arm-none-eabi-gcc`).
+The ARM payloads are device code, not Mac code, and the toolkit ships them
+pinned in `assets/entry-payloads` with a SHA-256 manifest tied to the RAM
+loader, the ShofEL patch, and the fork commit. The build validates that
+manifest before use, so **no ARM cross-compiler is needed on a Mac**. To build
+the payloads from source instead, install an ARM toolchain
+(`brew install arm-none-eabi-gcc`, bottled for Apple silicon, or
+`port install arm-none-eabi-gcc`) and run
+`python3 scripts/build_file_level_entry.py --build-payloads` once; when
+Homebrew has no bottle for your system (recent Intel macOS), use MacPorts or
+the pinned payloads. A payload source can also be selected explicitly:
 
-`JIBO_PAYLOADS_FROM=/path/to/an/intact/entry/build` selects the first option
-explicitly. The build verifies the loader manifest, the embedded loader hash,
-and the helper's launch capability before the menu opens.
+```sh
+JIBO_PAYLOADS_FROM=/path/to/an/intact/entry/build ./run.sh detect
+```
+
+The build verifies the loader manifest, the embedded loader hash, and the
+helper's launch capability before the menu opens. If the pinned payloads fall
+out of date after a loader or patch change, regenerate them by running the
+build once on a machine with `arm-none-eabi-gcc` and copying the resulting
+`intermezzo.bin` and `dfu_stage2.bin` back into `assets/entry-payloads` with
+an updated `manifest.json`.
 
 The launcher runs as your Mac user and does not request `sudo`. An actual USB
 permission error needs investigation on the affected host. Backups use
@@ -162,9 +173,10 @@ backends compile with `-Wall -Werror` on Linux, and the default Linux build is
 unchanged. The existing Linux test suite also checks the shared workflows.
 
 The [macOS CI workflow](../.github/workflows/macos.yml) is configured to install
-native dependencies and the ARM payload toolchain, build the entry helper,
-start the launcher, enumerate USB devices, and test Mac selection logic and
-local ext4 preparation on Intel and ARM runners. It uses GitHub's documented
+native dependencies, build the entry helper from the pinned payloads, start
+the launcher, enumerate USB devices, test Mac selection logic and local ext4
+preparation on Intel and ARM runners, and rebuild the payloads from source
+with `arm-none-eabi-gcc` on Apple silicon. It uses GitHub's documented
 [Intel and ARM macOS runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 The workflow has not been run as part of this implementation session. Hosted
 runners have no Jibo attached, so passing CI would establish host portability,
