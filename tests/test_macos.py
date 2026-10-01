@@ -161,14 +161,16 @@ class MacUsbTests(unittest.TestCase):
             (root / "tools").mkdir()
             bundled = root / "tools/dfu-util"
             bundled.write_bytes(b"ELF placeholder")
+            # tool() resolves paths; macOS symlinks /var to /private/var.
+            resolved = str(bundled.resolve())
             with patch.object(toolkit.sys, "platform", "darwin"), \
                     patch.object(toolkit, "ROOT", root), \
                     patch.dict(os.environ, {"JIBO_DFU_UTIL": ""}), \
                     patch.object(toolkit.shutil, "which", return_value="/native/dfu-util"):
                 self.assertEqual(toolkit.tool("dfu-util"), "/native/dfu-util")
-                self.assertEqual(toolkit.tool("dfu-util", str(bundled)), str(bundled))
+                self.assertEqual(toolkit.tool("dfu-util", str(bundled)), resolved)
                 with patch.dict(os.environ, {"JIBO_DFU_UTIL": str(bundled)}):
-                    self.assertEqual(toolkit.tool("dfu-util"), str(bundled))
+                    self.assertEqual(toolkit.tool("dfu-util"), resolved)
 
     def test_mac_shofel_tool_rejects_bundled_linux_elf_and_honors_env(self):
         with tempfile.TemporaryDirectory() as directory:
