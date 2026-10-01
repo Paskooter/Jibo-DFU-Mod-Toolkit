@@ -1,17 +1,17 @@
 # Jibo DFU Mod Toolkit
 
-A guided terminal tool for Jibo recovery, backups, mode and Wi-Fi settings, and official update packages. Linux and WSL provide the verified workflow; macOS has the same workflow, including RCM-to-DFU entry, in an experimental state that has not yet been hardware-verified. The workflow has two USB states:
+A guided terminal tool for Jibo recovery, backups, mode and Wi-Fi settings, and official update packages. It runs on Linux, WSL, and macOS with the same guided menu and RCM-to-DFU entry on each. The workflow has two USB states:
 
 1. Put the robot in **RCM/APX** (`0955:7740`). The toolkit uses ShofEL to load its recovery program into RAM.
 2. The robot reappears in **DFU** (`0955:701a`). All partition reads and writes use DFU. ShofEL is used only for the RCM-to-DFU entry step.
 
-The guided menu enables DFU entry when the robot is in RCM and partition actions after it appears in DFU. The launchers below open that menu. On Linux, the `.pyz` package is generated locally and reused on later runs; on macOS, the launcher runs the Python source with installed native dependencies and builds a native ShofEL entry helper.
+The guided menu enables DFU entry when the robot is in RCM and partition actions after it appears in DFU. The launchers below open that menu. On Linux, the `.pyz` package is generated locally and reused on later runs; on macOS, the launcher runs the Python source directly.
 
 ## Quick path: stock Jibo to int-developer
 
 If you are here to mod a stock robot, use the guided menu to change its existing installation to `int-developer` mode. **If the robot has not joined your Wi-Fi yet, configure Wi-Fi in the toolkit too:** changing the mode alone does not give it a network connection.
 
-1. Start the toolkit with `./run.sh` on Linux or `.\run.ps1` from PowerShell on a Windows PC with WSL 2. Connect one robot by USB and put it in RCM/APX mode.
+1. Start the toolkit with `./run.sh` on Linux or macOS, or `.\run.ps1` from PowerShell on a Windows PC with WSL 2. Connect one robot by USB and put it in RCM/APX mode.
 2. Choose **Enter DFU with ShofEL (RAM loader)**. Wait for the menu to show the robot in DFU. The included Meerkat Rev02 entry selects RAM slot 2 or 3 from the hardware strap; slot 3 has only offline checks so far. See [hardware coverage](#hardware-results-and-remaining-work) for other revisions.
 3. If the robot already has your Wi-Fi saved, choose **Set robot mode** and select **int-developer**. If it has never connected to your Wi-Fi, choose **Set mode and configure Wi-Fi**, select **int-developer**, then enter your Wi-Fi name and password twice. That action applies both settings together. If a saved Wi-Fi password is wrong, choose **Add or update a Wi-Fi network** and enter the same SSID with the corrected password.
 4. Review and confirm the change. The toolkit saves or reuses a `var` rollback backup and checks the result. After a fresh RTM flash, the stock Wi-Fi and network startup files can be too large for the quick editor; if the menu offers a full `var` transfer, choose it and leave the robot connected until readback finishes. Setting Wi-Fi also prepares startup to skip the retired Jibo server check that can disconnect an otherwise working network. On RTM2, it applies the later TI radio settings too. These changes take effect when the robot restarts; flashing alone does not make them.
@@ -65,11 +65,27 @@ Open PowerShell in the downloaded or cloned toolkit folder and run:
 
 The launcher selects that WSL 2 distribution, shares and attaches a connected Jibo USB device, then runs `run.sh` inside WSL. The robot can change from APX (`0955:7740`) to DFU (`0955:701a`); the launcher watches both USB identities while the menu is open. Sharing a new USB identity may show a Windows administrator prompt. Run `.\run.ps1 -Distro Ubuntu-22.04 -ManualUsb` if you prefer to attach from another PowerShell window with `usbipd bind --busid <BUSID>` (administrator) and `usbipd attach --wsl --busid <BUSID>`. The Linux `./run.sh` also works directly inside WSL with manual USB attachment. If PowerShell's script policy blocks the launcher, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Distro Ubuntu-22.04` for that invocation.
 
-## macOS experimental workflow
+## macOS
 
-Intel and Apple silicon Macs can use `./run.sh` for the guided menu, RCM-to-DFU entry, local image tools, and partition operations. The launcher builds a native ShofEL entry helper against libusb, so the workflow matches Linux; **USB transfers and the RCM-to-DFU entry have not yet been verified on Mac hardware**, on either architecture.
+On an Intel or Apple silicon Mac, install [Homebrew](https://brew.sh), install the native tools, and start the launcher:
 
-Install Python 3.10 or later, `dfu-util`, `libusb`, and `e2fsprogs` using Homebrew (`brew install python dfu-util libusb e2fsprogs`) or MacPorts (`sudo port install python312 dfu-util libusb e2fsprogs`), then run `./run.sh`. MacPorts provides a dependency option for older Intel Macs. See [macOS setup and verification](docs/macos.md) for package-manager selection, architecture requirements, and the initial hardware tests. The launcher checks installed tools, builds the entry helper, and uses `dfu-util` for transfers.
+```sh
+brew install python dfu-util libusb e2fsprogs
+git clone https://github.com/Paskooter/Jibo-DFU-Mod-Toolkit.git
+cd Jibo-DFU-Mod-Toolkit
+./run.sh
+```
+
+The launcher does not install packages itself: it checks the tools above before opening the menu and prints the exact install command if one is missing. Installing Homebrew also installs the Xcode Command Line Tools (`cc`, `make`, `git`) that the first launch uses to build the ShofEL entry helper from the pinned in-repo payloads, so no ARM cross-compiler is needed. That helper is downloaded, built once on the first launch (internet required), and reused afterwards. No `sudo` is needed on a Mac, and backups are saved under the invoking owner's `~/Jibo-Backups`. On Apple silicon, open a native Terminal session with Rosetta disabled.
+
+For older Intel Macs that Homebrew does not support, install the same tools with [MacPorts](https://www.macports.org/install.php) and point the launcher at its prefix:
+
+```sh
+sudo port install python312 dfu-util libusb e2fsprogs
+JIBO_MAC_PREFIX=/opt/local ./run.sh
+```
+
+See [macOS setup and verification](docs/macos.md) for architecture notes, tool selection, `JIBO_*` overrides, and the current hardware-verification results.
 
 ## Manual build and scripting
 

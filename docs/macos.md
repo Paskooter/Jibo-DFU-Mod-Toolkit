@@ -1,12 +1,12 @@
 # macOS setup and verification
 
-The experimental Mac workflow runs the guided menu, RCM-to-DFU entry, and
-partition operations using native tools on Intel (`x86_64`) and Apple silicon
-(`arm64`). The launcher builds a native ShofEL entry helper that talks to the
-boot-ROM recovery mode (`0955:7740`) through libusb, then starts the same RAM
-DFU loader (`0955:701a`) the Linux workflow uses. **The entry step and USB
-transfers have not yet been verified on Mac hardware**, so treat first runs as
-experiments and keep a Linux machine available as the known-good path.
+The Mac workflow runs the guided menu, RCM-to-DFU entry, and partition
+operations using native tools on Intel (`x86_64`) and Apple silicon (`arm64`).
+The launcher builds a native ShofEL entry helper that talks to the boot-ROM
+recovery mode (`0955:7740`) through libusb, then starts the same RAM DFU loader
+(`0955:701a`) the Linux workflow uses. The menu and its safety checks are the
+same as on Linux; record and report how USB behaves on your Mac model while
+testing coverage grows.
 
 Once DFU is active, the implementation provides device discovery, GPT checks,
 backups, image inspection and editing, settings changes, restores, and official
