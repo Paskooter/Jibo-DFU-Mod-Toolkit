@@ -2491,6 +2491,46 @@ index 5229e2e..fa749d8 100644
  
  /* Command structure sent from PC to payload */
  struct emmc_cmd_s {
+diff --git a/include/endianness.h b/include/endianness.h
+index 5a6e2ac..0d2f6b2 100644
+--- a/include/endianness.h
++++ b/include/endianness.h
+@@ -1,17 +1,30 @@
+ #ifndef _ENDIANNESS_H_
+ #define _ENDIANNESS_H_
+ 
+-#ifdef __BYTE_ORDER
++/* __BYTE_ORDER__ is provided by GCC and Clang on Linux and macOS alike;
++ * __BYTE_ORDER/__LITTLE_ENDIAN are glibc-specific and stay as a fallback. */
++#if defined(__BYTE_ORDER__)
++    #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++        #if defined(__GNUC__) || defined(__clang__)
++            #define TO_LITTLE_ENDIAN(x) __builtin_bswap32(x)
++        #else
++            #include <byteswap.h>
++            #define TO_LITTLE_ENDIAN(x) bswap_32(x)
++        #endif
++    #else
++        #define TO_LITTLE_ENDIAN(x) x
++    #endif
++#elif defined(__BYTE_ORDER)
+     #if __BYTE_ORDER == __BIG_ENDIAN
+-
+         #include <byteswap.h>
+         #define TO_LITTLE_ENDIAN(x) bswap_32(x)
+-
+     #elif __BYTE_ORDER == __LITTLE_ENDIAN
+-
+         #define TO_LITTLE_ENDIAN(x) x
+-
+     #endif
+ #endif
+ 
++#ifndef TO_LITTLE_ENDIAN
++    #error "Unable to determine the host byte order for TO_LITTLE_ENDIAN."
++#endif
++
+ #endif
 diff --git a/include/jibo_raminit_trace.h b/include/jibo_raminit_trace.h
 new file mode 100644
 index 0000000..aa0978e
