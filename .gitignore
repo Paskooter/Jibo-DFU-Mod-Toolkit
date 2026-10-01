@@ -4,6 +4,7 @@ PROJECT_SPEC.md
 # Do not accidentally add device captures or signing material.
 *.bin
 !assets/loader.bin
+!assets/entry-payloads/*.bin
 *.img
 *.raw
 *.dump
