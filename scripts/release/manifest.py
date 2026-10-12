@@ -1,13 +1,18 @@
 """Hash every runtime file, excluding the manifest itself."""
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
 def write_manifest(root, revision):
     root = Path(root)
-    files = {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-             for p in sorted(root.rglob('*')) if p.is_file() and p.name != 'release-manifest.json'}
+    files = {}
+    for directory, _, names in os.walk(root, followlinks=True):
+        for name in sorted(names):
+            p = Path(directory) / name
+            if p.is_file() and p.name != 'release-manifest.json':
+                files[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
     (root / 'release-manifest.json').write_text(json.dumps({'revision': revision, 'files': files}, indent=2) + '\n')
 
 

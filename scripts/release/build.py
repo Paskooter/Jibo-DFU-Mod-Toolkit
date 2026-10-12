@@ -141,6 +141,18 @@ def notices(licenses, entry, revision):
         'python': sys.version, 'pyinstaller': PyInstaller.__version__}, indent=2) + '\n')
 
 
+def entry_build_env(prefix):
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = str(prefix / 'lib')
+    env['LIBRARY_PATH'] = str(prefix / 'lib')
+    env['CPATH'] = str(prefix / 'include/libusb-1.0')
+    if sys.platform != 'darwin':
+        # Build only the two payloads actually distributed, not unrelated examples
+        # that need newer C dialects than Ubuntu's ARM GCC. Source launcher unchanged.
+        env['MAKEFLAGS'] = 'BIN_FILES=intermezzo.bin\\ dfu_stage2.bin'
+    return env
+
+
 def native(architecture):
     work = ROOT / '.build/release'
     work.mkdir(parents=True)
@@ -149,10 +161,7 @@ def native(architecture):
     licenses = runtime / 'licenses'
     licenses.mkdir()
     prefix = dependencies(work, licenses)
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = str(prefix / 'lib')
-    env['LIBRARY_PATH'] = str(prefix / 'lib')
-    env['CPATH'] = str(prefix / 'include/libusb-1.0')
+    env = entry_build_env(prefix)
     entry = work / 'entry'
     args = [sys.executable, ROOT / 'scripts/build_file_level_entry.py', '--out', entry]
     if sys.platform == 'darwin':

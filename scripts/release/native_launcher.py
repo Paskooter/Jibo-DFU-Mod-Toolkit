@@ -46,6 +46,11 @@ def self_check(runtime):
     # Source-based private flow loading must also work inside the frozen bundle.
     import jibo_gui_core
     jibo_gui_core.load_flows()
+    pipeline = subprocess.run([sys.executable, str(runtime / 'jibo_dfu_pipeline.py'), '--help'],
+                              capture_output=True, text=True, timeout=15)
+    if pipeline.returncode or 'Pipelined DFU transfer' not in pipeline.stdout:
+        raise RuntimeError('Embedded pipeline subprocess failed: ' + pipeline.stderr)
+    receipt['pipeline_subprocess'] = True
     print(json.dumps({k: v for k, v in receipt.items() if k != 'files'}, indent=2))
 
 

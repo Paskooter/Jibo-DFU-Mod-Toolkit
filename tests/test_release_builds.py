@@ -45,6 +45,19 @@ def test_payload_manifest_detects_corruption(tmp_path):
         module.verify_manifest(tmp_path)
 
 
+def test_manifest_covers_symlinked_pyinstaller_resource_directories(tmp_path):
+    module = load_script('manifest')
+    real = tmp_path / 'resources'
+    real.mkdir()
+    (real / 'helper').write_bytes(b'original')
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir()
+    (runtime / 'tools').symlink_to(real, target_is_directory=True)
+    module.write_manifest(runtime, 'revision')
+    receipt = module.verify_manifest(runtime)
+    assert 'tools/helper' in receipt['files']
+
+
 def test_release_workflow_is_draft_only_and_has_four_native_targets():
     path = ROOT / '.github/workflows/release.yml'
     assert path.is_file(), 'missing release workflow'
@@ -75,6 +88,51 @@ def test_ext4_build_never_installs_host_services():
     assert '--without-udev-rules-dir' in flags
     assert '--without-systemd-unit-dir' in flags
     assert '--without-crond-dir' in flags
+
+
+def test_release_entry_build_omits_unrelated_arm_examples(tmp_path):
+    module = load_script('build')
+    assert hasattr(module, 'entry_build_env'), 'missing minimal entry build environment'
+    makefile = tmp_path / 'Makefile'
+    makefile.write_text('BIN_FILES=emmc_server.bin reset_example.bin\nall:\n\t@printf "%s\\n" "$(BIN_FILES)"\n')
+    result = subprocess.run(['make', '-f', str(makefile)], env=module.entry_build_env(tmp_path),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'intermezzo.bin dfu_stage2.bin'
+
+
+def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):
+    module = load_script('windows_launcher')
+    (tmp_path / 'payload.tar.gz').write_bytes(b'corrupt')
+    (tmp_path / 'payload.sha256').write_text('0' * 64)
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
+    monkeypatch.setattr(sys, 'argv', ['bootstrap', '--self-check'])
+    import pytest
+    with pytest.raises(RuntimeError, match='checksum mismatch'):
+        module.main()
+
+
+def test_apprun_diagnostics_do_not_request_administrator(tmp_path):
+    import shutil
+    shutil.copy2(ROOT / 'scripts/release/AppRun', tmp_path / 'AppRun')
+    native = tmp_path / 'jibo-dfu'
+    native.write_text('#!/bin/sh\nprintf "native:%s\\n" "$1"\n')
+    native.chmod(0o755)
+    for flag in ('--version', '--self-check', '--gui-smoke'):
+        result = subprocess.run(['bash', str(tmp_path / 'AppRun'), flag], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == 'native:' + flag
+        assert 'administrator' not in result.stdout
+
+
+def test_download_rejects_wrong_source_hash(tmp_path):
+    module = load_script('build')
+    original = tmp_path / 'source'
+    original.write_bytes(b'source fixture')
+    import pytest
+    with pytest.raises(RuntimeError, match='hash mismatch'):
+        module.download(original.as_uri(), tmp_path / 'download', '0' * 64)
+    assert not (tmp_path / 'download').exists()
 
 
 def test_native_version_needs_no_desktop_or_tools():
