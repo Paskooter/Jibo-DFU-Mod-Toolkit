@@ -101,6 +101,13 @@ def test_release_entry_build_omits_unrelated_arm_examples(tmp_path):
     assert result.stdout.strip() == 'intermezzo.bin dfu_stage2.bin'
 
 
+def test_macho_audit_rejects_build_machine_libraries():
+    module = load_script('build')
+    assert hasattr(module, 'external_macho_dependencies'), 'missing Mach-O dependency audit'
+    output = 'tool:\n\t@loader_path/libusb.dylib (compatibility version 1.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n\t/opt/homebrew/opt/libusb/lib/libusb.dylib (compatibility version 1.0.0)\n'
+    assert module.external_macho_dependencies(output) == ['/opt/homebrew/opt/libusb/lib/libusb.dylib']
+
+
 def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):
     module = load_script('windows_launcher')
     (tmp_path / 'payload.tar.gz').write_bytes(b'corrupt')

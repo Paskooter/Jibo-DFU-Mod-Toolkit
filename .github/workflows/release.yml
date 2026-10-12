@@ -79,7 +79,7 @@ jobs:
         if: matrix.platform == 'macOS'
         run: |
           test "$(uname -m)" = '${{ matrix.architecture }}'
-          brew install python@3.12 python-tk@3.12 pkg-config
+          brew install --overwrite python@3.12 python-tk@3.12 pkg-config
           "$(brew --prefix python@3.12)/bin/python3.12" -m venv .build-venv
           .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest
       - name: Build native Mac app and DMG (no signing identity)

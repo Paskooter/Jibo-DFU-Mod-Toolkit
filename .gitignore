@@ -1,3 +1,9 @@
+# CI release-build intermediates (never commit binary outputs).
+.build-venv/
+release-out/
+build/
+*.spec
+
 # Keep the local handoff brief out of any future public source repository.
 PROJECT_SPEC.md
 

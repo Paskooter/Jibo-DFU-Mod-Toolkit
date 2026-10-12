@@ -153,6 +153,35 @@ def entry_build_env(prefix):
     return env
 
 
+def external_macho_dependencies(output):
+    dependencies = []
+    for line in output.splitlines()[1:]:
+        name = line.strip().split(' (', 1)[0]
+        if name and not name.startswith(('@', '/usr/lib/', '/System/Library/')):
+            dependencies.append(name)
+    return dependencies
+
+
+def audit_macho(root):
+    seen = set()
+    for directory, _, names in os.walk(root, followlinks=True):
+        for name in names:
+            path = Path(directory) / name
+            resolved = path.resolve()
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            with path.open('rb') as stream:
+                magic = stream.read(4)
+            if magic not in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+                continue
+            output = subprocess.check_output(['otool', '-L', str(path)], text=True)
+            external = external_macho_dependencies(output)
+            if external:
+                raise RuntimeError('Unbundled Mach-O dependency in ' + str(path) + ': ' + str(external))
+    print('PASS: Mach-O dependencies contain only bundle-relative or macOS system references')
+
+
 def native(architecture):
     work = ROOT / '.build/release'
     work.mkdir(parents=True)
@@ -206,10 +235,13 @@ def native(architecture):
         args += ['--windowed', '--osx-bundle-identifier', 'io.jibo.dfu-toolkit']
     args += [ROOT / 'scripts/release/native_launcher.py']
     run(*args, env=env)
+    # Prove tools do not accidentally execute from/link to the build prefix.
+    prefix.rename(work / 'build-prefix-hidden')
     out = ROOT / 'release-out'
     out.mkdir(exist_ok=True)
     if sys.platform == 'darwin':
         app = work / 'dist/Jibo DFU Mod Toolkit.app'
+        audit_macho(app)
         final_runtime = app / 'Contents/Frameworks/runtime'
         write_manifest(final_runtime, revision)
         binary = app / 'Contents/MacOS/Jibo DFU Mod Toolkit'
@@ -259,9 +291,12 @@ def windows(payload):
     payload = Path(payload).resolve()
     sha = hashlib.sha256((payload / 'payload.tar.gz').read_bytes()).hexdigest()
     (payload / 'payload.sha256').write_text(sha + '\n')
+    windows_license = payload / 'Windows-Python-LICENSE.txt'
+    version = '.'.join(map(str, sys.version_info[:3]))
+    download('https://raw.githubusercontent.com/python/cpython/v' + version + '/LICENSE', windows_license)
     args = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
             '--name', 'Jibo-DFU-Windows-x64', '--distpath', out]
-    for file in ('payload.tar.gz', 'payload.sha256', 'revision.txt'):
+    for file in ('payload.tar.gz', 'payload.sha256', 'revision.txt', 'Windows-Python-LICENSE.txt'):
         args += ['--add-data', str(payload / file) + ';.']
     for file in ('scripts/release/bootstrap.ps1', 'run.ps1', 'LICENSE', 'THIRD-PARTY-NOTICES.md'):
         args += ['--add-data', str(ROOT / file) + ';.']
