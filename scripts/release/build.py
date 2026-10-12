@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.request
+import zipfile
 
 from manifest import write_manifest
 
@@ -95,6 +96,25 @@ def formula_source_pin(text):
     return url.group(1), sha.group(1)
 
 
+def source_notice_contents(archive):
+    def is_notice(name):
+        return any(Path(name).name.lower().startswith(k) for k in
+                   ('license', 'licence', 'copying', 'copyright', 'notice'))
+    contents = []
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as source:
+            contents = [(name, source.read(name)) for name in source.namelist() if is_notice(name)]
+    elif tarfile.is_tarfile(archive):
+        with tarfile.open(archive) as source:
+            for member in source.getmembers():
+                if member.isfile() and is_notice(member.name):
+                    extracted = source.extractfile(member)
+                    if extracted is not None:
+                        contents.append((member.name, extracted.read()))
+    # Some formula sources are raw data (e.g. ca-certificates' cacert.pem).
+    return contents
+
+
 def mac_dependency_notices(licenses):
     # A superset of runtime dependencies is deliberate: include all installed
     # interpreter dependency notices, and corresponding sources for GPL/LGPL libs.
@@ -127,21 +147,22 @@ def mac_dependency_notices(licenses):
         if copyleft or not copied:
             url, sha = formula_source_pin(text)
             archive = target / ('corresponding-source-' + Path(url.split('?', 1)[0]).name)
+            print('Preserving dependency source:', name, url, flush=True)
             download(url, archive, sha)
             item.update(source_included=True, source_url=url, source_sha256=sha)
             # Archives themselves contain all original attribution/license texts.
-            with tarfile.open(archive) as source:
-                for member in source.getmembers():
-                    basename = Path(member.name).name.lower()
-                    if member.isfile() and any(basename.startswith(k) for k in
-                                              ('license', 'licence', 'copying', 'copyright', 'notice')):
-                        extracted = source.extractfile(member)
-                        if extracted is not None:
-                            destination = target / 'source-notices' / member.name
-                            if target.resolve() not in destination.resolve().parents:
-                                raise RuntimeError('Unsafe source notice path: ' + member.name)
-                            destination.parent.mkdir(parents=True, exist_ok=True)
-                            destination.write_bytes(extracted.read())
+            for member_name, content in source_notice_contents(archive):
+                destination = target / 'source-notices' / member_name
+                if target.resolve() not in destination.resolve().parents:
+                    raise RuntimeError('Unsafe source notice path: ' + member_name)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+            if not tarfile.is_tarfile(archive) and not zipfile.is_zipfile(archive):
+                # Preserve full terms for source inputs distributed as raw data.
+                license_id = re.search(r'^\s*license\s+"([A-Za-z0-9.-]+)"', text, re.MULTILINE)
+                if license_id:
+                    download('https://raw.githubusercontent.com/spdx/license-list-data/main/text/' +
+                             license_id.group(1) + '.txt', target / 'LICENSE.txt')
         inventory[name] = item
     (licenses / 'Homebrew-dependencies.json').write_text(json.dumps(inventory, indent=2) + '\n')
     print('Bundled interpreter dependency notices:', json.dumps(inventory, indent=2))

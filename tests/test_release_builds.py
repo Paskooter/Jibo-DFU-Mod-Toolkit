@@ -134,6 +134,20 @@ def test_installed_formula_source_pin_is_preserved():
         module.formula_source_pin('no url or hash')
 
 
+def test_source_notices_handle_raw_and_zip_downloads(tmp_path):
+    module = load_script('build')
+    assert hasattr(module, 'source_notice_contents'), 'missing source-format handling'
+    raw = tmp_path / 'cacert.pem'
+    raw.write_text('public certificate source fixture')
+    assert module.source_notice_contents(raw) == []
+    import zipfile
+    archive = tmp_path / 'source.zip'
+    with zipfile.ZipFile(archive, 'w') as stream:
+        stream.writestr('component/LICENSE', 'terms fixture')
+        stream.writestr('component/source.c', 'source fixture')
+    assert module.source_notice_contents(archive) == [('component/LICENSE', b'terms fixture')]
+
+
 def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):
     module = load_script('windows_launcher')
     (tmp_path / 'payload.tar.gz').write_bytes(b'corrupt')

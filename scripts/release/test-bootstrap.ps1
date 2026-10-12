@@ -39,6 +39,7 @@ function wsl.exe { $global:LASTEXITCODE=0; return 'WSL present but GUI component
 function Read-Host { param($Prompt); return 'n' }
 function Start-Process { [IO.File]::WriteAllText((Join-Path $Payload 'unexpected-admin'), 'failed'); throw 'Unexpected admin action' }
 & $Bootstrap -PayloadRoot $Payload
+exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
     $messages = @(& (Join-Path $PSHOME 'powershell.exe') -NoProfile -File $child -Bootstrap $path -Payload $fixture 2>&1)
