@@ -103,8 +103,9 @@ $failed = $false
 try { Start-WslUsbAccess -Name 'fixture' -User 'fixture' -Uid '1000' -Gid '1001' -Helper '/usb.sh' -Session '/session' | Out-Null } catch { $failed = $true }
 if (-not $failed -or $script:calls.Count) { throw 'UAC cancellation did not stop before root watcher/session setup' }
 $script:calls = @()
-function wsl.exe { $script:calls += ,$args; $global:LASTEXITCODE=41; return 'Synthetic GUI stdout' }
+function wsl.exe { $script:calls += ,$args; $global:LASTEXITCODE=41; Write-Error 'Synthetic GUI stderr'; return 'Synthetic GUI stdout' }
 $code = Invoke-WslGui -Name 'Ubuntu with spaces' -User 'fixture' -Target '/home/fixture/path with spaces' -Session '/session'
+if ($ErrorActionPreference -ne 'Stop') { throw 'GUI native stderr handling leaked preference changes' }
 if ($code -ne 41 -or ($script:calls[0] -join '|') -ne '--distribution|Ubuntu with spaces|--user|fixture|--exec|bash|/home/fixture/path with spaces/wsl-user-launch.sh|/home/fixture/path with spaces/jibo-dfu|/session') { throw 'GUI identity, direct binary dispatch or exit propagation failed' }
 # Exercise the actual top-level bootstrap, not just helpers. Every external
 # command is a synthetic boundary, with an invocation trace and controlled exits.

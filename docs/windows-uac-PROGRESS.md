@@ -35,5 +35,14 @@ Use Windows-side root-only USB permission preparation/watch for the invoking UID
 - First full pytest run on disk hit a 180-second timeout after 38 tests. Isolated combined-edit test passed in 0.15s on tmpfs; both complete suites then passed. No backend/test changes were needed. Initial unittest attempt with the active Python lacked pytest and had 3 import errors; isolated pytest-enabled Python 3.11 venv resolved them.
 - GitHub API lists release workflow ID 381823205 as active, but the workflow file on main returns HTTP 404. Branch push will trigger macOS portability; release workflow remains blocked by its branch filter/default-branch absence unless dispatch API succeeds.
 
+## VERIFIED — final hardening / falsification
+- Final full pytest: 368 pass, 0 fail, 18 skip, 47 passing subtests; isolated release tests now include the live-node permission-failure control.
+- Synthetic GUI stderr now passes through without terminating or contaminating the numeric exit status; ErrorActionPreference is restored.
+- Live-node chown/chmod failure returns nonzero; vanished hotplug nodes remain retryable.
+- Falsification 1: removed `vendor == 0955` from USB helper line 11; `test_windows_usb_permission_helper_only_grants_jibo_nodes` failed on unauthorized synthetic VID 1234 node /001/005. Restored.
+- Falsification 2: changed `Invoke-WslGui --user $User` to `--user root`; PowerShell's named GUI-identity assertion failed. Restored.
+- Falsification 3: replaced native quoting with `$Arguments -join ' '`; real host argv roundtrip failed on count. Restored.
+- After all restorations: full pytest, PowerShell harness, Bash syntax checks and `git diff --check` pass. Hardware and Windows PowerShell 5.1 remain untested locally.
+
 ## UNKNOWN
 Real interactive UAC, WSLg, Linux device permissions, APX->DFU transitions and real hardware acceptance cannot be exercised on this Linux host. CI native Windows capability remains to be established.

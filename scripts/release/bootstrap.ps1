@@ -36,8 +36,13 @@ function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]
 }
 function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session) {
     # Never enter AppRun's Linux sudo/polkit branch from the Windows EXE.
-    & wsl.exe --distribution $Name --user $User --exec bash "$Target/wsl-user-launch.sh" "$Target/jibo-dfu" $Session | Out-Host
-    return $LASTEXITCODE
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & wsl.exe --distribution $Name --user $User --exec bash "$Target/wsl-user-launch.sh" "$Target/jibo-dfu" $Session 2>&1 | Out-Host
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $old }
+    return $code
 }
 function Test-CompatibleDistribution([string]$Name) {
     try {

@@ -347,6 +347,27 @@ def test_non_windows_launchers_are_byte_identical_to_release_builds_base():
         assert hashlib.sha256((ROOT / path).read_bytes()).hexdigest() == digest, path
 
 
+def test_windows_usb_grant_failure_is_not_reported_as_success(tmp_path):
+    script = ROOT / 'scripts/release/wsl-usb-permissions.sh'
+    entry = tmp_path / 'sys/apx'
+    entry.mkdir(parents=True)
+    for field, value in (('idVendor', '0955'), ('idProduct', '7740'), ('busnum', '1'), ('devnum', '2')):
+        (entry / field).write_text(value + '\n')
+    node = tmp_path / 'dev/001/002'
+    node.parent.mkdir(parents=True)
+    node.write_text('synthetic USB node')
+    probe = r'''
+source "$1"
+test() { if [[ $1 == -c ]]; then [[ -f $2 ]]; else builtin test "$@"; fi; }
+chown() { return 5; }
+grant_jibo_usb "$2" "$3" 1000 1001
+'''
+    result = subprocess.run(['bash', '-c', probe, 'probe', str(script), str(tmp_path / 'sys'), str(tmp_path / 'dev')],
+                            capture_output=True, text=True)
+    assert result.returncode != 0, 'live-node permission failure was silently swallowed'
+    assert 'Could not grant Jibo USB access' in result.stderr
+
+
 def test_native_version_needs_no_desktop_or_tools():
     path = ROOT / 'scripts/release/native_launcher.py'
     assert path.is_file(), 'missing native launcher'

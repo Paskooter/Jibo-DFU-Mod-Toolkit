@@ -15,8 +15,12 @@ grant_jibo_usb() {
     printf -v node '%s/%03d/%03d' "$devfs" "$((10#$bus))" "$((10#$device))"
     test -c "$node" && test ! -L "$node" || continue
     # Removal during APX -> DFU is expected. The next pass discovers the new node.
-    chown "$uid:$gid" --no-dereference -- "$node" 2>/dev/null || continue
-    chmod 0600 -- "$node" 2>/dev/null || continue
+    if ! chown "$uid:$gid" --no-dereference -- "$node" 2>/dev/null || ! chmod 0600 -- "$node" 2>/dev/null; then
+      # A vanished node is normal hotplug; a still-live denied node is not success.
+      test -c "$node" || continue
+      printf 'Could not grant Jibo USB access to %s.\n' "$node" >&2
+      return 1
+    fi
   done
 }
 
