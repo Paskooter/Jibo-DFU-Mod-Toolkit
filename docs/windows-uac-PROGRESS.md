@@ -44,5 +44,21 @@ Use Windows-side root-only USB permission preparation/watch for the invoking UID
 - Falsification 3: replaced native quoting with `$Arguments -join ' '`; real host argv roundtrip failed on count. Restored.
 - After all restorations: full pytest, PowerShell harness, Bash syntax checks and `git diff --check` pass. Hardware and Windows PowerShell 5.1 remain untested locally.
 
+## VERIFIED — permitted remote write / CI discovery
+- Exactly one push: `git push origin feature/windows-uac:feature/windows-uac`; `git ls-remote` read-back matches `726dfc4f06a60937c2e0b6784af4230c80474f2c`.
+- Push started macOS portability run 38278854368.
+- Release branch filter could not be edited within ownership. The existing registered workflow-dispatch API **did** work despite main lacking the workflow file: POST `/actions/workflows/381823205/dispatches` with explicit ref `feature/windows-uac` returned 204. Read-back found release run **38278897072**, head SHA exactly matching the pushed revision. Thus no workflow ownership edit is needed for this validation run.
+- Both runs are being monitored through GitHub API, no token printed, no tags/releases/main writes. Current release job linux-payload is in progress; Windows is not started yet.
+
+## VERIFIED — CI Windows failure and local harness correction
+- Windows job 114912011781 built the actual EXE, and its `--version` and `--self-check` passed. Self-check reported revision 726dfc4, 1968 payload files, no WSL setup attempted.
+- The subsequent PowerShell 5.1 test failed at `test-bootstrap.ps1:80`: `Native argv roundtrip count failed`. Job logs saved under ignored `.build/windows-job-114912011781.log`.
+- The roundtrip's child was another PowerShell `-File` invocation, not a raw native argv consumer. Replaced that oracle with a compiled C# console argv probe; Windows uses Add-Type, local Linux uses installed Mono. Prefix encoded argument lines so redirect handling cannot discard the empty argument's otherwise blank line.
+- Corrected harness passes locally on PowerShell 7.6.6 / Mono, preserving all five values, then all 8 mocked top-level bootstrap scenarios pass. **Windows execution of this correction is UNKNOWN.** Runtime application code was not changed after the pushed revision.
+- The brief allows only one push and it has been spent. Do not push again; commit this harness correction locally for root to review and rerun Windows CI. Initial count failure's exact Windows `-File` transformation is INFERRED, not isolated on a live Windows host.
+- Corrected raw-argv oracle was falsified too: unquoted argument join produced 7 native arguments instead of the expected 5 and failed at `test-bootstrap.ps1:106`; quoting was restored and the harness passed.
+- Synthetic ownership execution through the unchanged normal-user wrapper created a file in a temporary HOME with UID:GID 1000:1000 matching the caller, propagated exit 41 and removed the session. No real backup/hardware was used.
+- Final API read: release run 38278897072 **completed failure**: linux-payload, Linux AppImage, macOS arm64 and macOS x86_64 succeeded; Windows failed; aggregate release job skipped. Separate macOS portability run 38278854368 completed success for both architectures. Four Actions artifacts exist (Linux stage/Linux/Mac arm64/Mac x86_64); Windows and aggregate artifacts do not exist.
+
 ## UNKNOWN
 Real interactive UAC, WSLg, Linux device permissions, APX->DFU transitions and real hardware acceptance cannot be exercised on this Linux host. CI native Windows capability remains to be established.

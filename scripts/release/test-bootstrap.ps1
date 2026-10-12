@@ -65,21 +65,50 @@ exit $LASTEXITCODE
         }
     }
 } finally { Remove-Item -Recurse -Force $fixture }
-# Real native-process argv roundtrip, no admin/WSL. This runs on the host's
-# parser (Windows PowerShell 5.1 in Actions; PowerShell 7 locally on Linux).
+# Real native-process argv roundtrip, no admin/WSL. A raw CLR argv probe is
+# deliberate: Windows PowerShell 5.1 -File is itself an argument transformer,
+# so it is not an independent oracle for the argv wsl.exe will receive.
 $argvFixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-argv-' + [guid]::NewGuid())
 New-Item -ItemType Directory $argvFixture | Out-Null
 try {
-    $argvChild = Join-Path $argvFixture 'argv.ps1'
-    $argvOutput = Join-Path $argvFixture 'argv.json'
-    [IO.File]::WriteAllText($argvChild, 'ConvertTo-Json -InputObject @($args) -Compress')
+    $argvChild = Join-Path $argvFixture 'argv.exe'
+    $argvOutput = Join-Path $argvFixture 'argv.txt'
+    $source = @'
+using System;
+using System.Text;
+public class NativeArgvProbe {
+    public static void Main(string[] args) {
+        Console.WriteLine(args.Length);
+        foreach (string value in args) {
+            Console.WriteLine("ARG:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(value)));
+        }
+    }
+}
+'@
+    if ($env:OS -eq 'Windows_NT') {
+        Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $argvChild -OutputType ConsoleApplication
+        $argvHost = $argvChild
+        $prefix = @()
+    } else {
+        # Local Linux verification uses the already installed Mono compiler/runtime.
+        $sourcePath = Join-Path $argvFixture 'argv.cs'
+        [IO.File]::WriteAllText($sourcePath, $source)
+        & mcs ('-out:' + $argvChild) $sourcePath
+        if ($LASTEXITCODE -ne 0) { throw 'Native argv probe compilation failed' }
+        $argvHost = (Get-Command mono -ErrorAction Stop).Source
+        $prefix = @($argvChild)
+    }
     $values = @('Ubuntu with spaces', '/path with spaces/helper.sh', 'embedded"quote', 'C:\trailing\', '')
-    $argumentLine = ConvertTo-NativeArgumentLine (@('-NoProfile', '-File', $argvChild) + $values)
-    $process = Start-Process -FilePath $hostBinary -ArgumentList $argumentLine -RedirectStandardOutput $argvOutput -Wait -PassThru
-    $actual = @(Get-Content $argvOutput -Raw | ConvertFrom-Json)
-    if ($process.ExitCode -ne 0 -or $actual.Count -ne $values.Count) { throw 'Native argv roundtrip count failed' }
+    $argumentLine = ConvertTo-NativeArgumentLine ($prefix + $values)
+    $process = Start-Process -FilePath $argvHost -ArgumentList $argumentLine -RedirectStandardOutput $argvOutput -Wait -PassThru
+    $lines = [IO.File]::ReadAllLines($argvOutput)
+    if ($process.ExitCode -ne 0 -or $lines.Count -ne ($values.Count + 1) -or $lines[0] -ne [string]$values.Count) {
+        throw ('Native argv roundtrip count failed: ' + ($lines -join '|'))
+    }
     for ($i=0; $i -lt $values.Count; $i++) {
-        if ($actual[$i] -cne $values[$i]) { throw ('Native argv roundtrip failed at index ' + $i) }
+        if (-not $lines[$i+1].StartsWith('ARG:')) { throw 'Native argv probe output is incomplete' }
+        $actual = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($lines[$i+1].Substring(4)))
+        if ($actual -cne $values[$i]) { throw ('Native argv roundtrip failed at index ' + $i) }
     }
 } finally { Remove-Item -Recurse -Force $argvFixture }
 # Windows privileges: UAC comes before any root watcher; GUI uses an explicit non-root user.
