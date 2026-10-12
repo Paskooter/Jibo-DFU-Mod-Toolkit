@@ -11,8 +11,13 @@ def load_script(name):
     path = ROOT / 'scripts/release' / (name + '.py')
     assert path.is_file(), 'missing release adapter: ' + name
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -59,6 +64,17 @@ def test_windows_bootstrap_reuses_existing_usb_monitor_without_cloning():
         assert required in text
     assert 'git clone' not in text
     assert 'run.sh' not in text
+    import re
+    assert not re.search(r'(?i)\$home\s*=', text), 'PowerShell HOME is read-only'
+
+
+def test_ext4_build_never_installs_host_services():
+    module = load_script('build')
+    assert hasattr(module, 'configure_flags'), 'missing isolated dependency configuration'
+    flags = module.configure_flags('e2fsprogs-1.47.1.tar.gz', Path('/tmp/prefix'))
+    assert '--without-udev-rules-dir' in flags
+    assert '--without-systemd-unit-dir' in flags
+    assert '--without-crond-dir' in flags
 
 
 def test_native_version_needs_no_desktop_or_tools():

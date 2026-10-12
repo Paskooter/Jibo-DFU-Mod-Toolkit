@@ -2,7 +2,24 @@
 
 A guided graphical toolkit for Jibo USB recovery, backups, mode and Wi-Fi settings, and official update packages. Start with the GUI on **Windows through WSL 2 + WSLg + usbipd-win** or **Linux**; a native **macOS** launcher is also available. The original text menu and scripting commands remain available.
 
-## Start the GUI
+## Download
+
+Get the single file for your computer from [GitHub Releases](https://github.com/Paskooter/Jibo-DFU-Mod-Toolkit/releases). Release builds are unsigned.
+
+| Computer | Download | Start |
+| --- | --- | --- |
+| Windows x64 | `Jibo-DFU-Windows-x64.exe` | Double-click. The launcher guides WSL 2 + WSLg / Ubuntu / usbipd-win setup if missing, asking before installation and administrator prompts. Then it opens the same GUI in WSL. |
+| Linux x86_64 | `Jibo-DFU-Linux-x86_64.AppImage` | Mark executable (`chmod +x`), then double-click. Approve the USB administrator prompt. Requires a graphical desktop, glibc 2.35+ (Ubuntu 22.04+) and `pkexec` or `sudo`. |
+| Mac Apple silicon | `Jibo-DFU-macOS-arm64.dmg` | Open, drag **Jibo DFU Mod Toolkit** to Applications, then open the app. |
+| Mac Intel | `Jibo-DFU-macOS-x86_64.dmg` | Open, drag the app to Applications, then open it. |
+
+**Windows SmartScreen:** click **More info → Run anyway**. **macOS first-open block:** open **System Settings → Privacy & Security → Open Anyway**, then confirm Open.
+
+Linux and Mac downloads include Python/Tk and all toolkit tools: no clone, compiler, Git, Homebrew or internet needed for first launch. Windows includes the prebuilt Linux payload; internet and a reboot may be needed only to install missing Windows/WSL prerequisites. Existing source launchers remain available below. Downloading firmware updates still needs internet. Mac USB operation remains experimental; see [verified build coverage](docs/release-builds-report.md).
+
+If Linux reports a FUSE error, run `./Jibo-DFU-Linux-x86_64.AppImage --appimage-extract-and-run` from a terminal. Verify downloads against the release's `SHA256SUMS`; license notices and complete corresponding sources accompany each binary and the release. **Administrator setup approval is not permission to write a robot**: the GUI keeps every existing review and confirmation. See [release and troubleshooting notes](docs/release.md).
+
+## Start the GUI from source
 
 Clone or download this repository, extract it if needed, and keep the launchers in the toolkit folder. Complete the linked platform setup before launching:
 

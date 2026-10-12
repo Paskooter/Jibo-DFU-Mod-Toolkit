@@ -72,11 +72,11 @@ try {
         Invoke-ApprovedAdmin $winget.Source 'install --interactive --exact --id dorssel.usbipd-win'
         throw 'usbipd-win setup finished. Reopen this app so Windows refreshes PATH.'
     }
-    $home = Native -Arguments @('--distribution', $Distro, '--exec', 'printenv', 'HOME')
-    if (-not $home.StartsWith('/') -or $home.Contains("`n")) { throw 'Invalid WSL home directory.' }
+    $linuxHome = Native -Arguments @('--distribution', $Distro, '--exec', 'printenv', 'HOME')
+    if (-not $linuxHome.StartsWith('/') -or $linuxHome.Contains("`n")) { throw 'Invalid WSL home directory.' }
     $revision = (Get-Content (Join-Path $PayloadRoot 'revision.txt') -Raw).Trim()
     if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid embedded revision.' }
-    $target = "$home/.local/share/jibo-dfu/$revision"
+    $target = "$linuxHome/.local/share/jibo-dfu/$revision"
     $linuxArchive = Native -Arguments @('--distribution', $Distro, '--exec', 'wslpath', '-u', '--', $archive)
     Native -Arguments @('--distribution', $Distro, '--exec', 'mkdir', '-p', '--', $target) | Out-Null
     Native -Arguments @('--distribution', $Distro, '--exec', 'tar', '-xzf', $linuxArchive, '-C', $target) | Out-Null

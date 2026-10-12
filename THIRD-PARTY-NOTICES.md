@@ -10,7 +10,7 @@ fails if any required source archive or license text is absent.
 | dfu-util 0.11 | GPL-2.0-or-later | `dfu-util-0.11.tar.gz`, its COPYING |
 | U-Boot 2016.05 / Jibo RAM loader | GPL-2.0-or-later; individual files retain their notices | `jibo-ram-dfu-v1-source.tar.gz`, current `firmware/` patches and `scripts/build_loader.py` |
 | ShofEL2-for-T124 | Original component notices, including GPL payload code; see source COPYING/LICENSE and file headers | complete pinned commit `31ac3a260c8a1501869aff6690b3b9ad4904ef58`, toolkit entry patch and build script |
-| libusb 1.0.27 | LGPL-2.1-or-later | `libusb-1.0.27.tar.gz`, COPYING; dynamically linked, not statically incorporated |
+| libusb 1.0.27 | LGPL-2.1-or-later | `libusb-1.0.27.tar.bz2`, COPYING; dynamically linked, not statically incorporated |
 | e2fsprogs 1.47.1 | GPL-2.0 and LGPL component licenses; see source NOTICE | `e2fsprogs-1.47.1.tar.gz`, NOTICE/COPYING |
 | CPython | Python Software Foundation License and bundled dependency notices | Python LICENSE and Python distribution notices collected by the build |
 | Tcl/Tk | Tcl/Tk permissive license | Tcl/Tk license.terms collected by the build |

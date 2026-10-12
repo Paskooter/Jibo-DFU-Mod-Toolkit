@@ -52,6 +52,18 @@ def unpack(archive, directory):
         source.extractall(directory)
 
 
+def configure_flags(name, prefix):
+    flags = ['--prefix=' + str(prefix), '--disable-nls']
+    if name.startswith('libusb'):
+        flags = ['--prefix=' + str(prefix), '--disable-static']
+        if sys.platform != 'darwin':
+            flags += ['--disable-udev']
+    elif name.startswith('e2fsprogs'):
+        flags += ['--disable-fuse2fs', '--without-udev-rules-dir',
+                  '--without-systemd-unit-dir', '--without-crond-dir']
+    return flags
+
+
 def dependencies(work, licenses):
     prefix = work / 'prefix'
     prefix.mkdir()
@@ -63,13 +75,7 @@ def dependencies(work, licenses):
         download(url, archive, sha)
         unpack(archive, work)
         source = work / name.split('.tar.')[0]
-        flags = ['--prefix=' + str(prefix), '--disable-nls']
-        if name.startswith('libusb'):
-            flags = ['--prefix=' + str(prefix), '--disable-static']
-            if sys.platform != 'darwin':
-                flags += ['--disable-udev']
-        elif name.startswith('e2fsprogs'):
-            flags += ['--disable-fuse2fs']
+        flags = configure_flags(name, prefix)
         run(source / 'configure', *flags, cwd=source, env=env)
         run('make', '-j4', cwd=source, env=env)
         run('make', 'install', cwd=source, env=env)
