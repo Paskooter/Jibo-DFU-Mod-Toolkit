@@ -115,6 +115,17 @@ def source_notice_contents(archive):
     return contents
 
 
+def notice_path(relative):
+    # License-only copies must not masquerade as executable macOS bundles.
+    suffixes = ('.framework', '.app', '.bundle', '.xpc', '.appex')
+    parts = list(Path(relative).parts)
+    for index, part in enumerate(parts[:-1]):
+        for suffix in suffixes:
+            if part.endswith(suffix):
+                parts[index] = part[:-len(suffix)] + suffix.replace('.', '_')
+    return Path(*parts)
+
+
 def mac_dependency_notices(licenses):
     # A superset of runtime dependencies is deliberate: include all installed
     # interpreter dependency notices, and corresponding sources for GPL/LGPL libs.
@@ -138,10 +149,11 @@ def mac_dependency_notices(licenses):
             if file.is_file() and any(file.name.lower().startswith(k) for k in
                                      ('license', 'licence', 'copying', 'copyright', 'notice')):
                 relative = file.relative_to(keg)
-                destination = target / relative
+                bundle_path = notice_path(relative)
+                destination = target / bundle_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(file, destination)
-                copied.append(relative.as_posix())
+                copied.append({'source_path': relative.as_posix(), 'bundle_path': bundle_path.as_posix()})
         copyleft = bool(re.search(r'\bL?GPL-', text))
         item = {'keg_version': keg.name, 'notices': copied, 'source_included': False}
         if copyleft or not copied:
@@ -152,7 +164,7 @@ def mac_dependency_notices(licenses):
             item.update(source_included=True, source_url=url, source_sha256=sha)
             # Archives themselves contain all original attribution/license texts.
             for member_name, content in source_notice_contents(archive):
-                destination = target / 'source-notices' / member_name
+                destination = target / 'source-notices' / notice_path(member_name)
                 if target.resolve() not in destination.resolve().parents:
                     raise RuntimeError('Unsafe source notice path: ' + member_name)
                 destination.parent.mkdir(parents=True, exist_ok=True)

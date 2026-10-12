@@ -20,6 +20,13 @@ function wsl.exe { $global:LASTEXITCODE=1; return 'not installed' }
 $failed = $false
 try { Native -Arguments @('--version') | Out-Null } catch { $failed = $true }
 if (-not $failed) { throw 'Native failure was swallowed' }
+# Diagnose old glibc/musl distributions without running a real WSL process.
+function wsl.exe { $global:LASTEXITCODE=0; return 'glibc 2.35' }
+if (-not (Test-CompatibleDistribution 'fixture')) { throw 'Supported distro refused' }
+function wsl.exe { $global:LASTEXITCODE=0; return 'glibc 2.31' }
+if (Test-CompatibleDistribution 'fixture') { throw 'Old glibc accepted' }
+function wsl.exe { $global:LASTEXITCODE=0; return 'musl' }
+if (Test-CompatibleDistribution 'fixture') { throw 'musl distro accepted' }
 # Original USB helper is shipped byte-for-byte, rather than a second USB algorithm.
 $usbPath = Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'run.ps1'
 $usbErrors=$null
@@ -34,17 +41,25 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixture 'run.ps1'), 'not run on refusal')
     $child = Join-Path $fixture 'refusal.ps1'
     $childText = @'
-param($Bootstrap, $Payload)
-function wsl.exe { $global:LASTEXITCODE=0; return 'WSL present but GUI component absent' }
+param($Bootstrap, $Payload, $Case)
+function wsl.exe {
+    if ($script:Case -eq 'no-distro' -and $args[0] -eq '--version') {
+        $global:LASTEXITCODE=0; return 'WSLg 1.0'
+    }
+    $global:LASTEXITCODE=1; return 'No installed distributions or GUI support'
+}
 function Read-Host { param($Prompt); return 'n' }
 function Start-Process { [IO.File]::WriteAllText((Join-Path $Payload 'unexpected-admin'), 'failed'); throw 'Unexpected admin action' }
 & $Bootstrap -PayloadRoot $Payload
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    $messages = @(& (Join-Path $PSHOME 'powershell.exe') -NoProfile -File $child -Bootstrap $path -Payload $fixture 2>&1)
-    if ($LASTEXITCODE -ne 1 -or (Test-Path (Join-Path $fixture 'unexpected-admin')) -or (($messages -join ' ') -notmatch 'No setup changes were made')) {
-        throw ('Full bootstrap refusal path failed: ' + ($messages -join ' '))
+    foreach ($case in @('no-gui', 'no-distro')) {
+        $messages = @(& (Join-Path $PSHOME 'powershell.exe') -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
+        $expected = if ($case -eq 'no-distro') { 'Distribution setup declined' } else { 'No setup changes were made' }
+        if ($LASTEXITCODE -ne 1 -or (Test-Path (Join-Path $fixture 'unexpected-admin')) -or (($messages -join ' ') -notmatch $expected)) {
+            throw ('Full bootstrap refusal path failed (' + $case + '): ' + ($messages -join ' '))
+        }
     }
 } finally { Remove-Item -Recurse -Force $fixture }
 Write-Output 'PASS: PowerShell parse, full setup refusal (no admin action), approval helper, argument preservation, NUL handling and native failures; no real WSL/USB/admin action attempted.'

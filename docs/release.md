@@ -5,7 +5,9 @@
 `.github/workflows/release.yml` builds four unsigned files:
 
 - `Jibo-DFU-Windows-x64.exe`: one-file console bootstrapper with the complete
-  prebuilt Linux payload. Windows x64 only; the GUI remains in WSLg.
+  prebuilt Linux payload. Windows x64 only; the GUI remains in WSLg. Existing
+  WSL distributions need glibc 2.35+ (Ubuntu 22.04+); older/musl distributions are
+  diagnosed before extraction and the launcher offers a compatible distro.
 - `Jibo-DFU-Linux-x86_64.AppImage`: native Linux x86_64; glibc 2.35 or newer
   (Ubuntu 22.04+), an X11/XWayland desktop and `pkexec` or `sudo`.
 - `Jibo-DFU-macOS-arm64.dmg`: native Apple silicon app.

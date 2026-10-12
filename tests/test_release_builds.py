@@ -95,6 +95,8 @@ def test_windows_bootstrap_reuses_existing_usb_monitor_without_cloning():
     assert 'run.sh' not in text
     import re
     assert not re.search(r'(?i)\$home\s*=', text), 'PowerShell HOME is read-only'
+    assert 'Test-CompatibleDistribution' in text, 'old/musl distributions must be diagnosed before payload launch'
+    assert 'GNU_LIBC_VERSION' in text
 
 
 def test_ext4_build_never_installs_host_services():
@@ -146,6 +148,15 @@ def test_source_notices_handle_raw_and_zip_downloads(tmp_path):
         stream.writestr('component/LICENSE', 'terms fixture')
         stream.writestr('component/source.c', 'source fixture')
     assert module.source_notice_contents(archive) == [('component/LICENSE', b'terms fixture')]
+
+
+def test_notice_paths_do_not_create_fake_mac_bundles():
+    module = load_script('build')
+    assert hasattr(module, 'notice_path'), 'missing data-only notice path mapping'
+    original = Path('Frameworks/Python.framework/Versions/3.12/LICENSE.txt')
+    assert module.notice_path(original) == Path('Frameworks/Python_framework/Versions/3.12/LICENSE.txt')
+    assert module.notice_path(Path('docs/example.app/LICENSE')) == Path('docs/example_app/LICENSE')
+    assert module.notice_path(Path('COPYING')) == Path('COPYING')
 
 
 def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):

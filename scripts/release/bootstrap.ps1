@@ -17,6 +17,13 @@ function Native([string[]]$Arguments) {
     if ($code -ne 0) { throw "WSL failed: $($lines -join ' ')" }
     return (($lines | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
 }
+function Test-CompatibleDistribution([string]$Name) {
+    try {
+        $libc = Native -Arguments @('--distribution', $Name, '--exec', 'getconf', 'GNU_LIBC_VERSION')
+        if ($libc -notmatch '^glibc\s+(\d+\.\d+)$') { return $false }
+        return ([version]$Matches[1] -ge [version]'2.35')
+    } catch { return $false }
+}
 try {
     $archive = Join-Path $PayloadRoot 'payload.tar.gz'
     $usbScript = Join-Path $PayloadRoot 'run.ps1'
@@ -32,7 +39,8 @@ try {
         throw 'WSL setup requested. Reboot if Windows requests it, then run this download again.'
     }
     $rows = @()
-    $listing = Native -Arguments @('--list', '--verbose')
+    try { $listing = Native -Arguments @('--list', '--verbose') }
+    catch { $listing = ''; Write-Host 'No usable installed WSL distribution was listed; setup can install Ubuntu 22.04.' }
     foreach ($line in ($listing -split "`n")) {
         if ($line -match '^\s*(?<default>\*)?\s*(?<name>.+?)\s+\S+\s+(?<version>[12])\s*$') {
             $rows += [pscustomobject]@{Name=$Matches['name'].Trim(); Version=[int]$Matches['version']; Default=($Matches['default'] -eq '*')}
@@ -60,6 +68,22 @@ try {
             $Distro = $available[$number-1].Name
         }
     }
+    if (-not (Test-CompatibleDistribution $Distro)) {
+        Write-Host "The prebuilt payload needs glibc 2.35+ (Ubuntu 22.04+); '$Distro' is incompatible." -ForegroundColor Yellow
+        $compatible = @($available | Where-Object { Test-CompatibleDistribution $_.Name })
+        if ($compatible.Count -gt 0) {
+            for ($i=0; $i -lt $compatible.Count; $i++) { Write-Host "$($i+1). $($compatible[$i].Name)" }
+            $choice = Read-Host 'Choose a compatible distribution number, or press Enter to cancel'
+            $number = 0
+            if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $compatible.Count) { throw 'Distribution selection cancelled.' }
+            $Distro = $compatible[$number-1].Name
+        } else {
+            if (-not (Confirm-Setup 'Install compatible Ubuntu 22.04? No compiler or toolkit build will be needed.')) { throw 'Compatible distribution setup declined.' }
+            Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --distribution Ubuntu-22.04'
+            throw 'Finish Ubuntu username/password setup, then reopen this app and choose Ubuntu-22.04.'
+        }
+    }
+    if ($Distro -match '["\r\n]') { throw 'Invalid distribution name.' }
     Native -Arguments @('--distribution', $Distro, '--exec', 'test', '-d', '/mnt/wslg') | Out-Null
     $arch = Native -Arguments @('--distribution', $Distro, '--exec', 'uname', '-m')
     if ($arch -ne 'x86_64') { throw 'This Windows x64 download needs an x86_64 WSL distribution.' }
