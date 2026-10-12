@@ -18,6 +18,9 @@ def main():
         print('Jibo DFU Mod Toolkit Windows x64 WSL bootstrapper')
         return 0
     if args == ['--self-check']:
+        for helper in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh'):
+            if not (root / helper).is_file():
+                raise RuntimeError('Missing embedded Windows helper: ' + helper)
         with tarfile.open(archive) as source:
             names = source.getnames()
             for required in ('jibo-dfu', 'AppRun', '_internal/runtime/licenses/THIRD-PARTY-NOTICES.md'):

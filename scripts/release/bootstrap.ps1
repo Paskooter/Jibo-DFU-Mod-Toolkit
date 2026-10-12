@@ -17,6 +17,28 @@ function Native([string[]]$Arguments) {
     if ($code -ne 0) { throw "WSL failed: $($lines -join ' ')" }
     return (($lines | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
 }
+function ConvertTo-NativeArgumentLine([string[]]$Arguments) {
+    # Start-Process joins arrays on Windows. Quote for the native argv parser,
+    # not PowerShell; preserve spaces, embedded quotes and trailing backslashes.
+    return (($Arguments | ForEach-Object {
+        '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+    }) -join ' ')
+}
+function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]$Gid, [string]$Helper, [string]$Session) {
+    if ($Uid -notmatch '^[1-9][0-9]*$' -or $Gid -notmatch '^[0-9]+$') { throw 'USB access requires a non-root Linux user.' }
+    $wsl = "$env:SystemRoot\System32\wsl.exe"
+    $rootArgs = @('--distribution', $Name, '--user', 'root', '--exec', 'bash', $Helper, $Uid, $Gid, 'once')
+    Write-Host 'Windows will ask for administrator approval for Jibo USB access. The GUI will remain your normal Linux user.'
+    Invoke-ApprovedAdmin $wsl (ConvertTo-NativeArgumentLine $rootArgs)
+    Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'touch', '--', $Session) | Out-Null
+    $rootArgs[-1] = $Session
+    return (Start-Process -FilePath $wsl -ArgumentList (ConvertTo-NativeArgumentLine $rootArgs) -NoNewWindow -PassThru)
+}
+function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session) {
+    # Never enter AppRun's Linux sudo/polkit branch from the Windows EXE.
+    & wsl.exe --distribution $Name --user $User --exec bash "$Target/wsl-user-launch.sh" "$Target/jibo-dfu" $Session | Out-Host
+    return $LASTEXITCODE
+}
 function Test-CompatibleDistribution([string]$Name) {
     try {
         $libc = Native -Arguments @('--distribution', $Name, '--exec', 'getconf', 'GNU_LIBC_VERSION')
@@ -96,24 +118,46 @@ try {
         Invoke-ApprovedAdmin $winget.Source 'install --interactive --exact --id dorssel.usbipd-win'
         throw 'usbipd-win setup finished. Reopen this app so Windows refreshes PATH.'
     }
-    $linuxHome = Native -Arguments @('--distribution', $Distro, '--exec', 'printenv', 'HOME')
-    if (-not $linuxHome.StartsWith('/') -or $linuxHome.Contains("`n")) { throw 'Invalid WSL home directory.' }
+    $linuxUser = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-un')
+    $linuxUid = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-u')
+    $linuxGid = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-g')
+    if ($linuxUid -notmatch '^[1-9][0-9]*$' -or $linuxGid -notmatch '^[0-9]+$' -or $linuxUser -match '["\r\n]' -or -not $linuxUser) {
+        throw 'Choose a WSL distribution with a non-root default user. The GUI will not run as root.'
+    }
+    $linuxHome = Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'printenv', 'HOME')
+    if (-not $linuxHome.StartsWith('/') -or $linuxHome -match '[\r\n]') { throw 'Invalid WSL home directory.' }
     $revision = (Get-Content (Join-Path $PayloadRoot 'revision.txt') -Raw).Trim()
     if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid embedded revision.' }
     $target = "$linuxHome/.local/share/jibo-dfu/$revision"
     $linuxArchive = Native -Arguments @('--distribution', $Distro, '--exec', 'wslpath', '-u', '--', $archive)
-    Native -Arguments @('--distribution', $Distro, '--exec', 'mkdir', '-p', '--', $target) | Out-Null
-    Native -Arguments @('--distribution', $Distro, '--exec', 'tar', '-xzf', $linuxArchive, '-C', $target) | Out-Null
-    Native -Arguments @('--distribution', $Distro, '--exec', "$target/jibo-dfu", '--self-check') | Write-Host
-    # Exact existing bind/attach/reattach implementation, including validated bus IDs,
-    # UAC approval, APX 0955:7740 -> DFU 0955:701a and retry backoff.
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $usbScript -UsbOnly -Distro $Distro
-    $monitorArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}"' -f $usbScript, $Distro
-    $monitor = Start-Process powershell.exe -ArgumentList $monitorArgs -NoNewWindow -PassThru
+    Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'mkdir', '-p', '--', $target) | Out-Null
+    Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'tar', '-xzf', $linuxArchive, '-C', $target) | Out-Null
+    foreach ($helper in @('wsl-usb-permissions.sh', 'wsl-user-launch.sh')) {
+        $source = Join-Path $PayloadRoot $helper
+        if (-not (Test-Path $source)) { throw 'Embedded Windows USB helper is missing.' }
+        $linuxSource = Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'wslpath', '-u', '--', $source)
+        Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'cp', '--', $linuxSource, "$target/$helper") | Out-Null
+    }
+    Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', "$target/jibo-dfu", '--self-check') | Write-Host
+    $session = "$target/.usb-$([guid]::NewGuid().ToString('N'))"
+    $permissions = $null
+    $monitor = $null
     try {
-        & wsl.exe --distribution $Distro --exec bash "$target/AppRun"
-        $code = $LASTEXITCODE
+        # Existing validated bind/attach/reattach logic retains usbipd's UAC prompt.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $usbScript -UsbOnly -Distro $Distro
+        if ($LASTEXITCODE -ne 0) { throw 'USB handoff failed or administrator approval was declined. No GUI was started.' }
+        $permissions = Start-WslUsbAccess -Name $Distro -User $linuxUser -Uid $linuxUid -Gid $linuxGid -Helper "$target/wsl-usb-permissions.sh" -Session $session
+        if ($permissions.WaitForExit(200)) { throw 'The WSL USB permission watcher failed to start.' }
+        $monitorArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}"' -f $usbScript, $Distro
+        $monitor = Start-Process powershell.exe -ArgumentList $monitorArgs -NoNewWindow -PassThru
+        $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session
     } finally {
+        # Removing the user-owned session makes the root watcher exit itself.
+        try { Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'rm', '-f', '--', $session) | Out-Null }
+        catch { Write-Warning 'Could not remove the USB session; the watcher also checks the GUI process lifetime.' }
+        if ($permissions -and -not $permissions.HasExited) {
+            if (-not $permissions.WaitForExit(2000)) { Stop-Process -Id $permissions.Id; $permissions.WaitForExit() }
+        }
         if ($monitor -and -not $monitor.HasExited) { Stop-Process -Id $monitor.Id; $monitor.WaitForExit() }
     }
     exit $code

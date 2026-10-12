@@ -195,6 +195,158 @@ def test_download_rejects_wrong_source_hash(tmp_path):
     assert not (tmp_path / 'download').exists()
 
 
+def test_windows_usb_permission_helper_only_grants_jibo_nodes(tmp_path):
+    script = ROOT / 'scripts/release/wsl-usb-permissions.sh'
+    assert script.is_file(), 'missing password-free WSL USB permission helper'
+    sysfs = tmp_path / 'sys'
+    devfs = tmp_path / 'dev'
+    sysfs.mkdir()
+    devfs.mkdir()
+    for name, vendor, product, bus, device in (
+        ('apx', '0955', '7740', '1', '2'),
+        ('dfu', '0955', '701a', '1', '3'),
+        ('other-product', '0955', '9999', '1', '4'),
+        ('other-vendor', '1234', '701a', '1', '5'),
+        ('invalid-bus', '0955', '701a', '../../etc', '6'),
+    ):
+        entry = sysfs / name
+        entry.mkdir()
+        for field, value in (('idVendor', vendor), ('idProduct', product),
+                             ('busnum', bus), ('devnum', device)):
+            (entry / field).write_text(value + '\n')
+    (devfs / '001').mkdir()
+    for number in ('002', '003', '004', '005'):
+        (devfs / '001' / number).write_text('synthetic USB node')
+    # Model the character-device boundary; chmod/chown are recorded, not executed.
+    probe = r'''
+source "$1"
+test() { if [[ $1 == -c ]]; then [[ -f $2 ]]; else builtin test "$@"; fi; }
+chown() { printf 'chown'; printf ' <%s>' "$@"; printf '\n'; }
+chmod() { printf 'chmod'; printf ' <%s>' "$@"; printf '\n'; }
+grant_jibo_usb "$2" "$3" 1000 1001
+'''
+    result = subprocess.run(['bash', '-c', probe, 'probe', str(script), str(sysfs), str(devfs)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f'chown <1000:1001> <--no-dereference> <--> <{devfs}/001/002>',
+        f'chmod <0600> <--> <{devfs}/001/002>',
+        f'chown <1000:1001> <--no-dereference> <--> <{devfs}/001/003>',
+        f'chmod <0600> <--> <{devfs}/001/003>',
+    ]
+    # Hotplug adds DFU and removes APX; the same grant pass must rediscover nodes.
+    (devfs / '001/002').unlink()
+    result = subprocess.run(['bash', '-c', probe, 'probe', str(script), str(sysfs), str(devfs)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert '002' not in result.stdout and '003' in result.stdout
+    # Never follow a user/device-path symlink to a different host file.
+    (devfs / '001/003').unlink()
+    (devfs / '001/003').symlink_to(devfs / '001/004')
+    result = subprocess.run(['bash', '-c', probe, 'probe', str(script), str(sysfs), str(devfs)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0 and result.stdout == '', result.stderr
+
+
+def test_windows_user_wrapper_keeps_uid_home_and_cleans_session(tmp_path):
+    import os
+    import pytest
+    if os.geteuid() == 0:
+        pytest.skip('requires the non-root invoking user')
+    wrapper = ROOT / 'scripts/release/wsl-user-launch.sh'
+    assert wrapper.is_file(), 'missing non-root WSL GUI wrapper'
+    native = tmp_path / 'jibo-dfu'
+    native.write_text('#!/bin/bash\nprintf "uid:%s home:%s session:%s\\n" "$EUID" "$HOME" "$(<"$SESSION")"\nexit 41\n')
+    native.chmod(0o755)
+    session = tmp_path / 'session'
+    home = tmp_path / 'normal-home'
+    env = os.environ.copy()
+    env.update(HOME=str(home), SESSION=str(session))
+    result = subprocess.run(['bash', str(wrapper), str(native), str(session)],
+                            capture_output=True, text=True, env=env)
+    assert result.returncode == 41, result.stderr
+    assert f'uid:{os.geteuid()} home:{home} session:' in result.stdout
+    assert not session.exists(), 'GUI exit must remove the watcher session'
+
+
+def test_windows_usb_session_checks_process_uid_and_liveness(tmp_path):
+    import os
+    helper = ROOT / 'scripts/release/wsl-usb-permissions.sh'
+    session = tmp_path / 'session'
+    probe = r'''
+source "$1"
+printf '%s\n' "$$" > "$2"
+usb_session_alive "$2" "$3" || exit 11
+usb_session_alive "$2" 999999 && exit 12
+printf '0\n' > "$2"
+usb_session_alive "$2" "$3" && exit 13
+printf 'invalid\n' > "$2"
+usb_session_alive "$2" "$3" && exit 14
+rm "$2"
+usb_session_alive "$2" "$3" && exit 15
+exit 0
+'''
+    result = subprocess.run(['bash', '-c', probe, 'probe', str(helper), str(session), str(os.geteuid())],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_windows_build_embeds_only_windows_privilege_helpers(tmp_path, monkeypatch):
+    module = load_script('build')
+    (tmp_path / 'payload.tar.gz').write_bytes(b'synthetic payload')
+    monkeypatch.setattr(module, 'ROOT', tmp_path)
+    monkeypatch.setattr(module, 'download', lambda *args: None)
+    calls = []
+    monkeypatch.setattr(module, 'run', lambda *args, **kwargs: calls.append(args))
+    module.windows(tmp_path)
+    build_args = list(map(str, calls[0]))
+    embedded = [build_args[i + 1] for i, arg in enumerate(build_args) if arg == '--add-data']
+    for helper in ('wsl-usb-permissions.sh', 'wsl-user-launch.sh'):
+        assert str(tmp_path / 'scripts/release' / helper) + ';.' in embedded
+    # These helpers are EXE-only data, never part of shared Linux AppRun/native logic.
+    assert 'wsl-usb-permissions.sh' not in (ROOT / 'scripts/release/AppRun').read_text()
+    assert 'wsl-user-launch.sh' not in (ROOT / 'scripts/release/native_launcher.py').read_text()
+
+
+def test_windows_selfcheck_requires_embedded_privilege_helpers(tmp_path, monkeypatch, capsys):
+    import hashlib
+    import io
+    import tarfile
+    import pytest
+    module = load_script('windows_launcher')
+    archive = tmp_path / 'payload.tar.gz'
+    with tarfile.open(archive, 'w:gz') as target:
+        for name in ('jibo-dfu', 'AppRun', '_internal/runtime/licenses/THIRD-PARTY-NOTICES.md'):
+            info = tarfile.TarInfo(name)
+            info.size = 7
+            target.addfile(info, io.BytesIO(b'fixture'))
+    (tmp_path / 'payload.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest())
+    (tmp_path / 'revision.txt').write_text('a' * 40)
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
+    monkeypatch.setattr(sys, 'argv', ['bootstrap', '--self-check'])
+    for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh'):
+        with pytest.raises(RuntimeError, match='Missing embedded Windows helper: ' + name):
+            module.main()
+        (tmp_path / name).write_text('synthetic helper')
+    assert module.main() == 0
+    assert 'wsl_setup_attempted' in capsys.readouterr().out
+
+
+def test_non_windows_launchers_are_byte_identical_to_release_builds_base():
+    import hashlib
+    # Frozen baseline 03a25aa58c6fd15e71dc39212c217fee57c1e29d, not generated
+    # from the working tree. Windows root permissions must not alter native flow.
+    expected = {
+        'run.sh': '77b46291029e2aa0008f73919a36788944f2b06226d713d2f1aec04ae2c34fe8',
+        'run-macos.sh': 'f74275fdb82ce98ffae289f74947f95d3068fcd5335e01b141a98c04579f706a',
+        'run-gui.sh': 'cdf548d795acf939184ffe51d0b689cde4133958b006cd083fbf28b469cc5fde',
+        'scripts/release/AppRun': '9e9f7f214a2224b0b1c06b698e75cd88a6348fac4bf2e0de2c9d95ce262f10f8',
+        'scripts/release/native_launcher.py': 'a609dd026af716741a264afea2422d78085f8d11c2ab23e45f499bc5b5502aaf',
+    }
+    for path, digest in expected.items():
+        assert hashlib.sha256((ROOT / path).read_bytes()).hexdigest() == digest, path
+
+
 def test_native_version_needs_no_desktop_or_tools():
     path = ROOT / 'scripts/release/native_launcher.py'
     assert path.is_file(), 'missing native launcher'
