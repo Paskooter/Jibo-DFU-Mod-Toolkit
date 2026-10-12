@@ -29,7 +29,10 @@ main component table above.
 The complete corresponding source archives, patches, build scripts and recorded
 source hashes travel **inside each artifact** and in the release's source archive;
 this is a source-accompanied distribution, not a promise that upstream URLs will
-remain online. The loader source snapshot is the baseline: apply the current
+remain online. Extract `toolkit-source.tar.gz` into a new directory first and use
+its `scripts/build_loader.py`: that preserves the script's required `firmware/`
+layout. The loose build-script copies in `licenses/` are reference copies, not a
+replacement checkout layout. The loader source snapshot is the baseline: apply the current
 entry, CID, file-RPC and queue patches using the included `build_loader.py` (flags
 `--file-level-candidate --dfu-queue-candidate`), as described in `docs/loader-build.md`.
 The separate manifest pins the exact distributed loader hash.

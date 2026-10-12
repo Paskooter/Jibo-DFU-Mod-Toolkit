@@ -82,6 +82,8 @@ def test_release_workflow_is_draft_only_and_has_four_native_targets():
                      'macos-15-intel', 'macos-15', '--draft', 'SHA256SUMS'):
         assert required in text
     assert '--latest' not in text
+    windows_step = text.split('name: Build Windows one-file bootstrapper', 1)[1].split('- name:', 1)[0]
+    assert windows_step.count('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }') == 3, 'native failures must not be masked by later PowerShell success'
 
 
 def test_windows_bootstrap_reuses_existing_usb_monitor_without_cloning():

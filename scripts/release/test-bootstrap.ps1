@@ -42,14 +42,16 @@ try {
     $child = Join-Path $fixture 'refusal.ps1'
     $childText = @'
 param($Bootstrap, $Payload, $Case)
+$global:BootstrapTestCase = $Case
+$global:BootstrapTestSentinel = Join-Path $Payload 'unexpected-admin'
 function wsl.exe {
-    if ($script:Case -eq 'no-distro' -and $args[0] -eq '--version') {
+    if ($global:BootstrapTestCase -eq 'no-distro' -and $args[0] -eq '--version') {
         $global:LASTEXITCODE=0; return 'WSLg 1.0'
     }
     $global:LASTEXITCODE=1; return 'No installed distributions or GUI support'
 }
 function Read-Host { param($Prompt); return 'n' }
-function Start-Process { [IO.File]::WriteAllText((Join-Path $Payload 'unexpected-admin'), 'failed'); throw 'Unexpected admin action' }
+function Start-Process { [IO.File]::WriteAllText($global:BootstrapTestSentinel, 'failed'); throw 'Unexpected admin action' }
 & $Bootstrap -PayloadRoot $Payload
 exit $LASTEXITCODE
 '@
