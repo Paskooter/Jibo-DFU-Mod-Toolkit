@@ -1,0 +1,11 @@
+Jibo DFU Mod Toolkit — licensing information
+
+Packaging does not grant a new blanket license to the toolkit's original code.
+Consult original file headers and contact the repository owner for any permissions
+not already granted there. The bundled third-party components retain their original
+licenses; these are NOT replaced by this file.
+
+The downloadable builds include licenses/ with component license texts, notices,
+source archives and build instructions. See THIRD-PARTY-NOTICES.md. GPL and LGPL
+components are provided under their respective licenses, including the rights to
+copy, modify and redistribute them. No warranty is provided by their licensors.

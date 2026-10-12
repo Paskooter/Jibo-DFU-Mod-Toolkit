@@ -1,0 +1,161 @@
+name: Single-file release builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    # Validation branch only; source launchers and main are not altered by CI.
+    branches: [feature/release-builds]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-payload:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install build-only prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-tk libusb-1.0-0-dev gcc-arm-none-eabi binutils-arm-none-eabi pkg-config libfuse2 xvfb patchelf busybox nodejs
+          /usr/bin/python3 -m venv .build-venv
+          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest
+      - name: Source and release-adapter regression tests
+        run: .build-venv/bin/python -m pytest -q
+      - name: Build and smoke-test self-contained Linux payload
+        run: .build-venv/bin/python scripts/release/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-stage
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: linux-payload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: Linux
+            architecture: x86_64
+          - runner: windows-2022
+            platform: Windows
+            architecture: x64
+          - runner: macos-15
+            platform: macOS
+            architecture: arm64
+          - runner: macos-15-intel
+            platform: macOS
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        if: matrix.platform != 'macOS'
+        with:
+          name: linux-stage
+          path: linux-stage
+      - uses: actions/setup-python@v6
+        if: matrix.platform == 'Windows'
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Build Windows one-file bootstrapper (no signing)
+        if: matrix.platform == 'Windows'
+        run: |
+          python -m pip install pyinstaller==6.16.0 pytest
+          python scripts/release/build.py --windows-payload linux-stage
+          powershell -NoProfile -File scripts/release/test-bootstrap.ps1
+      - name: Install native Mac build-only prerequisites
+        if: matrix.platform == 'macOS'
+        run: |
+          test "$(uname -m)" = '${{ matrix.architecture }}'
+          brew install python@3.12 python-tk@3.12 pkg-config
+          "$(brew --prefix python@3.12)/bin/python3.12" -m venv .build-venv
+          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest
+      - name: Build native Mac app and DMG (no signing identity)
+        if: matrix.platform == 'macOS'
+        run: .build-venv/bin/python scripts/release/build.py --architecture '${{ matrix.architecture }}'
+      - name: Smoke-test the actual mounted DMG
+        if: matrix.platform == 'macOS'
+        run: |
+          mount="$RUNNER_TEMP/dfu-dmg"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" release-out/*.dmg
+          "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --version
+          "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --self-check
+          "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --gui-smoke
+          hdiutil detach "$mount"
+      - name: Smoke-test the downloaded Linux AppImage
+        if: matrix.platform == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libfuse2
+          mkdir release-out
+          cp linux-stage/*.AppImage linux-stage/LICENSE linux-stage/THIRD-PARTY-NOTICES.md linux-stage/*source.tar.gz release-out/
+          chmod +x release-out/*.AppImage
+          release-out/*.AppImage --appimage-extract-and-run --version
+          release-out/*.AppImage --appimage-extract-and-run --self-check
+          xvfb-run -a release-out/*.AppImage --appimage-extract-and-run --gui-smoke
+      - name: Record artifact hashes and byte sizes
+        shell: bash
+        run: |
+          python3 -c 'import pathlib,hashlib,json; root=pathlib.Path("release-out"); data={p.name:{"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()} for p in root.iterdir() if p.is_file()}; (root/"build-info-${{ matrix.platform }}-${{ matrix.architecture }}.json").write_text(json.dumps({"revision":"${{ github.sha }}","files":data},indent=2)+"\n"); print(json.dumps(data,indent=2))'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jibo-DFU-${{ matrix.platform }}-${{ matrix.architecture }}
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Jibo-DFU-*
+          path: release-out
+          merge-multiple: true
+      - name: Make SHA256SUMS and assert the complete four-platform set
+        run: |
+          cd release-out
+          test -s Jibo-DFU-Windows-x64.exe
+          test -s Jibo-DFU-Linux-x86_64.AppImage
+          test -s Jibo-DFU-macOS-arm64.dmg
+          test -s Jibo-DFU-macOS-x86_64.dmg
+          test -s Jibo-DFU-corresponding-source.tar.gz
+          sha256sum Jibo-DFU-* LICENSE THIRD-PARTY-NOTICES.md build-info-*.json > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jibo-DFU-release-files
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Create or update a DRAFT release only
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Fail closed: reruns must never change an already published release.
+          if gh release view "$TAG" --json isDraft > existing.json 2>/dev/null; then
+            python3 -c 'import json; assert json.load(open("existing.json"))["isDraft"], "Refusing to modify a published release"'
+          else
+            gh release create "$TAG" --draft --verify-tag --title "Jibo DFU Toolkit $TAG" --notes 'Unsigned builds. Read README Download instructions and THIRD-PARTY-NOTICES.md. Hardware acceptance and publishing are manual maintainer decisions.'
+          fi
+          gh release upload "$TAG" release-out/* --clobber
+          gh release view "$TAG" --json isDraft,assets

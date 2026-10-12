@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Release payload launcher; source run.sh is deliberately not involved.
+set -euo pipefail
+appdir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+case ${1:-} in
+  --version|--self-check|--gui-smoke) exec "$appdir/jibo-dfu" "$@" ;;
+esac
+if (( EUID == 0 )); then exec "$appdir/jibo-dfu" "$@"; fi
+# Root cannot traverse a normal user's FUSE mount. Stage outside that mount.
+stage=
+if [[ -n ${APPIMAGE:-} ]]; then
+  stage=$(mktemp -d /tmp/jibo-dfu-launch.XXXXXXXX)
+  trap 'rm -rf -- "$stage"' EXIT
+  cp -a "$appdir/." "$stage/"
+  appdir=$stage
+fi
+printf 'Jibo needs administrator approval for USB. This does not authorize a robot write.\n'
+if command -v pkexec >/dev/null 2>&1 && [[ -z ${WSL_DISTRO_NAME:-} ]]; then
+  pkexec env DISPLAY="${DISPLAY:-}" XAUTHORITY="${XAUTHORITY:-}" \
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" "$appdir/jibo-dfu" "$@"
+elif command -v sudo >/dev/null 2>&1; then
+  sudo --preserve-env=DISPLAY,XAUTHORITY,WAYLAND_DISPLAY,XDG_RUNTIME_DIR "$appdir/jibo-dfu" "$@"
+else
+  printf 'Install a desktop polkit agent (pkexec), or launch from a terminal with sudo.\n' >&2
+  exit 1
+fi
