@@ -60,5 +60,9 @@ Use Windows-side root-only USB permission preparation/watch for the invoking UID
 - Synthetic ownership execution through the unchanged normal-user wrapper created a file in a temporary HOME with UID:GID 1000:1000 matching the caller, propagated exit 41 and removed the session. No real backup/hardware was used.
 - Final API read: release run 38278897072 **completed failure**: linux-payload, Linux AppImage, macOS arm64 and macOS x86_64 succeeded; Windows failed; aggregate release job skipped. Separate macOS portability run 38278854368 completed success for both architectures. Four Actions artifacts exist (Linux stage/Linux/Mac arm64/Mac x86_64); Windows and aggregate artifacts do not exist.
 
+## VERIFIED — closure
+- Local-only harness correction is commit `d8625513d48b6946020478470b80f769796d90fd`. Clean-tree final verification at that SHA: full pytest 368 pass/18 skip/47 passing subtests; release pytest 23 pass; full unittest 273 pass; PowerShell raw-argv + 8 bootstrap cases exit 0; Bash syntax and whitespace checks exit 0.
+- Full report is `docs/windows-uac-REPORT.md`. Outcome is locally verified implementation **blocked on root's Windows CI rerun**, not accepted/release-ready. The only post-push change outside docs is the CI test harness; runtime code is unchanged from the EXE that built/self-checked in Actions.
+
 ## UNKNOWN
-Real interactive UAC, WSLg, Linux device permissions, APX->DFU transitions and real hardware acceptance cannot be exercised on this Linux host. CI native Windows capability remains to be established.
+Real interactive UAC, WSLg, USB device permissions and hardware transitions remain untested. Windows EXE packaging/version/self-check were executed; Windows execution of the corrected raw-argv oracle and the six later mocked full-bootstrap cases remains unknown.
