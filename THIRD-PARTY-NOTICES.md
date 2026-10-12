@@ -17,6 +17,13 @@ fails if any required source archive or license text is absent.
 | PyInstaller | GPL-2.0-or-later with the bootloader distribution exception | PyInstaller COPYING.txt |
 | AppImage runtime (Linux) | MIT | runtime LICENSE and recorded upstream URL |
 
+The Mac bundles also preserve their installed Homebrew interpreter dependency
+license texts, formula snapshots and GPL/LGPL source archives, indexed in
+`licenses/Homebrew-dependencies.json`. Matching per-architecture Mac source assets
+travel with the release. Linux interpreter library copyright/terms are collected
+in `licenses/system-library-notices/`. These dependency notices supplement the
+main component table above.
+
 ## Source access and rebuilding
 
 The complete corresponding source archives, patches, build scripts and recorded

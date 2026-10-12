@@ -5,15 +5,18 @@ import os
 from pathlib import Path
 
 
-def write_manifest(root, revision):
+def write_manifest(root, revision, exclude=()):
     root = Path(root)
+    excluded = set(exclude)
     files = {}
     for directory, _, names in os.walk(root, followlinks=True):
         for name in sorted(names):
             p = Path(directory) / name
-            if p.is_file() and p.name != 'release-manifest.json':
-                files[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
-    (root / 'release-manifest.json').write_text(json.dumps({'revision': revision, 'files': files}, indent=2) + '\n')
+            relative = p.relative_to(root).as_posix()
+            if p.is_file() and p.name != 'release-manifest.json' and relative not in excluded:
+                files[relative] = hashlib.sha256(p.read_bytes()).hexdigest()
+    (root / 'release-manifest.json').write_text(json.dumps({'revision': revision, 'files': files,
+        'excluded_native_files': sorted(excluded)}, indent=2) + '\n')
 
 
 def verify_manifest(root):

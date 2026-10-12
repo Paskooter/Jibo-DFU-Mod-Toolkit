@@ -58,6 +58,22 @@ def test_manifest_covers_symlinked_pyinstaller_resource_directories(tmp_path):
     assert 'tools/helper' in receipt['files']
 
 
+def test_manifest_can_explicitly_exclude_macho_relocation_outputs(tmp_path):
+    module = load_script('manifest')
+    (tmp_path / 'tools').mkdir()
+    (tmp_path / 'tools/helper').write_bytes(b'before Mach-O relocation')
+    (tmp_path / 'source.py').write_text('unchanged source')
+    module.write_manifest(tmp_path, 'revision', exclude=('tools/helper',))
+    (tmp_path / 'tools/helper').write_bytes(b'after Mach-O relocation')
+    receipt = module.verify_manifest(tmp_path)
+    assert receipt['excluded_native_files'] == ['tools/helper']
+    assert 'source.py' in receipt['files']
+    (tmp_path / 'source.py').write_text('corrupt')
+    import pytest
+    with pytest.raises(ValueError, match='source.py'):
+        module.verify_manifest(tmp_path)
+
+
 def test_release_workflow_is_draft_only_and_has_four_native_targets():
     path = ROOT / '.github/workflows/release.yml'
     assert path.is_file(), 'missing release workflow'
@@ -106,6 +122,16 @@ def test_macho_audit_rejects_build_machine_libraries():
     assert hasattr(module, 'external_macho_dependencies'), 'missing Mach-O dependency audit'
     output = 'tool:\n\t@loader_path/libusb.dylib (compatibility version 1.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n\t/opt/homebrew/opt/libusb/lib/libusb.dylib (compatibility version 1.0.0)\n'
     assert module.external_macho_dependencies(output) == ['/opt/homebrew/opt/libusb/lib/libusb.dylib']
+
+
+def test_installed_formula_source_pin_is_preserved():
+    module = load_script('build')
+    assert hasattr(module, 'formula_source_pin'), 'missing installed-formula source lookup'
+    text = 'url "https://example.invalid/component-1.2.tar.xz"\nsha256 "' + 'a' * 64 + '"\n'
+    assert module.formula_source_pin(text) == ('https://example.invalid/component-1.2.tar.xz', 'a' * 64)
+    import pytest
+    with pytest.raises(ValueError, match='source pin'):
+        module.formula_source_pin('no url or hash')
 
 
 def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):

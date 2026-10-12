@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -86,6 +87,66 @@ def dependencies(work, licenses):
     return prefix
 
 
+def formula_source_pin(text):
+    url = re.search(r'^\s*url\s+"(https://[^"#]+)"', text, re.MULTILINE)
+    sha = re.search(r'^\s*sha256\s+"([0-9a-f]{64})"', text, re.MULTILINE)
+    if not url or not sha:
+        raise ValueError('Installed formula has no literal stable source pin')
+    return url.group(1), sha.group(1)
+
+
+def mac_dependency_notices(licenses):
+    # A superset of runtime dependencies is deliberate: include all installed
+    # interpreter dependency notices, and corresponding sources for GPL/LGPL libs.
+    names = set()
+    for formula_name in ('python@3.12', 'python-tk@3.12'):
+        names.update(subprocess.check_output(['brew', 'deps', '--formula', formula_name],
+                                            text=True).splitlines())
+    inventory = {}
+    for name in sorted(names):
+        keg = Path(subprocess.check_output(['brew', '--prefix', name], text=True).strip()).resolve()
+        target = licenses / 'Homebrew-dependencies' / name
+        target.mkdir(parents=True)
+        formula = next((keg / '.brew').glob('*.rb'))
+        text = formula.read_text()
+        shutil.copy2(formula, target)
+        receipt = keg / 'INSTALL_RECEIPT.json'
+        if receipt.is_file():
+            shutil.copy2(receipt, target)
+        copied = []
+        for file in keg.rglob('*'):
+            if file.is_file() and any(file.name.lower().startswith(k) for k in
+                                     ('license', 'licence', 'copying', 'copyright', 'notice')):
+                relative = file.relative_to(keg)
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(file, destination)
+                copied.append(relative.as_posix())
+        copyleft = bool(re.search(r'\bL?GPL-', text))
+        item = {'keg_version': keg.name, 'notices': copied, 'source_included': False}
+        if copyleft or not copied:
+            url, sha = formula_source_pin(text)
+            archive = target / ('corresponding-source-' + Path(url.split('?', 1)[0]).name)
+            download(url, archive, sha)
+            item.update(source_included=True, source_url=url, source_sha256=sha)
+            # Archives themselves contain all original attribution/license texts.
+            with tarfile.open(archive) as source:
+                for member in source.getmembers():
+                    basename = Path(member.name).name.lower()
+                    if member.isfile() and any(basename.startswith(k) for k in
+                                              ('license', 'licence', 'copying', 'copyright', 'notice')):
+                        extracted = source.extractfile(member)
+                        if extracted is not None:
+                            destination = target / 'source-notices' / member.name
+                            if target.resolve() not in destination.resolve().parents:
+                                raise RuntimeError('Unsafe source notice path: ' + member.name)
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            destination.write_bytes(extracted.read())
+        inventory[name] = item
+    (licenses / 'Homebrew-dependencies.json').write_text(json.dumps(inventory, indent=2) + '\n')
+    print('Bundled interpreter dependency notices:', json.dumps(inventory, indent=2))
+
+
 def notices(licenses, entry, revision):
     for name in ('LICENSE', 'THIRD-PARTY-NOTICES.md', 'vendor/jibo-ram-dfu-v1-source.tar.gz'):
         shutil.copy2(ROOT / name, licenses / Path(name).name)
@@ -116,6 +177,7 @@ def notices(licenses, entry, revision):
     version = '.'.join(map(str, sys.version_info[:3]))
     download('https://raw.githubusercontent.com/python/cpython/v' + version + '/LICENSE', licenses / 'Python-LICENSE.txt')
     if sys.platform == 'darwin':
+        mac_dependency_notices(licenses)
         prefix = Path(subprocess.check_output(['brew', '--prefix', 'tcl-tk'], text=True).strip())
         terms = [p for p in prefix.rglob('*') if p.is_file() and p.name.lower() in ('license.terms', 'license', 'license.txt', 'copying')]
         if not terms:
@@ -217,7 +279,11 @@ def native(architecture):
     shutil.copy2(ROOT / 'scripts/release/manifest.py', runtime / 'manifest.py')
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     notices(licenses, entry, revision)
-    write_manifest(runtime, revision)
+    # Mach-O relocation/ad-hoc preparation changes binary bytes during freezing.
+    # Hash data before freezing, then NEVER edit the sealed .app afterward.
+    excluded = (['tools/' + name for name in TOOLS + ('shofel2_t124',)] +
+                ['lib/' + library_name]) if sys.platform == 'darwin' else []
+    write_manifest(runtime, revision, exclude=excluded)
     name = 'Jibo DFU Mod Toolkit' if sys.platform == 'darwin' else 'jibo-dfu'
     args = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', name,
             '--distpath', work / 'dist', '--workpath', work / 'freeze', '--specpath', work,
@@ -242,8 +308,8 @@ def native(architecture):
     if sys.platform == 'darwin':
         app = work / 'dist/Jibo DFU Mod Toolkit.app'
         audit_macho(app)
-        final_runtime = app / 'Contents/Frameworks/runtime'
-        write_manifest(final_runtime, revision)
+        # Verification only: no identity signing/notarization step is added.
+        run('codesign', '--verify', '--all-architectures', '--deep', '--strict', app)
         binary = app / 'Contents/MacOS/Jibo DFU Mod Toolkit'
         run(binary, '--self-check')
         run(binary, '--gui-smoke')
@@ -255,6 +321,8 @@ def native(architecture):
         shutil.copy2(ROOT / 'THIRD-PARTY-NOTICES.md', image_root)
         dmg = out / ('Jibo-DFU-macOS-' + architecture + '.dmg')
         run('hdiutil', 'create', '-volname', 'Jibo DFU Toolkit', '-srcfolder', image_root, '-format', 'UDZO', dmg)
+        with tarfile.open(out / ('Jibo-DFU-macOS-' + architecture + '-corresponding-source.tar.gz'), 'w:gz') as archive:
+            archive.add(licenses, arcname='licenses')
     else:
         appdir = work / 'dist/jibo-dfu'
         write_manifest(appdir / '_internal/runtime', revision)

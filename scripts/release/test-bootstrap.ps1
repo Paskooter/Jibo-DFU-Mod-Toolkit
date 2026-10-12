@@ -25,4 +25,25 @@ $usbPath = Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'run.ps1'
 $usbErrors=$null
 [System.Management.Automation.Language.Parser]::ParseFile($usbPath, [ref]$tokens, [ref]$usbErrors) | Out-Null
 if ($usbErrors.Count) { throw ($usbErrors | Out-String) }
-Write-Output 'PASS: PowerShell parse, setup refusal/approval, argument preservation, NUL handling and native failures; no WSL/USB/admin action attempted.'
+# Exercise the entire missing-WSLg refusal path in a child process. A mock admin
+# function leaves a sentinel if any installation is attempted after declining.
+$fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-bootstrap-test-' + [guid]::NewGuid())
+New-Item -ItemType Directory $fixture | Out-Null
+try {
+    [IO.File]::WriteAllText((Join-Path $fixture 'payload.tar.gz'), 'not read on refusal')
+    [IO.File]::WriteAllText((Join-Path $fixture 'run.ps1'), 'not run on refusal')
+    $child = Join-Path $fixture 'refusal.ps1'
+    $childText = @'
+param($Bootstrap, $Payload)
+function wsl.exe { $global:LASTEXITCODE=0; return 'WSL present but GUI component absent' }
+function Read-Host { param($Prompt); return 'n' }
+function Start-Process { [IO.File]::WriteAllText((Join-Path $Payload 'unexpected-admin'), 'failed'); throw 'Unexpected admin action' }
+& $Bootstrap -PayloadRoot $Payload
+'@
+    [IO.File]::WriteAllText($child, $childText)
+    $messages = @(& (Join-Path $PSHOME 'powershell.exe') -NoProfile -File $child -Bootstrap $path -Payload $fixture 2>&1)
+    if ($LASTEXITCODE -ne 1 -or (Test-Path (Join-Path $fixture 'unexpected-admin')) -or (($messages -join ' ') -notmatch 'No setup changes were made')) {
+        throw ('Full bootstrap refusal path failed: ' + ($messages -join ' '))
+    }
+} finally { Remove-Item -Recurse -Force $fixture }
+Write-Output 'PASS: PowerShell parse, full setup refusal (no admin action), approval helper, argument preservation, NUL handling and native failures; no real WSL/USB/admin action attempted.'

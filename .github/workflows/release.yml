@@ -91,6 +91,7 @@ jobs:
           mount="$RUNNER_TEMP/dfu-dmg"
           mkdir -p "$mount"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount" release-out/*.dmg
+          codesign --verify --all-architectures --deep --strict "$mount/Jibo DFU Mod Toolkit.app"
           "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --version
           "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --self-check
           "$mount/Jibo DFU Mod Toolkit.app/Contents/MacOS/Jibo DFU Mod Toolkit" --gui-smoke
@@ -136,6 +137,8 @@ jobs:
           test -s Jibo-DFU-macOS-arm64.dmg
           test -s Jibo-DFU-macOS-x86_64.dmg
           test -s Jibo-DFU-corresponding-source.tar.gz
+          test -s Jibo-DFU-macOS-arm64-corresponding-source.tar.gz
+          test -s Jibo-DFU-macOS-x86_64-corresponding-source.tar.gz
           sha256sum Jibo-DFU-* LICENSE THIRD-PARTY-NOTICES.md build-info-*.json > SHA256SUMS
           sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v4

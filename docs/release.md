@@ -37,7 +37,8 @@ No tag or release is made by a branch/manual run.
 
 Download the `Jibo-DFU-release-files` Actions artifact: it contains the four files,
 `SHA256SUMS`, `LICENSE`, `THIRD-PARTY-NOTICES.md`, the complete corresponding-source
-archive and per-platform JSON receipts (byte sizes, SHA-256, branch commit). The
+archive, per-architecture Mac interpreter-dependency source archives, and
+per-platform JSON receipts (byte sizes, SHA-256, branch commit). The
 separate platform artifacts are useful for diagnosis. `linux-stage` is an internal
 Windows-build input, not a user download.
 
@@ -66,7 +67,12 @@ Windows-build input, not a user download.
 
 CI executes bundled dfu-util and all ext4 tools, checks ShofEL's launch capability,
 loads the bundled libusb and Tcl, checks file integrity and private GUI-flow loading,
-and renders the actual first Tk window without USB access. Linux uses Xvfb and
+and renders the actual first Tk window without USB access. Mac data hashes are
+fixed before PyInstaller's standard Mach-O preparation: relocated native binaries
+are instead checked by execution, dependency closure and the outer DMG SHA-256.
+Nothing edits the sealed Mac app afterward. CI verifies that local ad-hoc seal
+before packing and after mounting the DMG; this is verification, not an identity
+signing or notarization step. Linux uses Xvfb and
 extract-and-run to avoid a CI FUSE requirement. macOS mounts each produced DMG and
 launches the app from it. Windows executes the final `.exe` version/self-check and
 PowerShell parse/helper tests without installing WSL or prompting for UAC.
