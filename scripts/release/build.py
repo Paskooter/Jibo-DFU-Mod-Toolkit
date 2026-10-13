@@ -181,7 +181,7 @@ def mac_dependency_notices(licenses):
 
 
 def notices(licenses, entry, revision):
-    for name in ('LICENSE', 'THIRD-PARTY-NOTICES.md', 'vendor/jibo-ram-dfu-v1-source.tar.gz'):
+    for name in ('LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'vendor/jibo-ram-dfu-v1-source.tar.gz'):
         shutil.copy2(ROOT / name, licenses / Path(name).name)
     shutil.copytree(ROOT / 'firmware', licenses / 'firmware')
     for name in ('build_loader.py', 'build_file_level_entry.py'):

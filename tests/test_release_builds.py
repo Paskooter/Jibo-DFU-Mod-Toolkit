@@ -161,6 +161,37 @@ def test_notice_paths_do_not_create_fake_mac_bundles():
     assert module.notice_path(Path('COPYING')) == Path('COPYING')
 
 
+def test_shared_payload_notices_copy_toolkit_license_and_notice(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = load_script('build')
+    licenses = tmp_path / 'licenses'
+    licenses.mkdir()
+    entry = tmp_path / 'entry'
+    entry.mkdir()
+    (entry / 'source.c').write_text('synthetic source')
+    package = tmp_path / 'pyinstaller'
+    package.mkdir()
+    (package / 'COPYING.txt').write_text('synthetic PyInstaller terms')
+    monkeypatch.setitem(sys.modules, 'PyInstaller',
+                        SimpleNamespace(__file__=str(package / '__init__.py'), __version__='fixture'))
+    tk = tmp_path / 'tcltk'
+    tk.mkdir()
+    (tk / 'license.terms').write_text('synthetic Tcl/Tk terms')
+    monkeypatch.setattr(module, 'sys', SimpleNamespace(platform='darwin',
+                        version_info=sys.version_info, version=sys.version))
+    monkeypatch.setattr(module, 'mac_dependency_notices', lambda *args: None)
+    monkeypatch.setattr(module.subprocess, 'check_output', lambda *args, **kwargs: str(tk) + '\n')
+    monkeypatch.setattr(module.subprocess, 'run',
+                        lambda *args, **kwargs: kwargs['stdout'].write(b'synthetic source archive'))
+    monkeypatch.setattr(module, 'download',
+                        lambda url, destination, *args: destination.write_bytes(b'synthetic dependency terms'))
+    module.notices(licenses, entry, 'fixture-revision')
+    # This shared directory is frozen into AppImage, both DMGs and the EXE payload.
+    for name in ('LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md'):
+        assert (licenses / name).is_file(), 'missing shared payload notice: ' + name
+        assert (licenses / name).read_bytes() == (ROOT / name).read_bytes()
+
+
 def test_windows_payload_checksum_refuses_corruption(tmp_path, monkeypatch):
     module = load_script('windows_launcher')
     (tmp_path / 'payload.tar.gz').write_bytes(b'corrupt')
