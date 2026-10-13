@@ -303,12 +303,17 @@ def test_windows_build_embeds_only_windows_privilege_helpers(tmp_path, monkeypat
     embedded = [build_args[i + 1] for i, arg in enumerate(build_args) if arg == '--add-data']
     for helper in ('wsl-usb-permissions.sh', 'wsl-user-launch.sh'):
         assert str(tmp_path / 'scripts/release' / helper) + ';.' in embedded
+    # GPL-3.0-only: the GPL text and the copyright notice must be embedded data
+    # of every single-file artifact, not only inside the Linux payload tarball.
+    for name in ('LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md'):
+        assert str(tmp_path / name) + ';.' in embedded, name
+        assert (ROOT / name).is_file(), name
     # These helpers are EXE-only data, never part of shared Linux AppRun/native logic.
     assert 'wsl-usb-permissions.sh' not in (ROOT / 'scripts/release/AppRun').read_text()
     assert 'wsl-user-launch.sh' not in (ROOT / 'scripts/release/native_launcher.py').read_text()
 
 
-def test_windows_selfcheck_requires_embedded_privilege_helpers(tmp_path, monkeypatch, capsys):
+def test_windows_selfcheck_requires_embedded_license_and_notice(tmp_path, monkeypatch, capsys):
     import hashlib
     import io
     import tarfile
@@ -316,7 +321,8 @@ def test_windows_selfcheck_requires_embedded_privilege_helpers(tmp_path, monkeyp
     module = load_script('windows_launcher')
     archive = tmp_path / 'payload.tar.gz'
     with tarfile.open(archive, 'w:gz') as target:
-        for name in ('jibo-dfu', 'AppRun', '_internal/runtime/licenses/THIRD-PARTY-NOTICES.md'):
+        for name in ('jibo-dfu', 'AppRun', '_internal/runtime/licenses/THIRD-PARTY-NOTICES.md',
+                     '_internal/runtime/licenses/LICENSE'):
             info = tarfile.TarInfo(name)
             info.size = 7
             target.addfile(info, io.BytesIO(b'fixture'))
@@ -324,7 +330,8 @@ def test_windows_selfcheck_requires_embedded_privilege_helpers(tmp_path, monkeyp
     (tmp_path / 'revision.txt').write_text('a' * 40)
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
     monkeypatch.setattr(sys, 'argv', ['bootstrap', '--self-check'])
-    for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh'):
+    for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh',
+                 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md'):
         with pytest.raises(RuntimeError, match='Missing embedded Windows helper: ' + name):
             module.main()
         (tmp_path / name).write_text('synthetic helper')
