@@ -5,10 +5,13 @@ unknown formats remain untouched. Format validation is not factory provenance
 or a claim that measurements are mechanically safe.
 """
 from dataclasses import dataclass
+from datetime import datetime
+import math
 import base64
 import hashlib
 import json
 import re
+from typing import NoReturn
 
 PROFILE = "jibo-factory-calibration-v3"
 
@@ -35,6 +38,159 @@ ITEMS = (
 
 class CalibrationError(Exception):
     """Unsupported calibration, without echoing private file contents."""
+
+
+_SPECS = {item.key: item for item in ITEMS}
+_CAMERA_FIELDS = frozenset((
+    "camera_id", "version", "frame_name", "distortion_precompute_filename",
+    "image_width", "image_height", "center_x", "center_y", "scale_x", "scale_y",
+    "focal_length_x", "focal_length_y", "k1", "k2", "k3", "k4", "k5", "skew",
+))
+_NUMBER = r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+_STOCK_HASHES = {
+    "left": "72a1fbdef047873c67167cf416555981b25faaafed0848b9718abd0d9a85dee7",
+    "right": "cd0ede42243fbf7cb883b6aa79d44667823cb9b2ddc2c0cbda1016a39654672d",
+    "inter_camera": "26ef25c2fabe6313803ce9b91b1b03c8274cd5764be4849a6b3ad324233ca810",
+}
+
+
+def _unsupported() -> NoReturn:
+    raise CalibrationError("Kept local (unsupported format).")
+
+
+def _object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            _unsupported()
+        result[key] = value
+    return result
+
+
+def _json(text):
+    try:
+        return json.loads(text, object_pairs_hook=_object, parse_constant=lambda _value: _unsupported())
+    except (ValueError, RecursionError):
+        _unsupported()
+
+
+def _keys(value, keys):
+    if not isinstance(value, dict) or set(value) != set(keys):
+        _unsupported()
+
+
+def _number(value):
+    if type(value) not in (int, float):
+        _unsupported()
+    try:
+        if not math.isfinite(value):
+            _unsupported()
+    except OverflowError:
+        _unsupported()
+
+
+def _camera(key, value):
+    _keys(value, _CAMERA_FIELDS)
+    side, camera_id = ("left_eye", 1) if key == "left" else ("right_eye", 0)
+    for field, expected in (("camera_id", camera_id), ("image_width", 1280), ("image_height", 720)):
+        if type(value[field]) is not int or value[field] != expected:
+            _unsupported()
+    if value["frame_name"] != side or value["distortion_precompute_filename"] != \
+            "/var/jibo/lps/distortionPrecomputeFile_{}_{}".format(side, camera_id):
+        _unsupported()
+    # 0.1 is the frozen v3 vector; 1.0.0 is the distributed stock template.
+    if value["version"] not in ("0.1", "1.0.0"):
+        _unsupported()
+    for field in _CAMERA_FIELDS - {"camera_id", "image_width", "image_height", "frame_name",
+                                  "distortion_precompute_filename", "version"}:
+        _number(value[field])
+        if abs(value[field]) > 1000000:
+            _unsupported()
+    if not (0 <= value["center_x"] < 1280 and 0 <= value["center_y"] < 720 and
+            value["focal_length_x"] > 0 and value["focal_length_y"] > 0):
+        _unsupported()
+
+
+def _audio(text):
+    # Shell echo removed quotes from historical factory output. Recognize only
+    # these tokens, never eval, general JS/Python, or a quote-repair serializer.
+    for quoted in (False, True):
+        key = r'"mic[1-6]"' if quoted else r"mic[1-6]"
+        entry = key + r": " + _NUMBER
+        if re.fullmatch(r"\{" + entry + r"(?:, " + entry + r"){5}\}\n?", text):
+            tokens = re.findall(r"(" + key + r"): (" + _NUMBER + r")", text)
+            if {name.strip('"') for name, _value in tokens} != {"mic" + str(i) for i in range(1, 7)}:
+                _unsupported()
+            for _name, number in tokens:
+                _number(_json(number))
+            return
+    _unsupported()
+
+
+def _factory_record(value):
+    # Profile pin: manufacturing/automation_scripts@6ea44333f8707d140050d864c80ff1ceb96614bb
+    # src/calibration_file_check.py:19,99-114,178 (empty and 12-digit demo);
+    # src/mainboard_test.py:35,408-410 (False initializer, IMU updates);
+    # src/camera_test.py:377-381; src/jibo_test_core.py:433;
+    # src/jibo_test_shared.py:17,26-28 (14-digit production date, PASS/FAIL).
+    _keys(value, ("imu", "camera"))
+    for record in value.values():
+        _keys(record, ("timedate", "passfail"))
+        date, result = record["timedate"], record["passfail"]
+        if not isinstance(date, str) or result not in ("", "False", "PASS", "FAIL"):
+            _unsupported()
+        if date:
+            if not re.fullmatch(r"(?:[0-9]{12}|[0-9]{14})", date):
+                _unsupported()
+            try:
+                datetime.strptime(date, "%Y%m%d%H%M%S" if len(date) == 14 else "%y%m%d%H%M%S")
+            except ValueError:
+                _unsupported()
+
+
+def validate_item(key: str, data: bytes) -> bytes:
+    spec = _SPECS.get(key)
+    if spec is None or not isinstance(data, bytes) or not data or len(data) > spec.cap:
+        _unsupported()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        _unsupported()
+    if text.startswith("\ufeff"):
+        _unsupported()
+    if key == "audio":
+        _audio(text)
+    elif key == "touchscreen":
+        integer = r"[+-]?[0-9]+"
+        if not re.fullmatch(integer + r"(?: " + integer + r"){6}(?: " + integer + r"){0,2}\n?", text) or \
+                len(text.rstrip("\n").split(" ")) not in (7, 9):
+            _unsupported()
+    else:
+        value = _json(text)
+        if key in ("left", "right"):
+            _camera(key, value)
+        elif key == "inter_camera":
+            _keys(value, ("Transform",))
+            if not isinstance(value["Transform"], list) or len(value["Transform"]) != 16:
+                _unsupported()
+            for number in value["Transform"]:
+                _number(number)
+        elif key == "imu":
+            _keys(value, ("icm20608",))
+            _keys(value["icm20608"], ("accel_bias", "gyro_bias"))
+            for bias in value["icm20608"].values():
+                _keys(bias, ("x_axis", "y_axis", "z_axis"))
+                for number in bias.values():
+                    _number(number)
+        elif key == "factory_record":
+            _factory_record(value)
+    return data
+
+
+def stock_equivalent(files) -> dict[str, bool]:
+    """Only the three items with pinned stock hashes are comparable."""
+    return {key: hashlib.sha256(files[key]).hexdigest() == digest
+            for key, digest in _STOCK_HASHES.items() if key in files}
 
 
 def canonical_bundle(files: dict[str, bytes]) -> bytes:
