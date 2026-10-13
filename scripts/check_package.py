@@ -19,6 +19,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ("jibo_dfu.py", "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py",
            "jibo_images.py", "jibo_updates.py", "jibo_tui.py", "jibo_gui.py", "jibo_gui_core.py",
+           "LICENSE", "NOTICE.md",
            "assets/boot-network-status/startup-view.js",
            "assets/boot-network-status/startup-view-x11-early.js",
            "assets/boot-network-status/startup-view-dom.js",

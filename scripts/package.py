@@ -126,6 +126,8 @@ def main():
         "jibo_gui.py": ROOT / "jibo_gui.py",
         "jibo_gui_core.py": ROOT / "jibo_gui_core.py",
         "README.md": ROOT / "README.md",
+        "LICENSE": ROOT / "LICENSE",
+        "NOTICE.md": ROOT / "NOTICE.md",
     }
     for name, path in sources.items():
         data[name] = _read_file(parser, name, path)

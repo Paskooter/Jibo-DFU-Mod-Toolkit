@@ -71,7 +71,8 @@ class PackageTests(unittest.TestCase):
         self.run_package()
 
         expected = {
-            "__main__.py", "loader.bin", "entry-patch.sha256", "README.md", "jibo_dfu.py",
+            "__main__.py", "loader.bin", "entry-patch.sha256", "README.md", "LICENSE", "NOTICE.md",
+            "jibo_dfu.py",
             "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py", "jibo_images.py",
             "jibo_updates.py", "jibo_tui.py", "jibo_gui.py", "jibo_gui_core.py",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
@@ -91,6 +92,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(archive.read("tools/dfu_stage2.bin"),
                              b"DFU stage payload" + hashlib.sha256(self.padded_loader).digest())
             self.assertEqual(archive.read("tools/dfu-util"), b"dfu-util executable")
+            self.assertEqual(archive.read("LICENSE"), (package.ROOT / "LICENSE").read_bytes())
+            self.assertEqual(archive.read("NOTICE.md"), (package.ROOT / "NOTICE.md").read_bytes())
             self.assertEqual(archive.read("__main__.py").decode(), package.BOOTSTRAP)
             self.assertEqual(archive.read("entry-patch.sha256").decode().strip(),
                              hashlib.sha256((package.ROOT / "patches/shofel2-dfu-entry.patch")
@@ -233,6 +236,23 @@ class PackageTests(unittest.TestCase):
                     destination.writestr(name, content)
             result = check_package.check_package(damaged)
         self.assertEqual(result, (False, "tools/dfu_stage2.bin does not embed the pinned RAM loader hash"))
+
+    def test_package_check_rejects_missing_or_changed_license(self):
+        self.run_package()
+        loader_hash = hashlib.sha256(self.padded_loader).hexdigest()
+        with patch.object(check_package, "PINNED_LOADER_SIZE", len(self.padded_loader)), \
+                patch.object(check_package, "PINNED_LOADER_SHA256", loader_hash):
+            for name, change in (("LICENSE", b"All rights reserved."), ("NOTICE.md", b"")):
+                damaged = self.root / ("license-" + name + ".pyz")
+                with zipfile.ZipFile(self.output) as source, \
+                        zipfile.ZipFile(damaged, "w") as destination:
+                    for member in source.namelist():
+                        if member == name and not change:
+                            continue
+                        destination.writestr(member, change if member == name else source.read(member))
+                ready, reason = check_package.check_package(damaged)
+                self.assertFalse(ready, name)
+                self.assertIn(name, reason)
 
     def test_pinned_file_loader_hash(self):
         self.assertEqual(package.PINNED_LOADER_SIZE, 432_064)
