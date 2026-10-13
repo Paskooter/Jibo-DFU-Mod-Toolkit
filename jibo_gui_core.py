@@ -111,6 +111,12 @@ def install_prompts(flows, ask):
     def select_option(title, options, prompt="", detail="", cancel_label="Cancel", initial=None):
         items = flows._normalise_options(options)
         kind = "confirm" if tuple(item.key for item in items) == CONFIRM_KEYS else "select"
+        try:
+            from jibo_calibration_flow import CONSENT_TITLE
+        except ImportError:
+            CONSENT_TITLE = None  # An older offline package still supports ordinary prompts.
+        if title == CONSENT_TITLE and tuple(item.key for item in items) == ("share", "local"):
+            kind = "calibration-consent"
         answer = ask(Prompt(kind, title, detail=detail, prompt=prompt, items=items,
                             initial=initial, cancel_label=cancel_label))
         enabled = {item.key for item in items if item.enabled}

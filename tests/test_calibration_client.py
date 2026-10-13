@@ -111,6 +111,71 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(core.robot_key_from_cid(core.VECTOR["cid_serial"]), core.VECTOR["robot_key"])
         self.assertEqual(core.canonical_bundle(core.FILES), core.VECTOR["canonical_bundle_utf8"].encode())
     @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_signed_lookup_and_rejections(self):
+        with Server() as server:
+            public = server.key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+            with patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="http://127.0.0.1:" + str(server.http.server_port)), patch.dict(self.client.PINNED_PUBLIC_KEYS, {"test-key": public}, clear=True):
+                c = self.client.CalibrationClient(self.temp.name, core=core)
+                downloaded = c.lookup(core.VECTOR["robot_key"])
+                self.assertEqual(downloaded.files, core.FILES)
+                for mode in ("signature", "wrong-robot", "expired", "file-hash", "unknown-key", "bundle-hash", "oversize", "redirect", "revision"):
+                    with self.subTest(mode=mode):
+                        server.mode = mode
+                        with self.assertRaises(self.client.ClientError):
+                            c.lookup(core.VECTOR["robot_key"])
+                self.assertEqual(len(server.requests), 10)
+
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_unpinned_and_core_invalid_bytes_are_rejected(self):
+        with Server() as server:
+            public = server.key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+            with patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="http://127.0.0.1:" + str(server.http.server_port)):
+                c = self.client.CalibrationClient(self.temp.name, core=core)
+                with patch.dict(self.client.PINNED_PUBLIC_KEYS, {}, clear=True), self.assertRaises(self.client.ClientError):
+                    c.lookup(core.VECTOR["robot_key"])
+                with patch.dict(self.client.PINNED_PUBLIC_KEYS, {"test-key": public}, clear=True), patch.object(core, "validate_item", side_effect=core.CalibrationError("synthetic unsupported")), self.assertRaises(self.client.ClientError):
+                    c.lookup(core.VECTOR["robot_key"])
+
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_status_failure_is_unknown_receipt_survives(self):
+        with Server() as server:
+            server.http.testcase = self
+            server.mode = "status-failure"
+            with patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="http://127.0.0.1:" + str(server.http.server_port)):
+                c = self.client.CalibrationClient(self.temp.name, core=core)
+                result = c.submit(core.VECTOR["robot_key"], core.FILES)
+                self.assertEqual(result.message, "Submission outcome unknown; your local backup is safe")
+                self.assertTrue(Path(result.receipt).is_file())
+                server.mode = "good"
+                self.assertEqual(c.submit(core.VECTOR["robot_key"], core.FILES).message, "Already stored")
+
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_duplicate_does_not_replace_original_removal_authority(self):
+        with Server() as server:
+            server.http.testcase = self
+            with patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="http://127.0.0.1:" + str(server.http.server_port)):
+                first = self.client.CalibrationClient(self.temp.name, core=core).submit(core.VECTOR["robot_key"], core.FILES)
+                second = self.client.CalibrationClient(Path(self.temp.name) / "second", core=core).submit(core.VECTOR["robot_key"], core.FILES)
+                self.assertTrue(first.removal_authority)
+                self.assertEqual(second.message, "Already stored")
+                self.assertFalse(second.removal_authority)
+                self.assertIn("original removal receipt", second.detail)
+
+    def test_missing_crypto_is_clear_and_local_import_works(self):
+        with patch.dict(sys.modules, {"cryptography.hazmat.primitives.asymmetric.ed25519": None}):
+            with self.assertRaisesRegex(self.client.Unavailable, "unavailable on this install"):
+                self.client.CalibrationClient(self.temp.name, core=core)
+
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_origin_and_identifier_validation_before_requests(self):
+        for origin in ("http://example.com", "http://localhost", "https://user:pass@example.com", "https://example.com/path", "https://example.com?robot=secret"):
+            with self.subTest(origin=origin), patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN=origin), self.assertRaises(self.client.ClientError):
+                self.client.CalibrationClient(self.temp.name, core=core)
+        c = self.client.CalibrationClient(self.temp.name, core=core)
+        with self.assertRaises(self.client.ClientError):
+            c.submit("A" * 64, core.FILES)
+
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
     def test_submit_readback_receipt_and_signed_removal(self):
         with Server() as server:
             server.http.testcase = self

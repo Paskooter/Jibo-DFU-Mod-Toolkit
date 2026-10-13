@@ -100,6 +100,7 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "docs/images/gui")
     parser.add_argument("--phoenix", action="store_true",
                         help="Also capture the quiet entry, local guide and successful setup card")
+    parser.add_argument("--calibration", action="store_true", help="Also capture the owner-approved calibration consent")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -203,6 +204,21 @@ def main():
             capture("progress")
             api.progress_gate.set()
             pump_until(lambda: not controller.busy and window.page_name == "result")
+            if args.calibration:
+                from jibo_calibration_flow import CONSENT_TITLE, CONSENT_BODY, SHARE_CHOICES
+                prompt = core.Prompt("calibration-consent", CONSENT_TITLE, initial="share",
+                                     items=controller.flows._normalise_options(SHARE_CHOICES),
+                                     detail=CONSENT_BODY + "\n\n• left camera lens\n• right camera lens\n• camera-to-camera alignment\n• motion sensor corrections\n• microphone levels")
+                window.show_prompt(prompt)
+                root.update()
+                assert root.focus_get() is window.controls["primary"]
+                assert not prompt.answered
+                for key in ("primary", "cancel"):
+                    button = window.controls[key]
+                    assert button.winfo_height() >= button.winfo_reqheight()
+                capture("calibration-consent")
+                window.controls["cancel"].invoke()
+                assert prompt.wait() == "local"
     finally:
         api.progress_gate.set()
         controller.shutdown()
@@ -212,6 +228,8 @@ def main():
     expected = (["ready.png", "phoenix-entry.png", "phoenix-guidance.png", "mode-wifi.png",
                  "review.png", "phoenix-complete.png", "progress.png"] if args.phoenix else
                 ["ready.png", "mode-wifi.png", "review.png", "progress.png"])
+    if args.calibration:
+        expected.append("calibration-consent.png")
     assert [path.name for path in captured] == expected
     assert not opened, "Screenshot capture must never open a browser"
     for path in captured:

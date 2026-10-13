@@ -583,6 +583,11 @@ def _result_summary(action, result):
         return _screen_lines(result)
     if result.get("operation_directory"):
         lines.append("Operation record: " + str(result["operation_directory"]))
+    if result.get("calibration_sharing") is not None:
+        lines.append("Local backup: verified")
+        lines.append("Calibration sharing: " + result["calibration_sharing"])
+        if result.get("calibration_sharing_detail"):
+            lines.extend(result["calibration_sharing_detail"].splitlines())
     return lines
 
 
@@ -814,6 +819,12 @@ def _confirmation_details(plan, introduction):
         ("baseline_backup", "Rollback backup"),
         ("baseline_sha256", "Backup SHA-256"),
         ("source_manifest", "Backup set"),
+        ("calibration_source", "Calibration source"),
+        ("calibration_files", "Calibration files"),
+        ("calibration_revision", "Calibration revision"),
+        ("calibration_digest", "Calibration digest"),
+        ("identity_source", "Identity source"),
+        ("readback_policy", "Readback policy"),
     )
     for key, label in fields:
         if plan.get(key) is not None:
@@ -889,6 +900,20 @@ def _run_update(api, port=None):
 
 
 def execute_action(api, key, readiness):
+    """One calibration policy/session for the same GUI and TUI action."""
+    try:
+        from jibo_calibration_flow import SharingFlow, operation
+    except ImportError:
+        return _execute_action(api, key, readiness)  # Older packaged offline installs remain usable.
+    with operation(SharingFlow(api, select_option)) as sharing:
+        result = _execute_action(api, key, readiness)
+        if isinstance(result, dict) and sharing.outcome is not None:
+            result = dict(result, calibration_sharing=sharing.outcome,
+                          calibration_sharing_detail=sharing.detail)
+        return result
+
+
+def _execute_action(api, key, readiness):
     """Run an action selected from the main screen using the shared curses prompts."""
     if key == "enter-dfu-shofel":
         if readiness.state != "rcm":
@@ -905,6 +930,17 @@ def execute_action(api, key, readiness):
             return {"status": "cancelled", "message": "DFU entry was cancelled."}
         return api.enter_shofel_dfu(port=readiness.port,
                                     confirm_meerkat_rev02=True)
+    if key in ("calibration-sharing", "calibration-lookup", "calibration-remove"):
+        from jibo_calibration_flow import active
+        sharing = active()
+        identity = api.calibration_identity(port=readiness.port)
+        if key == "calibration-sharing":
+            return sharing.settings(identity)
+        if key == "calibration-remove":
+            return sharing.remove(identity)
+        download = sharing.lookup_for_fresh_setup(identity)
+        return {"status": "complete" if download else "cancelled",
+                "message": "Reviewed calibration verified; no robot write was made. Use fresh setup to apply it with local identity." if download else "No downloaded calibration used."}
     if key == "backup-var":
         return api.backup_var(port=readiness.port)
     if key == "probe-dfu-gpt":
@@ -1042,7 +1078,10 @@ def execute_action(api, key, readiness):
                             ("backup-partitions", "Back up selected partitions"),
                             ("restore-partitions", "Restore selected partitions"),
                             ("write-var", "Write an edited var image"),
-                            ("remove-boot-network-status", "Remove boot-screen Wi-Fi/IP status")))
+                            ("remove-boot-network-status", "Remove boot-screen Wi-Fi/IP status"),
+                            ("calibration-sharing", "Calibration sharing"),
+                            ("calibration-lookup", "Look up this Jibo's calibration"),
+                            ("calibration-remove", "Remove my shared calibration")))
         options.extend((("inspect-backup", "Inspect a local var backup"),
                         ("edit-backup", "Edit a local var backup")))
         selected = select_option("More tools", options,

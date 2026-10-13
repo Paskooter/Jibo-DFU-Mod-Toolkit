@@ -152,7 +152,11 @@ class Download:
 class CalibrationClient:
     def __init__(self, data_dir, core=None, chown=None):
         self.core = core if core is not None else load_core()
+        if self.core.PROFILE != PROFILE:
+            raise Unavailable("Calibration sharing/retrieval unavailable on this install (unsupported calibration core).")
         self.data_dir = Path(data_dir)
+        if self.data_dir.is_symlink() or self.data_dir.parent.is_symlink():
+            raise ClientError("Unsafe calibration data directory.")
         self.chown = chown
         self._crypto = _crypto()
         origin = os.environ.get("JIBO_CALIBRATION_ORIGIN", ORIGIN)
@@ -179,7 +183,8 @@ class CalibrationClient:
         deadline = time.monotonic() + REQUEST_TIMEOUT
         try:
             connection.connect()
-            connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
+            transport_socket = connection.sock
+            transport_socket.settimeout(max(0.001, deadline - time.monotonic()))
             connection.request(method, path, body=encoded, headers={"Accept": "application/json", "Content-Type": "application/json", "Connection": "close"})
             response = connection.getresponse()
             if 300 <= response.status < 400:
@@ -197,7 +202,7 @@ class CalibrationClient:
                 if remaining <= 0:
                     raise ClientError("Calibration request timed out.")
                 # The response owns the socket after a Connection: close header.
-                response.fp.raw._sock.settimeout(remaining)
+                transport_socket.settimeout(remaining)
                 chunk = response.read1(min(4096, MAX_BODY + 1 - size))
                 size += len(chunk)
                 if size > MAX_BODY:

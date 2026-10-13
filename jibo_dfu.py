@@ -1623,6 +1623,29 @@ def _select_factory_calibration_backup(device_tag, preferred, stock_var):
                    "calibration. No partition write was attempted.")
 
 
+def _resolve_factory_fresh_var(device_tag, backup, stock, destination, port, dfu_util):
+    """Prefer the robot's verified local set; remote measurement fallback needs local identity."""
+    try:
+        source = _select_factory_calibration_backup(device_tag, backup, stock)
+    except DfuError:
+        from jibo_calibration_flow import active
+        session = active()
+        if session is None:
+            raise  # Scripted/CLI write approval does not authorize a network lookup.
+        from jibo_calibration_restore import local_identity, build_fresh_var
+        _verify_var_backup_for_robot(backup, device_tag)
+        local_identity(backup["image"])
+        identity = calibration_identity(port, dfu_util)
+        download = session.lookup_for_fresh_setup(identity)
+        if download is None:
+            raise DfuError("No calibration source confirmed. No partition write was attempted.")
+        if calibration_identity(port, dfu_util) != identity:
+            raise DfuError("Connected robot changed; no downloaded calibration was used.")
+        candidate = build_fresh_var(stock, backup["image"], destination, download.files)
+        return backup, candidate, download
+    return source, images.build_factory_fresh_var(stock, source["image"], destination), None
+
+
 def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
     """Associate a stable loader identity only after a full-image hash match."""
     if not _has_unique_device_tag(device_tag):
@@ -1643,6 +1666,15 @@ def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
 
 
 def _prepare_current_and_baseline(dfu_util, port, device_tag, directory):
+    identity = _calibration_capture_identity(port, dfu_util)
+    result = _prepare_current_and_baseline_without_event(dfu_util, port, device_tag, directory)
+    _calibration_backup_event({"status": "existing verified backup reused" if not result["baseline_matches_current"] else "backup complete",
+                               "image": str(result["baseline"]), "sha256": result["baseline_sha256"]},
+                              identity, port, dfu_util)
+    return result
+
+
+def _prepare_current_and_baseline_without_event(dfu_util, port, device_tag, directory):
     current = Path(directory) / "current-var.img"
     current_hash = _upload_var(dfu_util, port, current)
     baseline = (_find_verified_backup(device_tag) if _has_unique_device_tag(device_tag) else
@@ -1711,7 +1743,52 @@ def _raise_live_operation_error(directory, operation, state, error):
     raise DfuError(details) from error
 
 
+def calibration_identity(port=None, dfu_util=None):
+    """Read an exact, unanimous CID from the selected supported loader. Never normalize."""
+    selected_port, _, _, output = _dfu_context(port, dfu_util or tool("dfu-util"), include_output=True)
+    serials = re.findall(r'serial="([^"]*)"', output)
+    if (not serials or len(set(serials)) != 1 or not re.fullmatch(r"[0-9a-f]{32}", serials[0]) or
+            serials[0] == "0" * 32):
+        raise DfuError("Database unavailable: this recovery loader has no supported hardware ID.")
+    return {"cid_serial": serials[0], "usb_port": selected_port}
+
+
+def _calibration_capture_identity(port, dfu_util):
+    try:
+        from jibo_calibration_flow import active
+    except ImportError:
+        return None  # Optional sharing must not break older offline packaged installs.
+    session = active()
+    if session is None or getattr(session, "seen", False):
+        return None
+    try:
+        return calibration_identity(port, dfu_util)
+    except Exception:
+        session.outcome = "Not shared"
+        session.detail = "Backup saved; calibration sharing unavailable (no supported hardware ID)."
+        return None
+
+
+def _calibration_backup_event(backup, identity, port, dfu_util):
+    if identity is None:
+        return
+    try:
+        if calibration_identity(port, dfu_util) != identity:
+            return
+        from jibo_calibration_flow import on_verified_var_backup_ready
+        on_verified_var_backup_ready(backup, identity)
+    except Exception:
+        pass  # A sharing/UI/ID failure cannot invalidate a verified backup.
+
+
 def backup_var(port=None, dfu_util=None, out=None, refresh=False, expected_identity=None):
+    identity = _calibration_capture_identity(port, dfu_util)
+    result = _backup_var_without_event(port, dfu_util, out, refresh, expected_identity)
+    _calibration_backup_event(result, identity, port, dfu_util)
+    return result
+
+
+def _backup_var_without_event(port=None, dfu_util=None, out=None, refresh=False, expected_identity=None):
     dfu_util = dfu_util or tool("dfu-util")
     port, _, device_tag = _dfu_context(port, dfu_util)
     existing = (_find_verified_backup(device_tag)
@@ -2056,11 +2133,9 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             if fresh_with_calibration:
                 record["status"] = "preparing fresh var with calibration"
                 _private_write(record_path, record)
-                source = _select_factory_calibration_backup(
-                    device_tag, record["backups"]["var"], prepared["var"])
-                calibrated = images.build_factory_fresh_var(
-                    prepared["var"], source["image"],
-                    Path(prepared_dir) / "factory-fresh-var.ext4")
+                source, calibrated, remote_calibration = _resolve_factory_fresh_var(
+                    device_tag, record["backups"]["var"], prepared["var"],
+                    Path(prepared_dir) / "factory-fresh-var.ext4", port, dfu_util)
                 prepared["var"] = Path(calibrated["image"])
                 candidate_hashes["var"] = calibrated["sha256"]
                 record["factory_calibration"] = {
@@ -2070,6 +2145,24 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     "identity_restored": True, "mode": "oobe",
                     "camera_matches_stock": calibrated.get("camera_matches_stock"),
                     "candidate_sha256": calibrated["sha256"]}
+                if remote_calibration is not None:
+                    verify_readback = True
+                    record["factory_calibration"]["remote_manifest"] = remote_calibration.manifest
+                    record["readback_policy"] = "mandatory source image prefix readback (database calibration)"
+                    resolved_plan = dict(plan, calibration_source="Community reviewed; not factory-authenticated",
+                                         calibration_files=calibrated["calibration_files"],
+                                         calibration_revision=remote_calibration.manifest["revision"],
+                                         calibration_digest=remote_calibration.manifest["bundle_sha256"],
+                                         identity_source="this robot's verified local rollback backup",
+                                         readback_policy=record["readback_policy"])
+                    if not callable(confirmation) or not confirmation(resolved_plan):
+                        record["status"] = "cancelled"
+                        _private_write(record_path, record)
+                        return {"status": "cancelled", "message": "Resolved calibration write plan was not confirmed. No partition write was attempted."}
+                    identity = calibration_identity(port, dfu_util)
+                    from jibo_calibration_client import load_core
+                    if load_core().robot_key_from_cid(identity["cid_serial"]) != remote_calibration.manifest["robot_key"]:
+                        raise DfuError("Connected robot changed; no partition write was attempted.")
                 _private_write(record_path, record)
                 if calibrated.get("camera_matches_stock"):
                     print("The selected var backup's camera files match this package's defaults; "

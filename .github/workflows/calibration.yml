@@ -1,0 +1,26 @@
+name: Calibration v3 client
+on:
+  push:
+    branches: [feat/calibration-v3-share]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  calibration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install synthetic test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs python3-tk xvfb
+          python -m pip install pytest cryptography==49.0.0
+      - name: Test v3 wire, consent and offline candidate
+        run: python -m pytest -q tests/test_calibration_client.py tests/test_calibration_flow.py tests/test_calibration_backup_hook.py tests/test_calibration_restore.py tests/test_gui_controller.py tests/test_jibo_tui.py
+      - name: Exercise real Tk consent
+        env:
+          JIBO_GUI_TEST_DISPLAY: '1'
+        run: xvfb-run -a python -m pytest -q tests/test_calibration_window.py

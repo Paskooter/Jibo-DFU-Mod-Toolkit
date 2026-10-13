@@ -765,7 +765,8 @@ class ToolkitWindow:
         self.prompt = prompt
         builders = {"select": self._build_select, "confirm": self._build_confirm,
                     "multi": self._build_multi, "text": self._build_text,
-                    "message": self._build_message}
+                    "message": self._build_message,
+                    "calibration-consent": self._build_calibration_consent}
         builders.get(prompt.kind, self._build_message)(page, prompt)
         page.bind("<Escape>", lambda _event: self.answer(None))
         self.root.bind("<Escape>", lambda _event: self.answer(None))
@@ -868,6 +869,25 @@ class ToolkitWindow:
         checkbox.focus_set()
         self.controls = {"boot_enabled": enabled, "checkbox": checkbox, "remove": remove,
                          "primary": go, "cancel": cancel}
+
+    def _build_calibration_consent(self, page, prompt):
+        """Owner-approved Share default; showing this page never authorizes upload."""
+        self._header(page, prompt.title, kicker=self._kicker())
+        buttons = self._button_bar(page)
+        disclosure = TextBox(page, self.theme, height=14)
+        disclosure.pack(fill="both", expand=True, pady=(18, 0))
+        disclosure.set(prompt.detail)
+        labels = {item.key: item.label for item in prompt.items}
+        share = ttk.Button(buttons, text=labels["share"], style="Accent.TButton",
+                           command=lambda: self.answer("share"))
+        share.pack(side="right")
+        local = ttk.Button(buttons, text=labels["local"], command=lambda: self.answer("local"))
+        local.pack(side="right", padx=(0, 10))
+        for widget in (share, local):
+            widget.bind("<Return>", lambda event: event.widget.invoke() or "break")
+            widget.bind("<KP_Enter>", lambda event: event.widget.invoke() or "break")
+        share.focus_set()
+        self.controls = {"primary": share, "cancel": local, "disclosure": disclosure}
 
     def _build_confirm(self, page, prompt):
         writes = prompt.title.lower().startswith("confirm")
