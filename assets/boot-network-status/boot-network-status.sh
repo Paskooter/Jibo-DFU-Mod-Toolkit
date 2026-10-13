@@ -7,23 +7,33 @@ target="$root/usr/local/bin/jibo-ssm/startup/startup-view.js"
 log="$root/var/jibo/phoenix/network-status/boot-network-status.log"
 result=failed
 
-# Shipped BusyBox has no timeout applet. Bound local commands to two seconds.
+# Shipped BusyBox has no timeout applet. Native probes keep a two-second
+# budget; the Node OTA check gets five seconds for cold starts on slower hosts.
+# The watchdog owns the timeout receipt (exit 124). Preserve a completed
+# command's status, and translate only our SIGKILL (137), never a guard's 1.
 # None of these commands forks workers: getmode is Node, hashes/mount are native.
 bounded() {
     "$@" &
     command_pid=$!
     (
-        sleep 2 &
-        sleep_pid=$!
         trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+        sleep "${bounded_seconds:-2}" &
+        sleep_pid=$!
         wait "$sleep_pid"
-        kill -KILL "$command_pid" 2>/dev/null
+        # Once the deadline wins, parent cleanup must not erase its receipt.
+        trap '' TERM
+        kill -KILL "$command_pid" 2>/dev/null && exit 124
+        exit 0
     ) >/dev/null 2>&1 &
     watchdog_pid=$!
     wait "$command_pid" 2>/dev/null
     command_status=$?
     kill "$watchdog_pid" 2>/dev/null
     wait "$watchdog_pid" 2>/dev/null
+    watchdog_status=$?
+    if [ "$command_status" = 137 ] && [ "$watchdog_status" = 124 ]; then
+        return 124
+    fi
     return "$command_status"
 }
 
@@ -65,7 +75,7 @@ apply_status() {
     [ -f "$helper" ] && [ ! -L "$helper" ] || return
     sum=$(bounded "$root/usr/bin/sha256sum" "$helper") || return
     [ "${sum%% *}" = "a5e2bd2af5d33ee0e29af13ba84cb4933661787f2169017881e576ae5214f3e8" ] || return
-    bounded "$root/usr/bin/node" "$helper" check "$root" "$name"
+    bounded_seconds=5 bounded "$root/usr/bin/node" "$helper" check "$root" "$name"
     [ "$?" = 1 ] || { result=skipped-ota; return; }
     bounded "$root/bin/mount" -n -o bind "$asset" "$target" || return
     # Release the exact owned child bind when an OTA becomes pending. All I/O

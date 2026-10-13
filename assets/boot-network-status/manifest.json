@@ -31,7 +31,7 @@
     "startup-view.js": "3f21af2c709030ae07c88638061094b4d6630b4bc77164dda327d29da9877bd6",
     "startup-view-x11-early.js": "3aabd7077dbbae494014aa4f6b2276f50c7ab7ac9a8ae822b10779b03c930c6a",
     "startup-view-dom.js": "60e01ecee4e096de247b3617f81b6c5c4381358ddbb278451176c7c9794df26a",
-    "boot-network-status.sh": "cd48178ae8169358cafc041b1def821dd73b07c11370acd7625ad0ade5b005bd",
+    "boot-network-status.sh": "6485992f54636fea44c747b16ad2cc0d0f788113f97c02f31165f898234ed424",
     "ota-safe-overlay.js": "a5e2bd2af5d33ee0e29af13ba84cb4933661787f2169017881e576ae5214f3e8"
   }
 }

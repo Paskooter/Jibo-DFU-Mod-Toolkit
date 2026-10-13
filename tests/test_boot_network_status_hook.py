@@ -124,6 +124,20 @@ class HookTests(unittest.TestCase):
                       (self.var / "boot-network-status.log").read_text() +
                       f"guard exit={guard.returncode}, stdout={guard.stdout!r}, stderr={guard.stderr!r}")
 
+    def test_slow_completed_ota_guard_preserves_its_safe_exit_status(self):
+        # CI cold starts can cross the old two-second deadline. Exercise the
+        # real Node guard, not a mocked return code; watch remains unchanged.
+        import shlex
+        node = self.root / "usr/bin/node"
+        real_node = node.resolve()
+        node.unlink()
+        self.command(node, 'if [ "$2" = check ]; then sleep 2.2; fi\nexec ' +
+                     shlex.quote(str(real_node)) + ' "$@"\n')
+        (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": None, "items": [{}]}))
+        self.assertEqual(len(self.run_hook()), 1)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: bound\n")
+
     def test_malformed_ota_state_is_fail_closed(self):
         (self.root / "var/jibo/ota.json").write_text("invalid JSON")
         self.assertEqual(self.run_hook(), [])
@@ -181,6 +195,48 @@ class HookTests(unittest.TestCase):
     def test_no_global_log_directory_is_required(self):
         (self.root / "var/log").rmdir()
         self.assertEqual(len(self.run_hook()), 1)
+
+
+@unittest.skipUnless(shutil.which("busybox"), "BusyBox is required for ash checks")
+class BoundedTests(unittest.TestCase):
+    def run_bounded(self, command, prelude=""):
+        # Execute the production function verbatim without running apply_status.
+        source = (ASSETS / "boot-network-status.sh").read_text().split("\napply_status()", 1)[0]
+        shell = shutil.which("busybox")
+        assert shell is not None
+        return subprocess.run([shell, "sh", "-c",
+                               source + "\nunset bounded_seconds\n" + prelude +
+                               "\nbounded " + command + "\nexit $?\n"],
+                              capture_output=True, text=True, timeout=5)
+
+    def test_watchdog_deadline_has_a_distinct_timeout_status(self):
+        result = self.run_bounded("sh -c 'exec sleep 20'")
+        self.assertEqual(result.returncode, 124, result.stderr)
+
+    def test_parent_cleanup_cannot_erase_the_watchdog_timeout_receipt(self):
+        # Hold the watchdog after its real kill so cleanup TERM deterministically
+        # races with receipt publication. This used to leak signal status 137.
+        result = self.run_bounded("sh -c 'exec sleep 20'", """
+kill() {
+    if [ "$1" = -KILL ]; then
+        command kill "$@"
+        status=$?
+        sleep 0.1
+        return "$status"
+    fi
+    command kill "$@"
+}
+""")
+        self.assertEqual(result.returncode, 124, result.stderr)
+
+    def test_completed_status_is_preserved_without_waiting_for_deadline(self):
+        import time
+        for status in (0, 1, 7, 124, 137):
+            with self.subTest(status=status):
+                started = time.monotonic()
+                result = self.run_bounded("sh -c 'exit " + str(status) + "'")
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertLess(time.monotonic() - started, 1)
 
 
 if __name__ == "__main__":
