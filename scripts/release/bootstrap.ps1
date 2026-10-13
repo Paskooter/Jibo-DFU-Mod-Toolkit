@@ -50,20 +50,6 @@ function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]
     $line = Get-WslRootArgumentLine -Name $Name -Command @('bash', $Helper, $Uid, $Gid, $Session)
     return (Start-Process -FilePath $wsl -ArgumentList $line -NoNewWindow -PassThru)
 }
-function Install-UbuntuDistribution {
-    # Distributions are registered per Windows user: install as this user, not through
-    # an administrator prompt that may belong to another account and its WSL session.
-    # The console is shared, not captured, so Ubuntu's account prompts stay visible.
-    Write-Host 'Installing Ubuntu 22.04. Create a Linux username and password when Ubuntu asks. If it then shows a Linux prompt, type exit to continue here.'
-    $p = Start-Process -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList '--install --distribution Ubuntu-22.04' -NoNewWindow -PassThru
-    $null = $p.Handle
-    $p.WaitForExit()
-    if ($p.ExitCode -ne 0) { throw "Ubuntu 22.04 setup exited with code $($p.ExitCode). Restart this app after any requested reboot." }
-    $uid = ''
-    try { $uid = Native -Arguments @('--distribution', 'Ubuntu-22.04', '--exec', 'id', '-u') } catch { $uid = '' }
-    if ($uid -notmatch '^[1-9][0-9]*$') { throw 'Finish the Ubuntu username/password setup, then reopen this app and choose Ubuntu-22.04.' }
-    return 'Ubuntu-22.04'
-}
 function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session) {
     # Never enter AppRun's Linux sudo/polkit branch from the Windows EXE.
     $old = $ErrorActionPreference
@@ -81,6 +67,51 @@ function Test-CompatibleDistribution([string]$Name) {
         return ([version]$Matches[1] -ge [version]'2.35')
     } catch { return $false }
 }
+function Get-DistributionRuntime([string]$Name, [switch]$RequireUbuntu) {
+    # No shell interpolation: read distro metadata as data, not executable code.
+    if (-not (Test-WslDistributionName $Name)) { return $null }
+    try {
+        if (-not (Test-CompatibleDistribution $Name)) { return $null }
+        if ((Native -Arguments @('--distribution', $Name, '--exec', 'uname', '-m')) -ne 'x86_64') { return $null }
+        $uid = Native -Arguments @('--distribution', $Name, '--exec', 'id', '-u')
+        if ($uid -notmatch '^[1-9][0-9]*$') { return $null }
+        Native -Arguments @('--distribution', $Name, '--exec', 'test', '-d', '/mnt/wslg') | Out-Null
+        $release = Native -Arguments @('--distribution', $Name, '--exec', 'cat', '/etc/os-release')
+        $os = ''; $version = [version]'0.0'
+        foreach ($line in ($release -split "`n")) {
+            if ($line -match '^ID=["'']?([a-z0-9_-]+)["'']?$') { $os = $Matches[1] }
+            if ($line -match '^VERSION_ID=["'']?([0-9]+\.[0-9]+)["'']?$') { $version = [version]$Matches[1] }
+        }
+        if ($RequireUbuntu -and ($os -cne 'ubuntu' -or $version -lt [version]'22.04')) { return $null }
+        return [pscustomobject]@{ Name=$Name; OsVersion=$version }
+    } catch { return $null }
+}
+function Select-ToolkitDistribution($Rows, [string]$Requested) {
+    if ($Requested) {
+        $row = @($Rows | Where-Object { $_.Name -ceq $Requested -and $_.Version -eq 2 })
+        if ($row.Count -ne 1) { throw 'Requested distribution is not installed as WSL 2.' }
+        if (-not (Get-DistributionRuntime $Requested)) { throw 'Requested distribution is incompatible: x86_64, glibc 2.35+, WSLg and a non-root default user are required.' }
+        return $Requested
+    }
+    # Never even probe a distro belonging to another product. Names are deliberately
+    # narrower than WSL's legal-name rule; only an explicit -Distro overrides this.
+    $candidates = @()
+    foreach ($row in $Rows) {
+        if ($row.Version -ne 2 -or ($row.Name -cne 'Jibo-DFU-Toolkit' -and $row.Name -cnotmatch '^Ubuntu(-[0-9]{2}\.[0-9]{2})?$')) { continue }
+        $runtime = Get-DistributionRuntime $row.Name -RequireUbuntu
+        if ($runtime) {
+            if ($row.Name -ceq 'Jibo-DFU-Toolkit') { return $row.Name }
+            $candidates += [pscustomobject]@{ Name=$row.Name; OsVersion=$runtime.OsVersion; Default=$row.Default }
+        }
+    }
+    $ordered = @($candidates | Sort-Object @{Expression='Default'; Descending=$true}, @{Expression='OsVersion'; Descending=$true}, Name)
+    if ($ordered.Count) { return $ordered[0].Name }
+    if (@($Rows | Where-Object { $_.Name -ceq 'Jibo-DFU-Toolkit' }).Count) {
+        throw 'The private Linux is not ready. To remove it and its Linux files, run: wsl --unregister Jibo-DFU-Toolkit. Then reopen the toolkit to set it up again.'
+    }
+    if (-not (Confirm-Setup 'Set up a private Linux for the toolkit? One-time download of about 345 MB. No Linux account or password needed.')) { throw 'Distribution setup declined. No download or import was attempted.' }
+    throw 'Private Linux setup is not available in this build.'
+}
 try {
     $archive = Join-Path $PayloadRoot 'payload.tar.gz'
     $usbScript = Join-Path $PayloadRoot 'run.ps1'
@@ -97,57 +128,14 @@ try {
     }
     $rows = @()
     try { $listing = Native -Arguments @('--list', '--verbose') }
-    catch { $listing = ''; Write-Host 'No usable installed WSL distribution was listed; setup can install Ubuntu 22.04.' }
+    catch { $listing = '' }
     foreach ($line in ($listing -split "`n")) {
         if ($line -match '^\s*(?<default>\*)?\s*(?<name>.+?)\s+\S+\s+(?<version>[12])\s*$') {
             $rows += [pscustomobject]@{Name=$Matches['name'].Trim(); Version=[int]$Matches['version']; Default=($Matches['default'] -eq '*')}
         }
     }
-    $available = @($rows | Where-Object { $_.Version -eq 2 })
-    if ($available.Count -eq 0) {
-        if (-not (Confirm-Setup 'Install Ubuntu 22.04 for WSL 2? Create a Linux username/password when asked.')) { throw 'Distribution setup declined.' }
-        $Distro = Install-UbuntuDistribution
-        $available = @([pscustomobject]@{Name=$Distro; Version=2; Default=$false})
-    }
-    if ($Distro) {
-        $selected = @($available | Where-Object { $_.Name -eq $Distro })
-        if ($selected.Count -ne 1) { throw 'Requested distribution is not installed as WSL 2.' }
-        $Distro = $selected[0].Name
-    } else {
-        $selected = @($available | Where-Object { $_.Default })
-        if ($selected.Count -eq 1) { $Distro = $selected[0].Name }
-        elseif ($available.Count -eq 1) { $Distro = $available[0].Name }
-        else {
-            for ($i=0; $i -lt $available.Count; $i++) { Write-Host "$($i+1). $($available[$i].Name)" }
-            $choice = Read-Host 'Choose the WSL 2 distribution number'
-            $number = 0
-            if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $available.Count) { throw 'Invalid distribution choice.' }
-            $Distro = $available[$number-1].Name
-        }
-    }
-    if (-not (Test-CompatibleDistribution $Distro)) {
-        Write-Host "The prebuilt payload needs glibc 2.35+ (Ubuntu 22.04+); '$Distro' is incompatible." -ForegroundColor Yellow
-        $compatible = @($available | Where-Object { Test-CompatibleDistribution $_.Name })
-        # Offer a fresh Ubuntu next to existing distros: a compatible distro may belong to another tool.
-        $canInstall = (@($rows | Where-Object { $_.Name -eq 'Ubuntu-22.04' }).Count -eq 0)
-        if ($compatible.Count -gt 0) {
-            for ($i=0; $i -lt $compatible.Count; $i++) { Write-Host "$($i+1). $($compatible[$i].Name)" }
-            if ($canInstall) { Write-Host "$($compatible.Count+1). Install Ubuntu 22.04 (recommended: a separate Linux for this toolkit)" }
-            $choice = Read-Host 'Choose a number, or press Enter to cancel'
-            $number = 0
-            $limit = $compatible.Count + [int]$canInstall
-            if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $limit) { throw 'Distribution selection cancelled.' }
-            if ($number -gt $compatible.Count) { $Distro = Install-UbuntuDistribution }
-            else { $Distro = $compatible[$number-1].Name }
-        } else {
-            if (-not (Confirm-Setup 'Install compatible Ubuntu 22.04? No compiler or toolkit build will be needed.')) { throw 'Compatible distribution setup declined.' }
-            $Distro = Install-UbuntuDistribution
-        }
-    }
-    if (-not (Test-WslDistributionName $Distro)) { throw 'Invalid distribution name.' }
-    Native -Arguments @('--distribution', $Distro, '--exec', 'test', '-d', '/mnt/wslg') | Out-Null
-    $arch = Native -Arguments @('--distribution', $Distro, '--exec', 'uname', '-m')
-    if ($arch -ne 'x86_64') { throw 'This Windows x64 download needs an x86_64 WSL distribution.' }
+    $Distro = Select-ToolkitDistribution -Rows $rows -Requested $Distro
+    Write-Host "Using Linux: $Distro."
     $usb = Get-Command usbipd.exe -ErrorAction SilentlyContinue
     if (-not $usb) { $usb = Get-Command usbipd -ErrorAction SilentlyContinue }
     if (-not $usb) {
