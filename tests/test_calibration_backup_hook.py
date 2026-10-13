@@ -18,7 +18,7 @@ class HookTests(unittest.TestCase):
     def test_verified_reuse_emits_once_and_failed_backup_emits_nothing(self):
         session = Session()
         existing = {"image": "synthetic.img", "sha256": "a" * 64, "manifest": "synthetic.json", "created_utc": "synthetic"}
-        with patch.object(dfu, "tool", return_value="dfu-util"), patch.object(dfu, "_dfu_context", return_value=("1-1", (dfu.MARKER, "var"), "serial-sha256:" + "a" * 64)), patch.object(dfu, "calibration_identity", return_value={"cid_serial": CID, "usb_port": "1-1"}), patch.object(dfu, "_find_verified_backup", return_value=existing), patch.object(dfu, "_verify_var_backup_for_robot") as verify, operation(session):
+        with patch.object(dfu, "tool", return_value="dfu-util"), patch.object(dfu, "_dfu_context", return_value=("1-1", (dfu.MARKER, "var"), "serial-sha256:" + "a" * 64)), patch.object(dfu, "calibration_identity", return_value={"cid_serial": CID, "usb_port": "1-1"}, create=True), patch.object(dfu, "_find_verified_backup", return_value=existing), patch.object(dfu, "_verify_var_backup_for_robot") as verify, operation(session):
             result = dfu.backup_var(port="1-1")
             self.assertEqual(result["status"], "existing verified backup reused")
             self.assertEqual(len(session.events), 1)
