@@ -5,9 +5,9 @@
 `.github/workflows/release.yml` builds four unsigned files:
 
 - `Jibo-DFU-Windows-x64.exe`: one-file console bootstrapper with the complete
-  prebuilt Linux payload. Windows x64 only; the GUI remains in WSLg. Existing
-  WSL distributions need glibc 2.35+ (Ubuntu 22.04+); older/musl distributions are
-  diagnosed before extraction and the launcher offers a compatible distro.
+  prebuilt Linux payload. Windows x64 only; the GUI remains in WSLg. Automatic selection uses only a healthy
+  `Jibo-DFU-Toolkit` or standard Ubuntu 22.04+ WSL 2 distribution; otherwise the
+  launcher asks to create its own private Linux, without account/password prompts.
 - `Jibo-DFU-Linux-x86_64.AppImage`: native Linux x86_64; glibc 2.35 or newer
   (Ubuntu 22.04+), an X11/XWayland desktop and `pkexec` or `sudo`.
 - `Jibo-DFU-macOS-arm64.dmg`: native Apple silicon app.
@@ -38,12 +38,15 @@ The Windows EXE does **not** run source `run.sh`. Its former route was
 `bootstrap.ps1 -> AppRun -> sudo jibo-dfu`, which asked for the WSL account's
 Linux password and ran the GUI as root. The EXE now uses this separate path:
 
-1. Select a WSL 2 distribution with a **non-root default user**. If the default
-   distribution is too old (glibc below 2.35), the launcher lists compatible ones
-   and offers to install a separate Ubuntu 22.04 for the toolkit. The install
-   runs as the current Windows user (WSL distributions are per user) and the
-   launcher continues once the Ubuntu account exists. Extract/check the prebuilt
-   payload and copy the two EXE-only shell helpers as that user.
+1. Reuse a healthy **Jibo-DFU-Toolkit** first. Otherwise, use a standard Ubuntu
+   distro registered as `Ubuntu` or `Ubuntu-YY.MM`, with `/etc/os-release`
+   `ID=ubuntu`, version 22.04+, WSL 2, x86_64, glibc 2.35+, WSLg and a non-root
+   default user. Prefer the matching Windows WSL default, then the highest actual
+   Ubuntu version. Print the selected name; there is no distro picker. Tool and
+   custom distributions are never probed, offered or selected automatically.
+   Only an explicit `Jibo-DFU-Windows-x64.exe -Distro NAME` can override the name
+   restriction; WSL 2, architecture, glibc, WSLg and non-root checks still apply.
+   Extract/check the frozen payload and copy the EXE-only USB helpers as that user.
 2. Reuse `run.ps1 -UsbOnly` for Windows usbipd binding/attachment. Binding keeps its
    existing UAC consent. A failed/refused handoff stops before opening the GUI.
 3. Grant Jibo USB access with `wsl.exe --distribution <distro> --user root --exec
@@ -68,13 +71,46 @@ Linux password and ran the GUI as root. The EXE now uses this separate path:
 The only Windows approval prompt in a normal launch is usbipd's existing bind
 approval, the first time a robot's USB port is shared. No administrator prompt
 authorizes a robot write; the existing per-write reviews remain mandatory.
-There are no apt/Tk/compiler installs in the EXE path because they are bundled.
-Installing WSL/WSLg or usbipd, when missing, retains the existing explicit setup
-approval/UAC. Ubuntu's first-run **creation** of a Linux account and password is
-still the distro's provisioning UI; the toolkit never requests that password to
-authenticate a launch or USB operation. The source `run.ps1`/`run-gui.cmd`
-launchers still use `run.sh` and its existing Linux sudo behavior; this change
-targets the EXE.
+When no matching Ubuntu exists, setup asks:
+
+> Set up a private Linux for the toolkit? One-time download of about 345 MB.
+> No Linux account or password needed. [y/N]
+
+Declining performs no download or import. Approval downloads the official
+[Ubuntu 22.04.5 x64 WSL image](https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl),
+checks both **360,684,292 bytes** and SHA-256
+`4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f`, then imports
+`Jibo-DFU-Toolkit` under `%LOCALAPPDATA%\Jibo-DFU-Toolkit\wsl` as the current
+Windows user, with WSL version 2. The pin comes from
+[Microsoft's distribution manifest](https://raw.githubusercontent.com/microsoft/WSL/master/distributions/DistributionInfo.json).
+A mismatch registers nothing. The downloaded image is deleted after setup.
+
+The import is deliberately `wsl --import`, not `wsl --install --from-file`:
+[Microsoft documents tar imports and default-user configuration](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro),
+and [WSL's ImportDistribution implementation](https://github.com/microsoft/WSL/blob/master/src/windows/common/WslClient.cpp)
+sets `LXSS_IMPORT_DISTRO_FLAGS_NO_OOBE`. The image's `/etc/wsl-distribution.conf`
+contains an interactive `/usr/lib/wsl/wsl-setup` command; private provisioning
+removes it as an additional safeguard. Provisioning creates `jibo` (UID/GID 1000),
+locks its password, grants no sudo access, disables unnecessary systemd startup,
+and sets `[user] default=jibo` in `/etc/wsl.conf`. Terminate/restart checks that
+`id -un` returns `jibo`. A failed new provision is unregistered; existing distros
+and existing private storage are never overwritten or removed automatically.
+
+The pinned image already contains every system dependency the frozen payload
+needs: **zero additional apt packages**, no Python/Tk/compiler installation and
+no Linux account/password wizard. Once Windows prerequisites and Linux are set
+up, first-window startup and self-check work offline. Firmware downloads still
+require internet. Installing WSL/WSLg or usbipd, when missing, retains explicit
+approval/UAC; importing/provisioning private Linux itself needs neither UAC nor a
+Linux password. Source `run.ps1`/`run-gui.cmd` still use `run.sh` and its existing
+Linux sudo behavior; these instructions concern the EXE.
+
+Every EXE invocation starts with `Jibo DFU Toolkit (build <revision>)`, so the
+first line identifies the download being tested.
+
+To remove the private Linux, run `wsl --unregister Jibo-DFU-Toolkit` in PowerShell.
+**This deletes its entire Linux filesystem**, including backups saved inside it.
+Copy anything you need to Windows first. Other distributions are not removed.
 
 Native Linux/macOS source launchers, release AppRun and frozen native adapter are
 byte-identical to release-builds base `03a25aa`. Windows helpers are embedded only
@@ -132,8 +168,8 @@ PowerShell parse/helper tests without installing WSL or prompting for UAC.
 
 Before publishing, test these **on real hosts**:
 
-- Windows fresh setup: approved/declined WSL installation, reboot/resume, Ubuntu
-  account initialization, usbipd installer and UAC cancellation; existing distro
+- Windows fresh setup: approved/declined WSL installation, reboot/resume, private Linux
+  import/default-user verification, usbipd installer and UAC cancellation; existing distro
   selection; WSLg window; APX → DFU and unplug/replug reattachment.
 - Linux desktop: polkit prompt/cancellation, terminal sudo fallback, FUSE and
   `--appimage-extract-and-run`, offline first launch as a non-root user.
