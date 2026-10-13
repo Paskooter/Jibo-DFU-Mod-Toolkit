@@ -199,6 +199,10 @@ try {
     $child = Join-Path $fixture 'flow.ps1'
     $childText = @'
 param($Bootstrap, $Payload, $Case)
+# Windows PowerShell 5.1 exports Get-FileHash as a FUNCTION. Load Utility
+# before defining mocks: its lazy import (first ConvertTo-Json trace) would
+# otherwise replace the mock with the real hash function. PS7 uses a cmdlet.
+Import-Module Microsoft.PowerShell.Utility
 $global:UacCase = $Case
 $global:UacTrace = Join-Path $Payload ($Case + '.jsonl')
 $env:LOCALAPPDATA = Join-Path $Payload $Case
@@ -309,12 +313,13 @@ exit $LASTEXITCODE
             if ($case -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) {
                 if ($prompts.Count -ne 1 -or $downloads.Count -ne 1) { throw 'creation did not ask/download once' }
                 if ($downloads[0].Values[0] -cne 'https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl') { throw 'image URL not pinned' }
+                if ($case -ne 'size-mismatch' -and @($events | Where-Object { $_.Kind -eq 'hash' }).Count -ne 1) { throw 'hash mock was not used; real boundary escaped' }
                 if (Test-Path $downloads[0].Values[1]) { throw 'download survived setup' }
                 if ($case -in @('hash-mismatch','size-mismatch')) {
                     if ($imports.Count -or $text -notmatch 'checksum|size') { throw 'bad image was registered or not diagnosed' }
                 } else {
                     if ($imports.Count -ne 1 -or $imports[0].Values[1] -cne 'Jibo-DFU-Toolkit' -or ($imports[0].Values[-2..-1] -join '|') -ne '--version|2') { throw 'wrong import name/version' }
-                    if ($imports[0].Values[2] -cne (Join-Path (Join-Path $fixture $case) 'Jibo-DFU-Toolkit/wsl')) { throw 'wrong per-user install location' }
+                    if ($imports[0].Values[2] -cne (Join-Path (Join-Path (Join-Path $fixture $case) 'Jibo-DFU-Toolkit') 'wsl')) { throw 'wrong per-user install location' }
                     if ($case -eq 'create-success') {
                         $provision = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'bash' -and ($_.Values -join ' ') -match '/wsl-provision.sh' })
                         if ($provision.Count -ne 1 -or $provision[0].Values[3] -ne 'root') { throw 'provisioning not root/noninteractive' }
