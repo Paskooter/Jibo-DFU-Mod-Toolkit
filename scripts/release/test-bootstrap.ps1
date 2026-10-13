@@ -54,7 +54,9 @@ function wsl.exe {
 }
 function Read-Host { param($Prompt); return 'n' }
 function Start-Process { [IO.File]::WriteAllText($global:BootstrapTestSentinel, 'failed'); throw 'Unexpected admin action' }
-& $Bootstrap -PayloadRoot $Payload
+$parameters = @{PayloadRoot=$Payload}
+if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-missing') { 'NotInstalled' } else { 'NVIDIA-Workbench' } }
+& $Bootstrap @parameters
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
@@ -205,45 +207,125 @@ function wsl.exe {
     Record 'wsl' $args
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '--version') { return 'WSLg 1.0' }
-    if ($args[0] -eq '--list') { return "  NAME                STATE     VERSION`n* NVIDIA-Workbench    Stopped   2" }
-    if ($args -contains 'getconf') { return 'glibc 2.35' }
-    if ($args -contains 'uname') { return 'x86_64' }
-    if ($args -contains 'id') {
-        if ($args[-1] -eq '-u') { return '1000' }
-        if ($args[-1] -eq '-g') { return '1001' }
-        return 'fixture'
+    if ($args[0] -eq '--list') {
+        $header = 'NAME STATE VERSION'
+        switch ($global:UacCase) {
+            'no-distro-decline' { return $header }
+            'tool-set-decline' { return "$header`n* docker-desktop Stopped 2`n NVIDIA-Workbench Stopped 2`n rancher-desktop Stopped 2`n podman-machine-default Stopped 2" }
+            'old-ubuntu-decline' { return "$header`n* Ubuntu-20.04 Stopped 2" }
+            'nonstandard-decline' { return "$header`n* My-Ubuntu Stopped 2`n Debian Stopped 2`n Kali Stopped 2" }
+            'ubuntu24' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-24.04 Stopped 2" }
+            'private' { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
+            'private-priority' { return "$header`n* Ubuntu-24.04 Stopped 2`n Jibo-DFU-Toolkit Stopped 2" }
+            'default-preferred' { return "$header`n* Ubuntu-22.04 Stopped 2`n Ubuntu-24.04 Stopped 2" }
+            'newest' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-22.04 Stopped 2`n Ubuntu-24.04 Stopped 2" }
+            'wsl1-decline' { return "$header`n* Ubuntu-22.04 Stopped 1" }
+            'unhealthy-private' { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
+            { $_ -in @('wrong-os-decline','old-version-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','grant-failed','usb-declined','watcher-failed','success') } { return "$header`n* Ubuntu-22.04 Stopped 2" }
+            default { return "$header`n* NVIDIA-Workbench Stopped 2" }
+        }
     }
-    if ($args -contains 'cat') { return "ID=ubuntu`nVERSION_ID=`"22.04`"" }
+    if ($args[0] -eq '--import' -and $global:UacCase -eq 'import-failed') { $global:LASTEXITCODE = 1; return 'Synthetic import failure' }
+    if ($args -contains 'wsl-provision.sh' -or ($args -join ' ') -match '/wsl-provision.sh') {
+        if ($global:UacCase -eq 'provision-failed') { $global:LASTEXITCODE = 1; return 'Synthetic provisioning failure' }
+    }
+    if ($args -contains 'getconf') { if ($args -contains 'Ubuntu-20.04' -or $global:UacCase -eq 'explicit-incompatible') { return 'glibc 2.31' }; if ($global:UacCase -eq 'musl-decline') { return 'musl' }; return 'glibc 2.35' }
+    if ($args -contains 'uname') { if ($global:UacCase -eq 'arm64-decline') { return 'aarch64' }; return 'x86_64' }
+    if ($args -contains 'id') {
+        if ($args[-1] -eq '-u') { if ($global:UacCase -in @('root-user','unhealthy-private')) { return '0' }; return '1000' }
+        if ($args[-1] -eq '-g') { return '1001' }
+        if ($args -contains 'Jibo-DFU-Toolkit') { if ($global:UacCase -eq 'user-verify-failed') { return 'root' }; return 'jibo' }; return 'fixture'
+    }
+    if ($args -contains 'test' -and $global:UacCase -eq 'no-wslg-decline') { $global:LASTEXITCODE=1; return 'Missing WSLg' }
+    if ($args -contains 'cat') {
+        if ($global:UacCase -eq 'wrong-os-decline') { return "ID=debian`nVERSION_ID=24.04" }
+        if ($global:UacCase -eq 'old-version-decline') { return "ID=ubuntu`nVERSION_ID=20.04" }
+        if ($args -contains 'Ubuntu-24.04') { return "ID=ubuntu`nVERSION_ID=24.04" }
+        return "ID=ubuntu`nVERSION_ID=`"22.04`""
+    }
     if ($args -contains 'printenv') { return '/home/fixture/path with spaces' }
     if ($args -contains 'wslpath') { return ('/mnt/c/fixture/' + (Split-Path $args[-1] -Leaf)) }
+    if ($args -contains 'once' -and $global:UacCase -eq 'grant-failed') { $global:LASTEXITCODE=1; return 'Synthetic grant failure' }
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
-function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = 0 }
+function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 } }
 function Get-Command { param($Name, $ErrorAction); return [pscustomobject]@{Source='fixture-usbipd'} }
-function Read-Host { param($Prompt); Record 'prompt' @($Prompt); return 'n' }
+function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
 function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
+function Get-Item { param($LiteralPath); return [pscustomobject]@{Length=$(if ($global:UacCase -eq 'size-mismatch') { 12 } else { 360684292 })} }
+function Get-FileHash { param($LiteralPath, $Algorithm); Record 'hash' @($Algorithm); return [pscustomobject]@{Hash=$(if ($global:UacCase -eq 'hash-mismatch') { '0' * 64 } else { '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f' })} }
 function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
-    $process = [pscustomobject]@{Id=4242; HasExited=$false; ExitCode=0; Handle=1}
+    $process = [pscustomobject]@{Id=4242; HasExited=($global:UacCase -eq 'watcher-failed' -and $FilePath -match 'wsl.exe$'); ExitCode=0; Handle=1}
     $process | Add-Member ScriptMethod WaitForExit { param($Timeout); if ($Timeout) { return $this.HasExited }; $this.HasExited=$true }
     return $process
 }
 function Stop-Process { param($Id); Record 'stop' @($Id) }
-& $Bootstrap -PayloadRoot $Payload
+$parameters = @{PayloadRoot=$Payload}
+if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-missing') { 'NotInstalled' } else { 'NVIDIA-Workbench' } }
+& $Bootstrap @parameters
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('nvidia-decline')) {
+    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed')) {
         try {
             $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
             $code = $LASTEXITCODE
             $text = $messages -join "`n"
             $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
             $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
-            if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
-            if ($text -match 'NVIDIA-Workbench' -or @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'NVIDIA-Workbench' }).Count) { throw 'tool distro was listed or probed/used' }
-            if (@($events | Where-Object { $_.Kind -in @('download','start') -or $_.Values -contains '--import' }).Count) { throw 'decline caused setup side effects' }
+            $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' })
+            $downloads = @($events | Where-Object { $_.Kind -eq 'download' })
+            $imports = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--import' })
+            $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
+            if ($admin.Count) { throw 'distro setup requested UAC' }
+            if ($case -notlike 'explicit-*') {
+                if ($text -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali') { throw 'tool/custom distro was listed' }
+                if (@($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali' }).Count) { throw 'tool/custom distro was probed/used' }
+            }
+            $declines = @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline')
+            $chosen = switch ($case) {
+                'ubuntu24' { 'Ubuntu-24.04' }; 'private' { 'Jibo-DFU-Toolkit' }; 'private-priority' { 'Jibo-DFU-Toolkit' }
+                'default-preferred' { 'Ubuntu-22.04' }; 'newest' { 'Ubuntu-24.04' }; 'explicit-good' { 'NVIDIA-Workbench' }
+                'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }
+            }
+            if ($case -in $declines) {
+                if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
+                if ($downloads.Count -or $imports.Count -or $gui.Count -or @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'decline caused setup side effects' }
+            } elseif ($chosen) {
+                if ($code -ne 41 -or $gui.Count -ne 1 -or $gui[0].Values[1] -cne $chosen -or $text -notmatch ('Using Linux: ' + [regex]::Escape($chosen))) { throw ('wrong GUI choice/exit: ' + $text) }
+                $user = if ($chosen -eq 'Jibo-DFU-Toolkit') { 'jibo' } else { 'fixture' }
+                if (($gui[0].Values -join '|') -notmatch ('\|--user\|' + $user + '\|') -or ($gui[0].Values -join ' ') -match '/AppRun') { throw 'GUI was not direct normal-user launch' }
+                if ($case -ne 'create-success' -and ($prompts.Count -or $downloads.Count -or $imports.Count)) { throw 'existing matching distro prompted or installed' }
+                $grant = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'once' })
+                if ($grant.Count -ne 1 -or $grant[0].Values[3] -ne 'root') { throw 'password-free root USB grant did not run once' }
+                $watch = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user root' })
+                if ($watch.Count -ne 1 -or [string]$watch[0].Values[1] -notmatch ('^--distribution ' + [regex]::Escape($chosen) + ' --user root --exec "bash"')) { throw 'watcher argv unsafe' }
+                if (-not @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'rm' }).Count) { throw 'USB marker was not cleaned' }
+            } else {
+                if ($code -ne 1 -or $gui.Count) { throw ('failed to refuse: ' + $text) }
+            }
+            if ($case -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) {
+                if ($prompts.Count -ne 1 -or $downloads.Count -ne 1) { throw 'creation did not ask/download once' }
+                if ($downloads[0].Values[0] -cne 'https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl') { throw 'image URL not pinned' }
+                if (Test-Path $downloads[0].Values[1]) { throw 'download survived setup' }
+                if ($case -in @('hash-mismatch','size-mismatch')) {
+                    if ($imports.Count -or $text -notmatch 'checksum|size') { throw 'bad image was registered or not diagnosed' }
+                } else {
+                    if ($imports.Count -ne 1 -or $imports[0].Values[1] -cne 'Jibo-DFU-Toolkit' -or ($imports[0].Values[-2..-1] -join '|') -ne '--version|2') { throw 'wrong import name/version' }
+                    if ($imports[0].Values[2] -cne (Join-Path (Join-Path $fixture $case) 'Jibo-DFU-Toolkit/wsl')) { throw 'wrong per-user install location' }
+                    if ($case -eq 'create-success') {
+                        $provision = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'bash' -and ($_.Values -join ' ') -match '/wsl-provision.sh' })
+                        if ($provision.Count -ne 1 -or $provision[0].Values[3] -ne 'root') { throw 'provisioning not root/noninteractive' }
+                        if (-not @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values[0] -eq '--terminate' }).Count) { throw 'default user not applied by termination' }
+                    } elseif ($case -ne 'import-failed') {
+                        if (@($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values[0] -eq '--unregister' }).Count -ne 1) { throw 'failed new import not rolled back' }
+                    }
+                }
+            }
+            if ($case -eq 'unhealthy-private' -and ($downloads.Count -or $imports.Count -or $prompts.Count)) { throw 'existing unhealthy private distro was changed' }
+            if ($case -eq 'grant-failed' -and @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'watcher started after grant failure' }
             $passed++; Write-Output "PASS scenario: $case"
         } catch { $failedCases += $case; Write-Output "FAIL scenario: $case - $($_.Exception.Message)" }
     }
