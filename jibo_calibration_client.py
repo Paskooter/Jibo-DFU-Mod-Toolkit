@@ -116,10 +116,21 @@ def _integer(value, minimum, maximum):
 
 def _private_write(path, value, chown=None):
     path = Path(path)
+    created = []
+    parent = path.parent
+    while not parent.exists():
+        if parent.is_symlink():
+            raise ClientError("Unsafe calibration data path.")
+        created.append(parent)
+        parent = parent.parent
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.is_symlink() or path.is_symlink():
         raise ClientError("Unsafe calibration data path.")
     path.parent.chmod(0o700)
+    for directory in created:
+        directory.chmod(0o700)
+        if chown:
+            chown(directory)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", dir=path.parent, delete=False) as stream:

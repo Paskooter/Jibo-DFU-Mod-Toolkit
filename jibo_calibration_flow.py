@@ -95,7 +95,8 @@ class SharingFlow:
             if preference.get("choice") == "local":
                 self.outcome = "Not shared"
                 return self.outcome
-            result = client.core.extract(backup["image"])
+            partition_images = getattr(self.api, "calibration_partition_images", lambda _identity: {})(connected_identity)
+            result = client.core.extract(backup["image"], **partition_images)
             files = result.files
             if not {"left", "right", "inter_camera"}.issubset(files):
                 self.detail = "Backup saved; calibration sharing unavailable (required camera measurements not found)."

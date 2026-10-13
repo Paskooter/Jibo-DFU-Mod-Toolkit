@@ -1753,6 +1753,38 @@ def calibration_identity(port=None, dfu_util=None):
     return {"cid_serial": serials[0], "usb_port": selected_port}
 
 
+def calibration_partition_images(identity):
+    """Only hash/size-verified partition backups already bound to this exact CID."""
+    cid = identity.get("cid_serial")
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9a-f]{32}", cid) or cid == "0" * 32:
+        return {}
+    tag = "serial-sha256:" + hashlib.sha256(cid.encode("ascii")).hexdigest()
+    selected = {}
+    if not BACKUP_ROOT.is_dir() or BACKUP_ROOT.is_symlink():
+        return selected
+    manifests = sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json"),
+                       key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    for manifest in manifests:
+        try:
+            if manifest.is_symlink() or manifest.parent.is_symlink() or manifest.stat().st_size > 16384:
+                continue
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+            partition = record.get("partition")
+            destination = "rootfs_image" if partition in ("rootfsA", "rootfsB", "rootfs") else "skills_image" if partition == "skills" else None
+            tags = set(record.get("device_tags", ())) | {record.get("device_tag")}
+            if (destination is None or destination in selected or record.get("kind") != "jibo-partition-backup" or
+                    record.get("status") == "failed" or tag not in tags):
+                continue
+            image = manifest.parent / Path(record.get("image", "partition.img")).name
+            if (image.is_symlink() or not image.is_file() or image.stat().st_size <= 0 or
+                    image.stat().st_size != record.get("size_bytes") or _sha256_file(image) != record.get("sha256")):
+                continue
+            selected[destination] = str(image)
+        except (OSError, ValueError, TypeError):
+            continue
+    return selected
+
+
 def _calibration_capture_identity(port, dfu_util):
     try:
         from jibo_calibration_flow import active
