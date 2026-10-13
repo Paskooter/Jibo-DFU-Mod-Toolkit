@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def launcher():
     spec = importlib.util.spec_from_file_location('clean_windows_launcher', ROOT / 'scripts/release/windows_launcher.py')
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

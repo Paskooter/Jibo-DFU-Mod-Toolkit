@@ -50,6 +50,52 @@ function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]
     $line = Get-WslRootArgumentLine -Name $Name -Command @('bash', $Helper, $Uid, $Gid, $Session)
     return (Start-Process -FilePath $wsl -ArgumentList $line -NoNewWindow -PassThru)
 }
+function Install-PrivateDistribution([string]$Root) {
+    $name = 'Jibo-DFU-Toolkit'
+    $url = 'https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl'
+    $sha256 = '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f'
+    $bytes = 360684292
+    $provision = Join-Path $Root 'wsl-provision.sh'
+    if (-not (Test-Path $provision)) { throw 'Embedded Linux setup helper is missing.' }
+    if (-not $env:LOCALAPPDATA) { throw 'Windows local application-data directory is unavailable.' }
+    $base = Join-Path $env:LOCALAPPDATA $name
+    $install = Join-Path $base 'wsl'
+    # Never overwrite a previous Linux filesystem, including an unregistered one.
+    if (Test-Path $install) { throw "Private Linux storage already exists at $install. Move it aside only if you no longer need its Linux files, then reopen the toolkit." }
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $download = Join-Path $base ('ubuntu-' + [guid]::NewGuid().ToString('N') + '.wsl')
+    $imported = $false
+    try {
+        Write-Host 'Downloading the official Ubuntu 22.04 image for the private toolkit Linux...'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing
+        if ((Get-Item -LiteralPath $download).Length -ne $bytes) { throw 'Ubuntu image size mismatch. Nothing was registered.' }
+        if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ine $sha256) { throw 'Ubuntu image checksum mismatch. Nothing was registered.' }
+        Write-Host 'Verified Ubuntu image. Setting up the private Linux (no account or password prompts)...'
+        # Microsoft's --import deliberately sets NO_OOBE. It works with this gzip
+        # tar image and avoids the newer --install --from-file first-run wizard.
+        # Registration belongs to this Windows user; never elevate wsl.exe here.
+        Native -Arguments @('--import', $name, $install, $download, '--version', '2') | Out-Host
+        $imported = $true
+        $linuxProvision = Native -Arguments @('--distribution', $name, '--user', 'root', '--exec', 'wslpath', '-u', '--', $provision)
+        Native -Arguments @('--distribution', $name, '--user', 'root', '--exec', 'bash', $linuxProvision) | Out-Host
+        Native -Arguments @('--terminate', $name) | Out-Null
+        if ((Native -Arguments @('--distribution', $name, '--exec', 'id', '-un')) -cne 'jibo') { throw 'Private Linux did not start as the toolkit user.' }
+        if (-not (Get-DistributionRuntime $name -RequireUbuntu)) { throw 'Private Linux compatibility check failed.' }
+        Write-Host 'Private Linux is ready. Future launches need no setup download.'
+        return $name
+    } catch {
+        # Only a distro successfully imported by THIS attempt may be removed.
+        # Never unregister an existing distro or one whose import failed/conflicted.
+        if ($imported) {
+            try { Native -Arguments @('--unregister', $name) | Out-Null }
+            catch { Write-Warning 'Could not remove the failed private Linux. Run: wsl --unregister Jibo-DFU-Toolkit' }
+        }
+        throw
+    } finally {
+        if (Test-Path $download) { Remove-Item -LiteralPath $download -Force }
+    }
+}
 function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session) {
     # Never enter AppRun's Linux sudo/polkit branch from the Windows EXE.
     $old = $ErrorActionPreference
@@ -86,7 +132,7 @@ function Get-DistributionRuntime([string]$Name, [switch]$RequireUbuntu) {
         return [pscustomobject]@{ Name=$Name; OsVersion=$version }
     } catch { return $null }
 }
-function Select-ToolkitDistribution($Rows, [string]$Requested) {
+function Select-ToolkitDistribution($Rows, [string]$Requested, [string]$Root) {
     if ($Requested) {
         $row = @($Rows | Where-Object { $_.Name -ceq $Requested -and $_.Version -eq 2 })
         if ($row.Count -ne 1) { throw 'Requested distribution is not installed as WSL 2.' }
@@ -110,7 +156,7 @@ function Select-ToolkitDistribution($Rows, [string]$Requested) {
         throw 'The private Linux is not ready. To remove it and its Linux files, run: wsl --unregister Jibo-DFU-Toolkit. Then reopen the toolkit to set it up again.'
     }
     if (-not (Confirm-Setup 'Set up a private Linux for the toolkit? One-time download of about 345 MB. No Linux account or password needed.')) { throw 'Distribution setup declined. No download or import was attempted.' }
-    throw 'Private Linux setup is not available in this build.'
+    return (Install-PrivateDistribution -Root $Root)
 }
 try {
     $archive = Join-Path $PayloadRoot 'payload.tar.gz'
@@ -134,7 +180,7 @@ try {
             $rows += [pscustomobject]@{Name=$Matches['name'].Trim(); Version=[int]$Matches['version']; Default=($Matches['default'] -eq '*')}
         }
     }
-    $Distro = Select-ToolkitDistribution -Rows $rows -Requested $Distro
+    $Distro = Select-ToolkitDistribution -Rows $rows -Requested $Distro -Root $PayloadRoot
     Write-Host "Using Linux: $Distro."
     $usb = Get-Command usbipd.exe -ErrorAction SilentlyContinue
     if (-not $usb) { $usb = Get-Command usbipd -ErrorAction SilentlyContinue }

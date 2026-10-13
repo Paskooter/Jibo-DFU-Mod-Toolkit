@@ -1,6 +1,7 @@
 """One-file Windows launcher; embeds, but does not rebuild, the Linux payload."""
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -9,6 +10,9 @@ import tarfile
 
 def main():
     root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+    revision_file = root / 'revision.txt'
+    revision = revision_file.read_text().strip() if revision_file.is_file() else 'unknown'
+    print('Jibo DFU Toolkit (build ' + revision[:7] + ')', flush=True)
     archive = root / 'payload.tar.gz'
     expected = (root / 'payload.sha256').read_text().strip()
     if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
@@ -18,7 +22,7 @@ def main():
         print('Jibo DFU Mod Toolkit Windows x64 WSL bootstrapper')
         return 0
     if args == ['--self-check']:
-        for helper in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh',
+        for helper in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh',
                        'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md'):
             if not (root / helper).is_file():
                 raise RuntimeError('Missing embedded Windows helper: ' + helper)
@@ -37,10 +41,11 @@ def main():
         import shutil
         shutil.copyfile(archive, args[1])
         return 0
-    if args:
-        raise RuntimeError('Usage: Jibo-DFU-Windows-x64.exe [--version|--self-check|--extract-payload FILE]')
+    override = len(args) == 2 and args[0] == '-Distro' and re.fullmatch(r'[A-Za-z0-9._-]{1,256}', args[1])
+    if args and not override:
+        raise RuntimeError('Usage: Jibo-DFU-Windows-x64.exe [--version|--self-check|--extract-payload FILE|-Distro NAME]')
     return subprocess.call(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                            '-File', str(root / 'bootstrap.ps1'), '-PayloadRoot', str(root)])
+                            '-File', str(root / 'bootstrap.ps1'), '-PayloadRoot', str(root)] + args)
 
 
 if __name__ == '__main__':
