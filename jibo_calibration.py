@@ -12,6 +12,10 @@ import hashlib
 import json
 import re
 from typing import NoReturn
+from pathlib import Path, PurePosixPath
+import tempfile
+
+import jibo_images as images
 
 PROFILE = "jibo-factory-calibration-v3"
 
@@ -185,6 +189,74 @@ def validate_item(key: str, data: bytes) -> bytes:
         elif key == "factory_record":
             _factory_record(value)
     return data
+
+
+@dataclass
+class ExtractResult:
+    files: dict[str, bytes]
+    status: dict[str, str]
+
+
+def _image_stat(image, path):
+    output = images._run_debugfs(image, "stat " + path, allow_missing=True)
+    if re.search(r"File not found|ext2_lookup", output, re.IGNORECASE):
+        return None
+    kind = re.search(r"\bType:\s+(\w+)", output)
+    size = re.search(r"\bSize:\s+(\d+)", output)
+    if not kind or not size:
+        raise CalibrationError("Could not inspect the calibration partition image.")
+    return kind.group(1).lower(), int(size.group(1))
+
+
+def _read_item(image, spec, destination):
+    """Check EVERY inode on the fixed path before dumping; cap before reading."""
+    for parent in reversed(PurePosixPath(spec.image_path).parents):
+        stat = _image_stat(image, str(parent))
+        if stat is None:
+            return None, "absent"
+        if stat[0] != "directory":
+            return None, "kept_local_unsupported"
+    stat = _image_stat(image, spec.image_path)
+    if stat is None:
+        return None, "absent"
+    if stat[0] != "regular" or stat[1] > spec.cap:
+        return None, "kept_local_unsupported"
+    data = images._extract(image, spec.image_path, destination)
+    if data is None or len(data) != stat[1]:
+        raise CalibrationError("Calibration extraction did not match the inode size.")
+    try:
+        validate_item(spec.key, data)
+    except CalibrationError:
+        return None, "kept_local_unsupported"
+    return data, "present"
+
+
+def extract(var_image, rootfs_image=None, skills_image=None) -> ExtractResult:
+    """Read only fixed profile paths from unmounted images; never repair them."""
+    partitions = {"var": var_image, "rootfs": rootfs_image, "skills": skills_image}
+    try:
+        for partition, image in partitions.items():
+            if image is None:
+                if partition == "var":
+                    raise CalibrationError("A var partition image is required.")
+                continue
+            image = Path(image)
+            if image.is_symlink() or not image.is_file():
+                raise CalibrationError("Calibration partition images must be regular files.")
+            partitions[partition] = image
+        files, status = {}, {}
+        with tempfile.TemporaryDirectory(prefix="jibo-calibration-") as temp:
+            for spec in ITEMS:
+                image = partitions[spec.partition]
+                if image is None:
+                    status[spec.key] = "not_checked"
+                    continue
+                data, status[spec.key] = _read_item(image, spec, Path(temp) / spec.key)
+                if data is not None:
+                    files[spec.key] = data
+        return ExtractResult(files, status)
+    except (images.ImageError, OSError, TypeError, ValueError) as exc:
+        raise CalibrationError("Could not safely extract the calibration partition image.") from exc
 
 
 def stock_equivalent(files) -> dict[str, bool]:

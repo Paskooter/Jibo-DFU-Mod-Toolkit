@@ -5,6 +5,10 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+import shutil
+import tempfile
+from unittest.mock import patch
+from calibration_support import make_image, debug, PATHS, TEMP_DIR, POINTERCAL, FACTORY_RECORD
 
 VECTOR = json.loads((Path(__file__).parent / "fixtures/cal-v3-vectors.json").read_text())
 FILES = {key: base64.b64decode(value, validate=True) for key, value in VECTOR["files_b64"].items()}
@@ -115,6 +119,69 @@ class CalibrationGrammarTests(unittest.TestCase):
         self.assertEqual(self.cal.stock_equivalent(FILES), {"left": False, "right": False, "inter_camera": False})
         with self.assertRaises(self.cal.CalibrationError):
             self.cal.canonical_bundle({"identity": b"private"})
+
+
+@unittest.skipUnless(all(shutil.which(tool) for tool in ("mke2fs", "debugfs")), "e2fsprogs required")
+class CalibrationExtractionTests(unittest.TestCase):
+    def test_extract_all_partitions_and_only_allowlisted_exact_bytes(self):
+        import jibo_calibration as cal
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
+            var = make_image(temp, "var.ext4", {**{PATHS[k]: v for k, v in FILES.items()},
+                                               "/jibo/identity.json": b"private",
+                                               "/jibo/lps/cam_0_both_pos_1.jpg": b"private",
+                                               "/jibo/lps/distortionPrecomputeFile_other": b"cache"})
+            rootfs = make_image(temp, "rootfs.ext4", {PATHS["touchscreen"]: POINTERCAL})
+            skills = make_image(temp, "skills.ext4", {PATHS["factory_record"]: FACTORY_RECORD})
+            before = [hashlib.sha256(p.read_bytes()).hexdigest() for p in (var, rootfs, skills)]
+            result = cal.extract(var, rootfs, skills)
+            self.assertEqual(result.files, {**FILES, "touchscreen": POINTERCAL, "factory_record": FACTORY_RECORD})
+            self.assertEqual(result.status, {item.key: "present" for item in cal.ITEMS})
+            self.assertEqual(before, [hashlib.sha256(p.read_bytes()).hexdigest() for p in (var, rootfs, skills)])
+            unchecked = cal.extract(var)
+            self.assertEqual(unchecked.status["touchscreen"], "not_checked")
+            self.assertEqual(unchecked.status["factory_record"], "not_checked")
+
+    def test_absent_rejected_oversized_and_symlink_statuses(self):
+        import jibo_calibration as cal
+        import jibo_images as images
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
+            var = make_image(temp, "var.ext4", {PATHS["left"]: FILES["left"],
+                                               PATHS["right"]: b" " * 2049,
+                                               PATHS["imu"]: b'{"private": "secret"}'})
+            debug(var, "mkdir /jibo/audio")
+            debug(var, "symlink " + PATHS["audio"] + " " + PATHS["left"])
+            rootfs = make_image(temp, "rootfs.ext4", {})
+            debug(rootfs, "symlink /etc/pointercal /etc/hosts")
+            with patch.object(images, "_extract", wraps=images._extract) as dumps:
+                result = cal.extract(var, rootfs)
+            self.assertEqual(result.files, {"left": FILES["left"]})
+            self.assertEqual(result.status, {"left": "present", "right": "kept_local_unsupported",
+                                            "inter_camera": "absent", "imu": "kept_local_unsupported",
+                                            "audio": "kept_local_unsupported", "touchscreen": "kept_local_unsupported",
+                                            "factory_record": "not_checked"})
+            self.assertEqual({call.args[1] for call in dumps.call_args_list}, {PATHS["left"], PATHS["imu"]})
+
+    def test_nonregular_files_and_symlink_parent_are_never_dumped(self):
+        import jibo_calibration as cal
+        import jibo_images as images
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
+            var = make_image(temp, "var.ext4", {})
+            debug(var, "mkdir " + PATHS["left"])
+            debug(var, "symlink /jibo/imu /jibo/lps")
+            with patch.object(images, "_extract", wraps=images._extract) as dumps:
+                result = cal.extract(var)
+            self.assertEqual(result.status["left"], "kept_local_unsupported")
+            self.assertEqual(result.status["imu"], "kept_local_unsupported")
+            dumps.assert_not_called()
+            link = Path(temp) / "link.ext4"
+            link.symlink_to(var)
+            for image in (link, Path(temp) / "missing", Path(temp)):
+                with self.assertRaises(cal.CalibrationError):
+                    cal.extract(image)
+            invalid = Path(temp) / "invalid.ext4"
+            invalid.write_bytes(b"not ext4")
+            with self.assertRaises(cal.CalibrationError):
+                cal.extract(invalid)
 
 
 if __name__ == "__main__":
