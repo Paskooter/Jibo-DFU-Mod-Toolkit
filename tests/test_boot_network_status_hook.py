@@ -112,7 +112,17 @@ class HookTests(unittest.TestCase):
 
     def test_completed_ota_history_does_not_disable_the_feature(self):
         (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": None, "items": [{}]}))
-        self.assertEqual(len(self.run_hook()), 1)
+        calls = self.run_hook()
+        if len(calls) != 1:
+            # Keep CI failures attributable to the actual guard/host boundary,
+            # rather than an uninformative mount-count mismatch.
+            guard = subprocess.run([str(self.root / "usr/bin/node"),
+                                    str(self.var / "ota-safe-overlay.js"), "check",
+                                    str(self.root), "startup-view.js"],
+                                   env=self.env, capture_output=True, text=True, timeout=10)
+            self.fail("Completed OTA was not mounted: " +
+                      (self.var / "boot-network-status.log").read_text() +
+                      f"guard exit={guard.returncode}, stdout={guard.stdout!r}, stderr={guard.stderr!r}")
 
     def test_malformed_ota_state_is_fail_closed(self):
         (self.root / "var/jibo/ota.json").write_text("invalid JSON")
