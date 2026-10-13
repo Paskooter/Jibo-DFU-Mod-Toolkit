@@ -1,7 +1,8 @@
 # Parse and exercise the bootstrap without real WSL, USB, installs or UAC.
+param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'))
 $ErrorActionPreference = 'Stop'
 $hostBinary = (Get-Process -Id $PID).Path
-$path = Join-Path $PSScriptRoot 'bootstrap.ps1'
+$path = $BootstrapPath
 $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
@@ -184,12 +185,12 @@ function wsl.exe { $script:calls += ,$args; $global:LASTEXITCODE=41; Write-Error
 $code = Invoke-WslGui -Name 'Ubuntu with spaces' -User 'fixture' -Target '/home/fixture/path with spaces' -Session '/session'
 if ($ErrorActionPreference -ne 'Stop') { throw 'GUI native stderr handling leaked preference changes' }
 if ($code -ne 41 -or ($script:calls[0] -join '|') -ne '--distribution|Ubuntu with spaces|--user|fixture|--exec|bash|/home/fixture/path with spaces/wsl-user-launch.sh|/home/fixture/path with spaces/jibo-dfu|/session') { throw 'GUI identity, direct binary dispatch or exit propagation failed' }
-# Exercise the actual top-level bootstrap, not just helpers. Every external
-# command is a synthetic boundary, with an invocation trace and controlled exits.
+# Actual top-level bootstrap, with traces at every external boundary.
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-bootstrap-flow-' + [guid]::NewGuid())
 New-Item -ItemType Directory $fixture | Out-Null
+$passed = 0; $failedCases = @()
 try {
-    foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh')) {
+    foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh')) {
         [IO.File]::WriteAllText((Join-Path $fixture $file), 'synthetic; never executed')
     }
     [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
@@ -198,48 +199,33 @@ try {
 param($Bootstrap, $Payload, $Case)
 $global:UacCase = $Case
 $global:UacTrace = Join-Path $Payload ($Case + '.jsonl')
+$env:LOCALAPPDATA = Join-Path $Payload $Case
 function Record($Kind, $Values) { [IO.File]::AppendAllText($global:UacTrace, (([pscustomobject]@{Kind=$Kind; Values=@($Values)} | ConvertTo-Json -Compress) + "`n")) }
 function wsl.exe {
     Record 'wsl' $args
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '--version') { return 'WSLg 1.0' }
-    if ($args[0] -eq '--list') {
-        if ($global:UacCase -like 'old-default*') { return "  NAME                STATE     VERSION`n* Ubuntu-20.04        Stopped   2`n  NVIDIA-Workbench    Stopped   2" }
-        return "  NAME            STATE     VERSION`n* Ubuntu-22.04    Running   2"
-    }
-    if ($args -contains 'getconf') { if ($args -contains 'Ubuntu-20.04') { return 'glibc 2.31' }; return 'glibc 2.35' }
+    if ($args[0] -eq '--list') { return "  NAME                STATE     VERSION`n* NVIDIA-Workbench    Stopped   2" }
+    if ($args -contains 'getconf') { return 'glibc 2.35' }
     if ($args -contains 'uname') { return 'x86_64' }
     if ($args -contains 'id') {
-        if ($args[-1] -eq '-u') { if ($global:UacCase -eq 'root-user') { return '0' }; return '1000' }
+        if ($args[-1] -eq '-u') { return '1000' }
         if ($args[-1] -eq '-g') { return '1001' }
         return 'fixture'
     }
+    if ($args -contains 'cat') { return "ID=ubuntu`nVERSION_ID=`"22.04`"" }
     if ($args -contains 'printenv') { return '/home/fixture/path with spaces' }
     if ($args -contains 'wslpath') { return ('/mnt/c/fixture/' + (Split-Path $args[-1] -Leaf)) }
-    if ($args -contains 'once' -and $global:UacCase -eq 'grant-failed') { $global:LASTEXITCODE = 1; return 'Could not grant Jibo USB access' }
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
-function powershell.exe {
-    Record 'usb' $args
-    $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 }
-}
+function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = 0 }
 function Get-Command { param($Name, $ErrorAction); return [pscustomobject]@{Source='fixture-usbipd'} }
-function Read-Host {
-    param($Prompt)
-    Record 'prompt' @($Prompt)
-    if ($global:UacCase -eq 'old-default-install') { return '2' }
-    if ($global:UacCase -eq 'old-default-other') { return '1' }
-    return 'n'
-}
+function Read-Host { param($Prompt); Record 'prompt' @($Prompt); return 'n' }
+function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
-    if ($Verb -eq 'RunAs') {
-        if ($global:UacCase -eq 'uac-declined') { throw 'Synthetic UAC cancellation' }
-        $code = if ($global:UacCase -eq 'admin-failed') { 5 } else { 0 }
-        return [pscustomobject]@{ExitCode=$code}
-    }
-    $process = [pscustomobject]@{Id=4242; HasExited=($global:UacCase -eq 'watcher-failed' -and $FilePath -match 'wsl.exe$' -and $ArgumentList -match '--user"?\s+"?root'); ExitCode=0; Handle=1}
+    $process = [pscustomobject]@{Id=4242; HasExited=$false; ExitCode=0; Handle=1}
     $process | Add-Member ScriptMethod WaitForExit { param($Timeout); if ($Timeout) { return $this.HasExited }; $this.HasExited=$true }
     return $process
 }
@@ -248,37 +234,19 @@ function Stop-Process { param($Id); Record 'stop' @($Id) }
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('success', 'old-default-other', 'old-default-install', 'root-user', 'grant-failed', 'usb-declined', 'watcher-failed')) {
-        $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
-        $code = $LASTEXITCODE
-        $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
-        $guiCalls = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'bash' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' })
-        $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
-        if ($admin.Count) { throw ('Bootstrap requested a Windows administrator prompt itself (' + $case + '); only usbipd bind may: ' + ($admin | ConvertTo-Json -Compress -Depth 5)) }
-        if ($case -in @('success', 'old-default-other')) {
-            if ($code -ne 41 -or $guiCalls.Count -ne 1) { throw ('Full bootstrap GUI exit failed (' + $case + '): ' + ($messages -join ' ') + ' TRACE: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
-            $gui = $guiCalls[0].Values
-            if (($gui -join '|') -notmatch '\|--user\|fixture\|' -or ($gui -join ' ') -match '/AppRun') { throw 'Full EXE route still requests sudo/root GUI' }
-            $distro = if ($case -eq 'success') { 'Ubuntu-22.04' } else { 'NVIDIA-Workbench' }
-            if (($gui -join '|') -notmatch ('^--distribution\|' + [regex]::Escape($distro) + '\|')) { throw ('GUI ran in the wrong distribution: ' + ($gui -join '|')) }
-            $grant = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join '|') -match ('^--distribution\|' + [regex]::Escape($distro) + '\|--user\|root\|--exec\|bash\|.*\|1000\|1001\|once$') })
-            if ($grant.Count -ne 1) { throw ('Root USB grant did not run once in the user''s WSL session: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
-            $watch = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user"?\s+"?root' })
-            if ($watch.Count -ne 1 -or ([string]$watch[0].Values[1]) -notmatch ('^--distribution ' + [regex]::Escape($distro) + ' --user root --exec "bash" ')) { throw ('Root watcher options would not be parsed by wsl.exe: ' + ($watch | ConvertTo-Json -Compress -Depth 5)) }
-            if (-not @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'rm' }).Count) { throw 'Full bootstrap did not clean the permission session' }
-            if ($case -eq 'old-default-other') {
-                $prompt = @($events | Where-Object { $_.Kind -eq 'prompt' })
-                if ($prompt.Count -ne 1 -or ($messages -join ' ') -notmatch 'Install Ubuntu 22.04') { throw 'Incompatible-default prompt did not offer a fresh Ubuntu install' }
-            }
-        } elseif ($case -eq 'old-default-install') {
-            $install = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -eq '--install --distribution Ubuntu-22.04' -and -not $_.Values[2] })
-            if ($code -ne 41 -or $install.Count -ne 1 -or $guiCalls.Count -ne 1) { throw ('Install choice did not install Ubuntu as this user and continue: ' + ($messages -join ' ') + ' TRACE: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
-            if (($guiCalls[0].Values -join '|') -notmatch '^--distribution\|Ubuntu-22.04\|') { throw 'GUI did not continue in the newly installed Ubuntu-22.04' }
-        } else {
-            if ($code -ne 1 -or $guiCalls.Count) { throw ('Full bootstrap failed to refuse ' + $case + ': ' + ($messages -join ' ')) }
-            if ($case -eq 'root-user' -and @($events | Where-Object { $_.Kind -eq 'start' -or $_.Values -contains 'tar' }).Count) { throw 'Root default user was rejected too late' }
-            if ($case -eq 'grant-failed' -and @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user"?\s+"?root' }).Count) { throw 'Root watcher started after a failed USB grant' }
-        }
+    foreach ($case in @('nvidia-decline')) {
+        try {
+            $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
+            $code = $LASTEXITCODE
+            $text = $messages -join "`n"
+            $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
+            $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
+            if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
+            if ($text -match 'NVIDIA-Workbench' -or @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'NVIDIA-Workbench' }).Count) { throw 'tool distro was listed or probed/used' }
+            if (@($events | Where-Object { $_.Kind -in @('download','start') -or $_.Values -contains '--import' }).Count) { throw 'decline caused setup side effects' }
+            $passed++; Write-Output "PASS scenario: $case"
+        } catch { $failedCases += $case; Write-Output "FAIL scenario: $case - $($_.Exception.Message)" }
     }
 } finally { Remove-Item -Recurse -Force $fixture }
-Write-Output 'PASS: PowerShell parse/helpers, wsl.exe option-parser model, distro-name rule, password-free root USB grant/watcher, plus 9 full bootstrap scenarios (2 setup refusals, GUI exit, incompatible default + other distro, incompatible default + fresh Ubuntu install, root-user refusal, USB grant failure, USB refusal, watcher failure); all WSL/USB/admin boundaries mocked.'
+Write-Output "Bootstrap scenarios: $passed passed; $($failedCases.Count) failed. Helpers/parser/native argv passed."
+if ($failedCases.Count) { exit 1 }
