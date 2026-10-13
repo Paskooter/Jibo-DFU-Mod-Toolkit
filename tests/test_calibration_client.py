@@ -161,6 +161,31 @@ class ClientTests(unittest.TestCase):
                 self.assertFalse(second.removal_authority)
                 self.assertIn("original removal receipt", second.detail)
 
+    @unittest.skipUnless(Ed25519PrivateKey, "optional cryptography unavailable")
+    def test_https_rejects_untrusted_local_certificate_before_http_request(self):
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        import ipaddress
+        import ssl
+        with Server() as server:
+            key = Ed25519PrivateKey.generate()
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "synthetic-loopback")])
+            now = datetime.now(timezone.utc)
+            certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1)).add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, None))
+            root = Path(self.temp.name)
+            cert_path, key_path = root / "synthetic-cert.pem", root / "synthetic-key.pem"
+            cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            key_path.chmod(0o600)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert_path, key_path)
+            server.http.socket = context.wrap_socket(server.http.socket, server_side=True)
+            with patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="https://127.0.0.1:" + str(server.http.server_port)):
+                c = self.client.CalibrationClient(self.temp.name, core=core)
+                with self.assertRaises(self.client.ClientError):
+                    c.lookup(core.VECTOR["robot_key"])
+                self.assertEqual(server.requests, [])
+
     def test_missing_crypto_is_clear_and_local_import_works(self):
         with patch.dict(sys.modules, {"cryptography.hazmat.primitives.asymmetric.ed25519": None}):
             with self.assertRaisesRegex(self.client.Unavailable, "unavailable on this install"):
