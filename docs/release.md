@@ -38,33 +38,43 @@ The Windows EXE does **not** run source `run.sh`. Its former route was
 `bootstrap.ps1 -> AppRun -> sudo jibo-dfu`, which asked for the WSL account's
 Linux password and ran the GUI as root. The EXE now uses this separate path:
 
-1. Select a WSL 2 distribution with a **non-root default user**. Extract/check the
-   prebuilt payload and copy the two EXE-only shell helpers as that user.
+1. Select a WSL 2 distribution with a **non-root default user**. If the default
+   distribution is too old (glibc below 2.35), the launcher lists compatible ones
+   and offers to install a separate Ubuntu 22.04 for the toolkit. The install
+   runs as the current Windows user (WSL distributions are per user) and the
+   launcher continues once the Ubuntu account exists. Extract/check the prebuilt
+   payload and copy the two EXE-only shell helpers as that user.
 2. Reuse `run.ps1 -UsbOnly` for Windows usbipd binding/attachment. Binding keeps its
    existing UAC consent. A failed/refused handoff stops before opening the GUI.
-3. Ask for Windows UAC consent for `wsl.exe --distribution <distro> --user root
-   --exec bash .../wsl-usb-permissions.sh <UID> <GID> once`. No Linux sudo/password
-   is used. If UAC uses a different Windows administrator account which cannot
-   access this user's distro, setup fails instead of switching distro/user.
-4. After consent, a Windows-launched `wsl.exe --user root` watcher grants only
-   Jibo APX/DFU nodes (`0955:7740`, `0955:701a`) to the invoking UID/GID with mode
-   `0600`. It rediscovers nodes during USB mode changes; it needs neither systemd
-   nor udev, makes no persistent udev/sudoers changes, and writes no user files.
+3. Grant Jibo USB access with `wsl.exe --distribution <distro> --user root --exec
+   bash .../wsl-usb-permissions.sh <UID> <GID> once`, run as the current Windows
+   user. WSL lets the owner of a distribution enter it as root without a Linux
+   password, so no sudo, Linux password or extra Windows prompt is needed. The
+   command deliberately does not use an elevated `wsl.exe`: an elevated WSL session
+   can be separate from the user's own (it may not see their distributions or the
+   attached USB device). A failed grant stops before the watcher or the GUI.
+4. A `wsl.exe --user root` watcher, started the same way, grants only Jibo APX/DFU
+   nodes (`0955:7740`, `0955:701a`) to the invoking UID/GID with mode `0600`. It
+   rediscovers nodes during USB mode changes; it needs neither systemd nor udev,
+   makes no persistent udev/sudoers changes, and writes no user files. `wsl.exe`
+   parses its own options before `--exec` with a plain space split, so options are
+   passed bare and distro names must match WSL's rule `[A-Za-z0-9._-]`; only the
+   command after `--exec` is quoted.
 5. Run the same frozen `jibo-dfu` directly through a non-root user wrapper, not
    through AppRun. The GUI, firmware-image work, backups and files retain the
    selected user's UID and HOME. Cleanup removes the session marker and stops
    both watchers; the root watcher also checks its normal-user GUI-wrapper PID.
 
-This can produce two Windows approval prompts when a device is not yet bound:
-usbipd's existing bind approval and the WSL USB-access approval. No administrator
-prompt authorizes a robot write; the existing per-write reviews remain mandatory.
+The only Windows approval prompt in a normal launch is usbipd's existing bind
+approval, the first time a robot's USB port is shared. No administrator prompt
+authorizes a robot write; the existing per-write reviews remain mandatory.
 There are no apt/Tk/compiler installs in the EXE path because they are bundled.
-Installing WSL/WSLg, a distribution or usbipd, when missing, retains the existing
-explicit setup approval/UAC. Ubuntu's first-run **creation** of a Linux account
-and password is still the distro's provisioning UI; the toolkit never requests
-that password to authenticate a launch or USB operation. Existing distros need
-no Linux password for this path. The source `run.ps1`/`run-gui.cmd` launchers still
-use `run.sh` and its existing Linux sudo behavior; this change targets the EXE.
+Installing WSL/WSLg or usbipd, when missing, retains the existing explicit setup
+approval/UAC. Ubuntu's first-run **creation** of a Linux account and password is
+still the distro's provisioning UI; the toolkit never requests that password to
+authenticate a launch or USB operation. The source `run.ps1`/`run-gui.cmd`
+launchers still use `run.sh` and its existing Linux sudo behavior; this change
+targets the EXE.
 
 Native Linux/macOS source launchers, release AppRun and frozen native adapter are
 byte-identical to release-builds base `03a25aa`. Windows helpers are embedded only

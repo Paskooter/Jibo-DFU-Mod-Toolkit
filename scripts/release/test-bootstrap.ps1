@@ -111,7 +111,45 @@ public class NativeArgvProbe {
         if ($actual -cne $values[$i]) { throw ('Native argv roundtrip failed at index ' + $i) }
     }
 } finally { Remove-Item -Recurse -Force $argvFixture }
-# Windows privileges: UAC comes before any root watcher; GUI uses an explicit non-root user.
+# wsl.exe option parsing, mirrored from microsoft/WSL src/windows/common/WslClient.cpp
+# (WslMain + helpers::ParseArgument): options are split at the first space/tab with
+# NO quote handling until --exec/-e; only the remainder goes to CommandLineToArgvW.
+# A token that is not a known option (e.g. a quoted "--distribution") ends option
+# parsing and the whole remaining line runs through the default distro's shell.
+function Split-WslOptions([string]$Line) {
+    $options = @{}
+    $rest = $Line
+    while ($true) {
+        $rest = $rest.TrimStart(" `t")
+        $index = $rest.IndexOfAny([char[]]@(' ', "`t"))
+        $token = if ($index -ge 0) { $rest.Substring(0, $index) } else { $rest }
+        if (-not $token) { return [pscustomobject]@{Options=$options; Exec=$false; Rest=''} }
+        if ($token -cin @('--distribution', '-d', '--user', '-u')) {
+            $rest = $rest.Substring($token.Length).TrimStart(" `t")
+            $index = $rest.IndexOfAny([char[]]@(' ', "`t"))
+            $value = if ($index -ge 0) { $rest.Substring(0, $index) } else { $rest }
+            $options[$token.TrimStart('-').Substring(0, 1)] = $value
+            $rest = $rest.Substring($value.Length)
+            continue
+        }
+        if ($token -cin @('--exec', '-e')) {
+            return [pscustomobject]@{Options=$options; Exec=$true; Rest=$rest.Substring($token.Length).TrimStart(" `t")}
+        }
+        return [pscustomobject]@{Options=$options; Exec=$false; Rest=$rest}
+    }
+}
+$parsed = Split-WslOptions '"--distribution" "Ubuntu-22.04" "--user" "root" "--exec" "bash"'
+if ($parsed.Exec -or $parsed.Options.Count) { throw 'wsl.exe option emulator accepted quoted options' }
+$parsed = Split-WslOptions '--distribution Ubuntu-22.04 --user root --exec "bash" "/a b"'
+if (-not $parsed.Exec -or $parsed.Options['d'] -cne 'Ubuntu-22.04' -or $parsed.Options['u'] -cne 'root' -or $parsed.Rest -cne '"bash" "/a b"') { throw 'wsl.exe option emulator rejected bare options' }
+foreach ($name in @('Ubuntu-22.04', 'NVIDIA-Workbench', 'docker-desktop', 'Debian.12_x')) {
+    if (-not (Test-WslDistributionName $name)) { throw ('Valid WSL distribution name refused: ' + $name) }
+}
+foreach ($name in @('Ubuntu with spaces', 'a"b', "a`tb", '', ('x' * 257))) {
+    if (Test-WslDistributionName $name) { throw ('Invalid WSL distribution name accepted: ' + $name) }
+}
+# Windows privileges: root inside the user's own distro needs neither UAC nor a Linux
+# password; the GUI uses an explicit non-root user.
 $script:calls = @()
 function Native { param([string[]]$Arguments); $script:calls += ,$Arguments; return '' }
 function Invoke-ApprovedAdmin { param($File, $Arguments); $script:calls += ,@('UAC', $File, $Arguments) }
@@ -120,17 +158,27 @@ function Start-Process {
     $script:calls += ,@('WATCH', $FilePath, $ArgumentList)
     return [pscustomobject]@{ HasExited=$false; Id=4242 }
 }
-$watch = Start-WslUsbAccess -Name 'Ubuntu with spaces' -User 'fixture' -Uid '1000' -Gid '1001' -Helper '/mnt/c/path with spaces/usb.sh' -Session '/home/fixture/.usb-session'
-if ($script:calls.Count -ne 3 -or $script:calls[0][0] -ne 'UAC') { throw 'Root watcher started before UAC consent' }
-$adminArgs = $script:calls[0][2]
-$watchArgs = $script:calls[2][2]
-if ($adminArgs -notmatch '"--user" "root"' -or $watchArgs -notmatch '"--user" "root"' -or $adminArgs -notmatch '"Ubuntu with spaces"' -or $adminArgs -notmatch '"/mnt/c/path with spaces/usb.sh"') { throw 'Root WSL identity/argument preservation failed' }
-if (($script:calls[1] -join '|') -ne '--distribution|Ubuntu with spaces|--user|fixture|--exec|touch|--|/home/fixture/.usb-session') { throw 'Session marker was not created by the normal user' }
+$helper = '/mnt/c/path with spaces/usb.sh'
+$watch = Start-WslUsbAccess -Name 'Ubuntu-22.04' -User 'fixture' -Uid '1000' -Gid '1001' -Helper $helper -Session '/home/fixture/.usb-session'
+if (@($script:calls | Where-Object { $_[0] -eq 'UAC' }).Count) { throw 'WSL root USB setup requested a Windows administrator prompt' }
+if ($script:calls.Count -ne 3) { throw ('Unexpected USB setup calls: ' + ($script:calls | ConvertTo-Json -Compress)) }
+if (($script:calls[0] -join '|') -cne ('--distribution|Ubuntu-22.04|--user|root|--exec|bash|' + $helper + '|1000|1001|once')) { throw 'Initial root USB grant did not use the user''s own WSL session' }
+if (($script:calls[1] -join '|') -cne '--distribution|Ubuntu-22.04|--user|fixture|--exec|touch|--|/home/fixture/.usb-session') { throw 'Session marker was not created by the normal user' }
+if ($script:calls[2][0] -ne 'WATCH') { throw 'Root USB watcher was not started' }
+$parsed = Split-WslOptions ([string]$script:calls[2][2])
+if (-not $parsed.Exec -or $parsed.Options['d'] -cne 'Ubuntu-22.04' -or $parsed.Options['u'] -cne 'root') {
+    throw ('wsl.exe would not parse the watcher options (it would run them through the shell): ' + $script:calls[2][2])
+}
+if ($parsed.Rest -cne (ConvertTo-NativeArgumentLine @('bash', $helper, '1000', '1001', '/home/fixture/.usb-session'))) { throw 'Watcher command arguments were not preserved' }
 $script:calls = @()
-function Invoke-ApprovedAdmin { param($File, $Arguments); throw 'UAC declined' }
+function Native { param([string[]]$Arguments); $script:calls += ,$Arguments; if ($Arguments -contains 'once') { throw 'WSL failed: synthetic root grant failure' }; return '' }
 $failed = $false
-try { Start-WslUsbAccess -Name 'fixture' -User 'fixture' -Uid '1000' -Gid '1001' -Helper '/usb.sh' -Session '/session' | Out-Null } catch { $failed = $true }
-if (-not $failed -or $script:calls.Count) { throw 'UAC cancellation did not stop before root watcher/session setup' }
+try { Start-WslUsbAccess -Name 'Ubuntu-22.04' -User 'fixture' -Uid '1000' -Gid '1001' -Helper '/usb.sh' -Session '/session' | Out-Null } catch { $failed = $true }
+if (-not $failed -or $script:calls.Count -ne 1) { throw 'Root USB grant failure did not stop before session/watcher setup' }
+$script:calls = @()
+$failed = $false
+try { Start-WslUsbAccess -Name 'Ubuntu with spaces' -User 'fixture' -Uid '1000' -Gid '1001' -Helper '/usb.sh' -Session '/session' | Out-Null } catch { $failed = $true }
+if (-not $failed -or $script:calls.Count) { throw 'Invalid distribution name reached wsl.exe' }
 $script:calls = @()
 function wsl.exe { $script:calls += ,$args; $global:LASTEXITCODE=41; Write-Error 'Synthetic GUI stderr'; return 'Synthetic GUI stdout' }
 $code = Invoke-WslGui -Name 'Ubuntu with spaces' -User 'fixture' -Target '/home/fixture/path with spaces' -Session '/session'
@@ -155,8 +203,11 @@ function wsl.exe {
     Record 'wsl' $args
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '--version') { return 'WSLg 1.0' }
-    if ($args[0] -eq '--list') { return '* Ubuntu with spaces Running 2' }
-    if ($args -contains 'getconf') { return 'glibc 2.35' }
+    if ($args[0] -eq '--list') {
+        if ($global:UacCase -like 'old-default*') { return "  NAME                STATE     VERSION`n* Ubuntu-20.04        Stopped   2`n  NVIDIA-Workbench    Stopped   2" }
+        return "  NAME            STATE     VERSION`n* Ubuntu-22.04    Running   2"
+    }
+    if ($args -contains 'getconf') { if ($args -contains 'Ubuntu-20.04') { return 'glibc 2.31' }; return 'glibc 2.35' }
     if ($args -contains 'uname') { return 'x86_64' }
     if ($args -contains 'id') {
         if ($args[-1] -eq '-u') { if ($global:UacCase -eq 'root-user') { return '0' }; return '1000' }
@@ -165,6 +216,7 @@ function wsl.exe {
     }
     if ($args -contains 'printenv') { return '/home/fixture/path with spaces' }
     if ($args -contains 'wslpath') { return ('/mnt/c/fixture/' + (Split-Path $args[-1] -Leaf)) }
+    if ($args -contains 'once' -and $global:UacCase -eq 'grant-failed') { $global:LASTEXITCODE = 1; return 'Could not grant Jibo USB access' }
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
 function powershell.exe {
@@ -172,7 +224,13 @@ function powershell.exe {
     $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 }
 }
 function Get-Command { param($Name, $ErrorAction); return [pscustomobject]@{Source='fixture-usbipd'} }
-function Read-Host { param($Prompt); return 'n' }
+function Read-Host {
+    param($Prompt)
+    Record 'prompt' @($Prompt)
+    if ($global:UacCase -eq 'old-default-install') { return '2' }
+    if ($global:UacCase -eq 'old-default-other') { return '1' }
+    return 'n'
+}
 function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
@@ -181,7 +239,7 @@ function Start-Process {
         $code = if ($global:UacCase -eq 'admin-failed') { 5 } else { 0 }
         return [pscustomobject]@{ExitCode=$code}
     }
-    $process = [pscustomobject]@{Id=4242; HasExited=($global:UacCase -eq 'watcher-failed' -and $FilePath -match 'wsl.exe$'); ExitCode=7}
+    $process = [pscustomobject]@{Id=4242; HasExited=($global:UacCase -eq 'watcher-failed' -and $FilePath -match 'wsl.exe$' -and $ArgumentList -match '--user"?\s+"?root'); ExitCode=0; Handle=1}
     $process | Add-Member ScriptMethod WaitForExit { param($Timeout); if ($Timeout) { return $this.HasExited }; $this.HasExited=$true }
     return $process
 }
@@ -190,22 +248,37 @@ function Stop-Process { param($Id); Record 'stop' @($Id) }
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('success', 'root-user', 'uac-declined', 'admin-failed', 'usb-declined', 'watcher-failed')) {
+    foreach ($case in @('success', 'old-default-other', 'old-default-install', 'root-user', 'grant-failed', 'usb-declined', 'watcher-failed')) {
         $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
         $code = $LASTEXITCODE
         $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
         $guiCalls = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'bash' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' })
-        if ($case -eq 'success') {
-            if ($code -ne 41 -or $guiCalls.Count -ne 1) { throw ('Full bootstrap GUI exit failed: ' + ($messages -join ' ') + ' TRACE: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
+        $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
+        if ($admin.Count) { throw ('Bootstrap requested a Windows administrator prompt itself (' + $case + '); only usbipd bind may: ' + ($admin | ConvertTo-Json -Compress -Depth 5)) }
+        if ($case -in @('success', 'old-default-other')) {
+            if ($code -ne 41 -or $guiCalls.Count -ne 1) { throw ('Full bootstrap GUI exit failed (' + $case + '): ' + ($messages -join ' ') + ' TRACE: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
             $gui = $guiCalls[0].Values
             if (($gui -join '|') -notmatch '\|--user\|fixture\|' -or ($gui -join ' ') -match '/AppRun') { throw 'Full EXE route still requests sudo/root GUI' }
-            $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
-            if ($admin.Count -ne 1 -or $admin[0].Values[1] -notmatch '"--user" "root"') { throw 'Full EXE route did not authorize root USB setup via UAC' }
+            $distro = if ($case -eq 'success') { 'Ubuntu-22.04' } else { 'NVIDIA-Workbench' }
+            if (($gui -join '|') -notmatch ('^--distribution\|' + [regex]::Escape($distro) + '\|')) { throw ('GUI ran in the wrong distribution: ' + ($gui -join '|')) }
+            $grant = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join '|') -match ('^--distribution\|' + [regex]::Escape($distro) + '\|--user\|root\|--exec\|bash\|.*\|1000\|1001\|once$') })
+            if ($grant.Count -ne 1) { throw ('Root USB grant did not run once in the user''s WSL session: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
+            $watch = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user"?\s+"?root' })
+            if ($watch.Count -ne 1 -or ([string]$watch[0].Values[1]) -notmatch ('^--distribution ' + [regex]::Escape($distro) + ' --user root --exec "bash" ')) { throw ('Root watcher options would not be parsed by wsl.exe: ' + ($watch | ConvertTo-Json -Compress -Depth 5)) }
             if (-not @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'rm' }).Count) { throw 'Full bootstrap did not clean the permission session' }
+            if ($case -eq 'old-default-other') {
+                $prompt = @($events | Where-Object { $_.Kind -eq 'prompt' })
+                if ($prompt.Count -ne 1 -or ($messages -join ' ') -notmatch 'Install Ubuntu 22.04') { throw 'Incompatible-default prompt did not offer a fresh Ubuntu install' }
+            }
+        } elseif ($case -eq 'old-default-install') {
+            $install = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -eq '--install --distribution Ubuntu-22.04' -and -not $_.Values[2] })
+            if ($code -ne 41 -or $install.Count -ne 1 -or $guiCalls.Count -ne 1) { throw ('Install choice did not install Ubuntu as this user and continue: ' + ($messages -join ' ') + ' TRACE: ' + ($events | ConvertTo-Json -Compress -Depth 5)) }
+            if (($guiCalls[0].Values -join '|') -notmatch '^--distribution\|Ubuntu-22.04\|') { throw 'GUI did not continue in the newly installed Ubuntu-22.04' }
         } else {
             if ($code -ne 1 -or $guiCalls.Count) { throw ('Full bootstrap failed to refuse ' + $case + ': ' + ($messages -join ' ')) }
             if ($case -eq 'root-user' -and @($events | Where-Object { $_.Kind -eq 'start' -or $_.Values -contains 'tar' }).Count) { throw 'Root default user was rejected too late' }
+            if ($case -eq 'grant-failed' -and @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user"?\s+"?root' }).Count) { throw 'Root watcher started after a failed USB grant' }
         }
     }
 } finally { Remove-Item -Recurse -Force $fixture }
-Write-Output 'PASS: PowerShell parse/helpers plus 8 full bootstrap scenarios (2 setup refusals, GUI exit, root-user refusal, UAC cancellation, admin failure, USB refusal, watcher failure); all WSL/USB/admin boundaries mocked.'
+Write-Output 'PASS: PowerShell parse/helpers, wsl.exe option-parser model, distro-name rule, password-free root USB grant/watcher, plus 9 full bootstrap scenarios (2 setup refusals, GUI exit, incompatible default + other distro, incompatible default + fresh Ubuntu install, root-user refusal, USB grant failure, USB refusal, watcher failure); all WSL/USB/admin boundaries mocked.'

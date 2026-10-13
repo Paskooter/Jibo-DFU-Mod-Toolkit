@@ -24,15 +24,45 @@ function ConvertTo-NativeArgumentLine([string[]]$Arguments) {
         '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
     }) -join ' ')
 }
+function Test-WslDistributionName([string]$Name) {
+    # WSL's own rule for registered names. wsl.exe reads its options with a plain
+    # whitespace split, so names outside this set could not be passed safely.
+    return ($Name -cmatch '^[A-Za-z0-9._-]{1,256}$')
+}
+function Get-WslRootArgumentLine([string]$Name, [string[]]$Command) {
+    # wsl.exe parses options before --exec itself, splitting on spaces/tabs with no
+    # quote handling: a quoted "--distribution" is not an option, and the whole line
+    # then runs through the distro's shell. Options stay bare; only the command after
+    # --exec is quoted, because wsl.exe passes that part through CommandLineToArgvW.
+    if (-not (Test-WslDistributionName $Name)) { throw 'Invalid WSL distribution name.' }
+    return ('--distribution {0} --user root --exec {1}' -f $Name, (ConvertTo-NativeArgumentLine $Command))
+}
 function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]$Gid, [string]$Helper, [string]$Session) {
     if ($Uid -notmatch '^[1-9][0-9]*$' -or $Gid -notmatch '^[0-9]+$') { throw 'USB access requires a non-root Linux user.' }
-    $wsl = "$env:SystemRoot\System32\wsl.exe"
-    $rootArgs = @('--distribution', $Name, '--user', 'root', '--exec', 'bash', $Helper, $Uid, $Gid, 'once')
-    Write-Host 'Windows will ask for administrator approval for Jibo USB access. The GUI will remain your normal Linux user.'
-    Invoke-ApprovedAdmin $wsl (ConvertTo-NativeArgumentLine $rootArgs)
+    if (-not (Test-WslDistributionName $Name)) { throw 'Invalid WSL distribution name.' }
+    # Root inside the user's own WSL distribution is available to wsl.exe without
+    # Windows elevation or a Linux password. An elevated wsl.exe would also be a
+    # different session that cannot see this user's distributions on some systems.
+    Write-Host 'Setting up Jibo USB access inside WSL (no password needed). The GUI will remain your normal Linux user.'
+    Native -Arguments @('--distribution', $Name, '--user', 'root', '--exec', 'bash', $Helper, $Uid, $Gid, 'once') | Out-Null
     Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'touch', '--', $Session) | Out-Null
-    $rootArgs[-1] = $Session
-    return (Start-Process -FilePath $wsl -ArgumentList (ConvertTo-NativeArgumentLine $rootArgs) -NoNewWindow -PassThru)
+    $wsl = "$env:SystemRoot\System32\wsl.exe"
+    $line = Get-WslRootArgumentLine -Name $Name -Command @('bash', $Helper, $Uid, $Gid, $Session)
+    return (Start-Process -FilePath $wsl -ArgumentList $line -NoNewWindow -PassThru)
+}
+function Install-UbuntuDistribution {
+    # Distributions are registered per Windows user: install as this user, not through
+    # an administrator prompt that may belong to another account and its WSL session.
+    # The console is shared, not captured, so Ubuntu's account prompts stay visible.
+    Write-Host 'Installing Ubuntu 22.04. Create a Linux username and password when Ubuntu asks. If it then shows a Linux prompt, type exit to continue here.'
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList '--install --distribution Ubuntu-22.04' -NoNewWindow -PassThru
+    $null = $p.Handle
+    $p.WaitForExit()
+    if ($p.ExitCode -ne 0) { throw "Ubuntu 22.04 setup exited with code $($p.ExitCode). Restart this app after any requested reboot." }
+    $uid = ''
+    try { $uid = Native -Arguments @('--distribution', 'Ubuntu-22.04', '--exec', 'id', '-u') } catch { $uid = '' }
+    if ($uid -notmatch '^[1-9][0-9]*$') { throw 'Finish the Ubuntu username/password setup, then reopen this app and choose Ubuntu-22.04.' }
+    return 'Ubuntu-22.04'
 }
 function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session) {
     # Never enter AppRun's Linux sudo/polkit branch from the Windows EXE.
@@ -75,9 +105,9 @@ try {
     }
     $available = @($rows | Where-Object { $_.Version -eq 2 })
     if ($available.Count -eq 0) {
-        if (-not (Confirm-Setup 'Install Ubuntu 22.04 for WSL 2? Approve the Windows prompt and create a Linux username/password when asked.')) { throw 'Distribution setup declined.' }
-        Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --distribution Ubuntu-22.04'
-        throw 'Finish Ubuntu first-run username/password setup, then reopen this app.'
+        if (-not (Confirm-Setup 'Install Ubuntu 22.04 for WSL 2? Create a Linux username/password when asked.')) { throw 'Distribution setup declined.' }
+        $Distro = Install-UbuntuDistribution
+        $available = @([pscustomobject]@{Name=$Distro; Version=2; Default=$false})
     }
     if ($Distro) {
         $selected = @($available | Where-Object { $_.Name -eq $Distro })
@@ -98,19 +128,23 @@ try {
     if (-not (Test-CompatibleDistribution $Distro)) {
         Write-Host "The prebuilt payload needs glibc 2.35+ (Ubuntu 22.04+); '$Distro' is incompatible." -ForegroundColor Yellow
         $compatible = @($available | Where-Object { Test-CompatibleDistribution $_.Name })
+        # Offer a fresh Ubuntu next to existing distros: a compatible distro may belong to another tool.
+        $canInstall = (@($rows | Where-Object { $_.Name -eq 'Ubuntu-22.04' }).Count -eq 0)
         if ($compatible.Count -gt 0) {
             for ($i=0; $i -lt $compatible.Count; $i++) { Write-Host "$($i+1). $($compatible[$i].Name)" }
-            $choice = Read-Host 'Choose a compatible distribution number, or press Enter to cancel'
+            if ($canInstall) { Write-Host "$($compatible.Count+1). Install Ubuntu 22.04 (recommended: a separate Linux for this toolkit)" }
+            $choice = Read-Host 'Choose a number, or press Enter to cancel'
             $number = 0
-            if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $compatible.Count) { throw 'Distribution selection cancelled.' }
-            $Distro = $compatible[$number-1].Name
+            $limit = $compatible.Count + [int]$canInstall
+            if (-not [int]::TryParse($choice, [ref]$number) -or $number -lt 1 -or $number -gt $limit) { throw 'Distribution selection cancelled.' }
+            if ($number -gt $compatible.Count) { $Distro = Install-UbuntuDistribution }
+            else { $Distro = $compatible[$number-1].Name }
         } else {
             if (-not (Confirm-Setup 'Install compatible Ubuntu 22.04? No compiler or toolkit build will be needed.')) { throw 'Compatible distribution setup declined.' }
-            Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --distribution Ubuntu-22.04'
-            throw 'Finish Ubuntu username/password setup, then reopen this app and choose Ubuntu-22.04.'
+            $Distro = Install-UbuntuDistribution
         }
     }
-    if ($Distro -match '["\r\n]') { throw 'Invalid distribution name.' }
+    if (-not (Test-WslDistributionName $Distro)) { throw 'Invalid distribution name.' }
     Native -Arguments @('--distribution', $Distro, '--exec', 'test', '-d', '/mnt/wslg') | Out-Null
     $arch = Native -Arguments @('--distribution', $Distro, '--exec', 'uname', '-m')
     if ($arch -ne 'x86_64') { throw 'This Windows x64 download needs an x86_64 WSL distribution.' }
@@ -143,7 +177,9 @@ try {
         $linuxSource = Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'wslpath', '-u', '--', $source)
         Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'cp', '--', $linuxSource, "$target/$helper") | Out-Null
     }
-    Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', "$target/jibo-dfu", '--self-check') | Write-Host
+    # The receipt is for diagnostics; Native still throws with the full output on failure.
+    Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', "$target/jibo-dfu", '--self-check') | Out-Null
+    Write-Host 'Toolkit self-check passed.'
     $session = "$target/.usb-$([guid]::NewGuid().ToString('N'))"
     $permissions = $null
     $monitor = $null

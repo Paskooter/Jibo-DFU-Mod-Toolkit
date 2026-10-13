@@ -1,5 +1,14 @@
 # WIN-UAC report — implementation verified locally; Windows CI rerun required
 
+> **Superseded in part (owner hardware test of `ad4e33b`):** the elevated WSL
+> USB-access step failed on Windows with exit 127. The launcher passed quoted
+> options to `wsl.exe`, which parses its own options without quote handling, so the
+> line ran as a shell command in the default distro. That step no longer uses UAC:
+> root inside the user's own distro needs no elevation or Linux password. The
+> launcher also offers a fresh Ubuntu 22.04 when the default distro is incompatible.
+> See `docs/release.md` (Windows authorization). Items below that describe a
+> "UAC-gated" WSL root step or two UAC prompts describe the superseded design.
+
 ## Disposition
 
 - **VERIFIED:** The EXE bootstrap has a password-free WSL root USB-preparation path gated by Windows UAC, and launches the frozen GUI explicitly as the selected non-root Linux user. Synthetic tests execute the actual bootstrap/wrappers and reject refusal/failure paths.
