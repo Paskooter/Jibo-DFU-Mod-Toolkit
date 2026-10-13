@@ -69,4 +69,5 @@ jobs:
         run: |
           ext4_prefix=$(brew --prefix e2fsprogs)
           export PATH="$ext4_prefix/sbin:$ext4_prefix/bin:$PATH"
+          python3 -m unittest discover -s tests -p test_calibration.py -v
           python3 -m unittest discover -s tests -p test_updates.py -v

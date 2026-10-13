@@ -322,6 +322,46 @@ def build_factory_fresh_var(stock, backup, destination):
         raise
 
 
+def build_calibrated_partition(stock, backup, destination, partition):
+    """Preserve a conditional item in a NEW rootfs/skills copy, when backed up.
+
+    The caller must bind the backup to the connected robot before calling. No
+    file is invented when the partition backup or supported item is absent.
+    """
+    keys = {"rootfs": "touchscreen", "skills": "factory_record"}
+    if partition not in keys:
+        raise ImageError("Conditional calibration is supported only for rootfs and skills.")
+    stock, destination = Path(stock), Path(destination)
+    if stock.is_symlink() or not stock.is_file() or destination.exists() or destination.is_symlink():
+        raise ImageError("Calibration inputs must be regular files and the output must be new.")
+    key = keys[partition]
+    status = "not preserved (no backup of that partition)"
+    raw = None
+    if backup is not None:
+        backup = Path(backup)
+        if backup.is_symlink() or not backup.is_file():
+            raise ImageError("The calibration backup must be a regular partition image.")
+    try:
+        with tempfile.TemporaryDirectory(prefix="jibo-partition-calibration-") as temporary:
+            if backup is not None:
+                spec, raw, status, metadata = _calibration_item(backup, key, temporary)
+            if raw is not None:
+                shutil.copyfile(stock, destination)
+                destination.chmod(0o600)
+                _put_calibration_item(destination, spec, raw, metadata, temporary)
+                _check_ext4(destination)
+                if destination.stat().st_size != stock.stat().st_size:
+                    raise ImageError("The calibrated partition image changed length.")
+                status = "restored"
+        selected = destination if raw is not None else stock
+        return {"image": str(selected), "sha256": sha256_file(selected),
+                "calibration_files": [spec.image_path] if raw is not None else [],
+                "calibration_status": {key: status}}
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
 def _copy_for_edit(source, destination):
     source = Path(source).expanduser().resolve()
     destination = Path(destination).expanduser().resolve()

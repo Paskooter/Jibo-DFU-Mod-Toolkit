@@ -1180,6 +1180,107 @@ class FactoryFreshVarTests(unittest.TestCase):
             self.assertEqual(before, toolkit.images.sha256_file(backup))
 
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
+                         "e2fsprogs required")
+    def test_fresh_v3_conditional_partitions_preserve_existing_items_only(self):
+        from calibration_support import PATHS, TEMP_DIR, POINTERCAL, FACTORY_RECORD, make_image
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
+            root = Path(temp)
+            for partition, key, content in (("rootfs", "touchscreen", POINTERCAL),
+                                             ("skills", "factory_record", FACTORY_RECORD)):
+                stock = make_image(root, partition + "-stock.ext4", {})
+                metadata = {PATHS[key]: {"mode": "0100640", "uid": "0", "gid": "10"}}
+                backup = make_image(root, partition + "-backup.ext4", {PATHS[key]: content}, metadata)
+                before = toolkit.images.sha256_file(backup)
+                built = toolkit.images.build_calibrated_partition(stock, backup, root / (partition + "-fresh.ext4"), partition)
+                self.assertEqual(toolkit.images._extract(built["image"], PATHS[key], root / "out"), content)
+                self.assertEqual(toolkit.images._file_metadata(built["image"], PATHS[key]),
+                                 {"mode": "0100640", "uid": "0", "gid": "10"})
+                self.assertEqual(built["calibration_status"][key], "restored")
+                self.assertEqual(Path(built["image"]).stat().st_size, stock.stat().st_size)
+                self.assertEqual(before, toolkit.images.sha256_file(backup))
+                missing = toolkit.images.build_calibrated_partition(stock, stock, root / (partition + "-absent.ext4"), partition)
+                self.assertEqual(missing["calibration_status"][key], "absent")
+                self.assertEqual(Path(missing["image"]), stock)
+                unchecked = toolkit.images.build_calibrated_partition(stock, None, root / (partition + "-unchecked.ext4"), partition)
+                self.assertEqual(unchecked["calibration_status"][key], "not preserved (no backup of that partition)")
+                self.assertIsNone(toolkit.images._extract(unchecked["image"], PATHS[key], root / "out", optional=True))
+
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
+                         "e2fsprogs required")
+    def test_fresh_v3_flash_uses_same_robot_partition_backups_before_any_write(self):
+        from calibration_support import FILES, PATHS, TEMP_DIR, IDENTITY, POINTERCAL, FACTORY_RECORD, make_image
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
+            root = Path(temp)
+            folder = root / "release/flash_jibo/output/images"
+            folder.mkdir(parents=True)
+            for filename in updates.IMAGE_NAMES:
+                (folder / filename).write_bytes(b"package placeholder")
+            stock = make_image(root, "stock.ext4", {PATHS[k]: FILES[k] for k in
+                                                    ("left", "right", "inter_camera")})
+            saved_var = make_image(root, "var-backup.ext4", {**{PATHS[k]: v for k, v in FILES.items()},
+                                                            "/jibo/identity.json": IDENTITY})
+            saved_root = make_image(root, "rootfs-backup.ext4", {PATHS["touchscreen"]: POINTERCAL})
+            saved_skills = make_image(root, "skills-backup.ext4", {PATHS["factory_record"]: FACTORY_RECORD})
+            tag = "serial-sha256:" + "a" * 64
+            backups = root / "backups"
+            for name, image in (("rootfsA", saved_root), ("skills", saved_skills)):
+                directory = backups / ("partition-backup-zzz-" + name)
+                directory.mkdir(parents=True)
+                shutil.copyfile(image, directory / "partition.img")
+                (directory / "backup-manifest.json").write_text(json.dumps({
+                    "kind": "jibo-partition-backup", "device_tag": tag, "partition": name,
+                    "size_bytes": image.stat().st_size, "sha256": toolkit.images.sha256_file(image)}))
+            # An older same-robot backup without pointercal must not hide a later valid one.
+            older = backups / "partition-backup-aaa-rootfsA"
+            older.mkdir()
+            shutil.copyfile(stock, older / "partition.img")
+            (older / "backup-manifest.json").write_text(json.dumps({
+                "kind": "jibo-partition-backup", "device_tag": tag, "partition": "rootfsA",
+                "size_bytes": stock.stat().st_size, "sha256": toolkit.images.sha256_file(stock)}))
+            # A valid but OTHER robot's rootfsA must never be selected.
+            foreign = backups / "partition-backup-rootfsA"
+            foreign.mkdir()
+            shutil.copyfile(stock, foreign / "partition.img")
+            (foreign / "backup-manifest.json").write_text(json.dumps({
+                "kind": "jibo-partition-backup", "device_tag": "serial-sha256:" + "b" * 64,
+                "partition": "rootfsA", "size_bytes": stock.stat().st_size,
+                "sha256": toolkit.images.sha256_file(stock)}))
+            capacities = {name: stock.stat().st_size for name in toolkit.UPDATE_ORDER}
+            before = [toolkit.images.sha256_file(p) for p in (saved_var, saved_root, saved_skills)]
+            backup = {"image": str(saved_var), "sha256": before[0], "manifest": "synthetic-manifest.json"}
+            operation = root / "operation"
+            operation.mkdir()
+            written = []
+
+            def transfer(argv, **_kwargs):
+                name = argv[argv.index("-a") + 1]
+                image = argv[argv.index("-D") + 1]
+                key = "touchscreen" if name in ("rootfsA", "rootfsB") else "factory_record" if name == "skills" else None
+                if key:
+                    self.assertEqual(toolkit.images._extract(image, PATHS[key], root / "out"),
+                                     POINTERCAL if key == "touchscreen" else FACTORY_RECORD)
+                written.append(name)
+
+            with patch.object(toolkit, "BACKUP_ROOT", backups), \
+                    patch.object(toolkit, "devices", return_value=[{"port": "1-1", "state": "dfu"}]), \
+                    patch.object(toolkit, "_dfu_context", return_value=("1-1", list(toolkit.UPDATE_ORDER), tag, "")), \
+                    patch.object(toolkit, "_read_gpt_capacities", return_value=capacities), \
+                    patch.object(toolkit, "_new_operation_dir", return_value=operation), \
+                    patch.object(toolkit, "backup_var", return_value=backup), \
+                    patch.object(toolkit, "_select_factory_calibration_backup", return_value=backup), \
+                    patch.object(toolkit.updates, "prepare_compact_images", return_value=compact_set(
+                        {name: stock for name in toolkit.UPDATE_ORDER})), \
+                    patch.object(toolkit, "run_with_progress", side_effect=transfer), \
+                    patch.object(toolkit, "run", return_value=""), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = toolkit.flash_update(root / "release", False, port="1-1", dfu_util="dfu-util",
+                                              confirmation="FLASH UPDATE", fresh_with_calibration=True)
+            manifest = json.loads(Path(result["manifest"]).read_text())
+            for key in ("imu", "audio", "touchscreen", "factory_record"):
+                self.assertEqual(manifest["factory_calibration"]["status"][key], "restored")
+            self.assertEqual(written, list(toolkit.UPDATE_ORDER))
+            self.assertEqual(before, [toolkit.images.sha256_file(p) for p in (saved_var, saved_root, saved_skills)])
+
+    @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
                          "e2fsprogs is required for factory var tests")
     def test_factory_fresh_var_keeps_only_robot_identity_and_camera_calibration(self):
         with tempfile.TemporaryDirectory() as temp:

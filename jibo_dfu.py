@@ -1884,6 +1884,61 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
                             baseline_hash=state["baseline_sha256"])
 
 
+def _saved_calibration_partitions(device_tag, names, capacities):
+    """Enumerate verified LOCAL inputs for a flash, not the backup capture flow."""
+    if not _has_unique_device_tag(device_tag) or not BACKUP_ROOT.is_dir():
+        return
+    for manifest in sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json"), reverse=True):
+        try:
+            if manifest.is_symlink() or manifest.parent.is_symlink():
+                continue
+            record = json.loads(manifest.read_text())
+            tags = set(record.get("device_tags", ()))
+            tags.add(record.get("device_tag"))
+            name = record.get("partition")
+            if record.get("kind") != "jibo-partition-backup" or device_tag not in tags or \
+                    name not in names or record.get("size_bytes") != capacities[name]:
+                continue
+            image = manifest.parent / "partition.img"
+            if image.is_symlink() or not image.is_file() or image.stat().st_size != capacities[name]:
+                continue
+            digest = _sha256_file(image)
+            if digest != record.get("sha256"):
+                continue
+            yield {"image": str(image), "sha256": digest, "manifest": str(manifest)}
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+
+def _prepare_partition_calibration(prepared, capacities, device_tag, workdir):
+    """Use existing same-robot partition backups; do not capture or alter them."""
+    groups = (("rootfs", "touchscreen", ("rootfsA", "rootfsB")),
+              ("skills", "factory_record", ("skills",)))
+    report = {"status": {}, "sources": {}, "files": []}
+    for partition, key, names in groups:
+        selected = None
+        for backup in _saved_calibration_partitions(device_tag, names, capacities):
+            if selected is None:
+                selected = backup
+            with tempfile.TemporaryDirectory(prefix="calibration-check-", dir=workdir) as temp:
+                _spec, raw, _status, _metadata = images._calibration_item(backup["image"], key, temp)
+            if raw is not None:
+                selected = backup
+                break
+        for name in names:
+            built = images.build_calibrated_partition(
+                prepared[name], selected["image"] if selected else None,
+                Path(workdir) / ("factory-calibrated-" + name + ".ext4"), partition)
+            prepared[name] = Path(built["image"])
+            report["status"].update(built["calibration_status"])
+            for path in built["calibration_files"]:
+                if path not in report["files"]:
+                    report["files"].append(path)
+        if selected:
+            report["sources"][partition] = selected
+    return report
+
+
 def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, resume_from=None,
                  verify_readback=False, fresh_with_calibration=False):
@@ -1921,7 +1976,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             resume_from, package, preserve_var, capacities, partitions)
         legacy_resume = resume_record.get("_legacy_full_image_resume", False)
     var_policy = ("preserve current configuration" if preserve_var else
-                  "fresh package var with matching robot identity and camera calibration"
+                  "fresh package var with matching robot identity and camera calibration; IMU/audio when supported and present"
                   if fresh_with_calibration else
                   "replace with package var image (fresh setup and lost local settings)")
     plan = {"package": str(package.source), "version": package.version,
@@ -1952,7 +2007,7 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     if preserve_var:
         print("Var data stays in place; first boot expands rootfs, services, and skills.")
     elif fresh_with_calibration:
-        print("Fresh var will include this robot's identity and camera calibration, with OOBE mode and no old Wi-Fi or user data.")
+        print("Fresh var will include this robot's identity and camera calibration, plus supported saved IMU/audio files. Missing or unsupported items are reported; old Wi-Fi and user data are not copied.")
     if resume_record is None:
         print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
     else:
@@ -2004,6 +2059,11 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
             missing_candidates = [name for name in partitions if name not in prepared]
             if missing_candidates:
                 raise DfuError("The update package did not prepare: " + ", ".join(missing_candidates))
+            record["partition_calibration"] = _prepare_partition_calibration(
+                prepared, capacities, device_tag, prepared_dir)
+            _private_write(record_path, record)
+            for key, status in record["partition_calibration"]["status"].items():
+                print("Calibration {}: {}".format(key, status), flush=True)
             transfer_sizes = {}
             for name in partitions:
                 candidate_path = Path(prepared[name])
@@ -2069,8 +2129,15 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     "files": calibrated["calibration_files"],
                     "identity_restored": True, "mode": "oobe",
                     "camera_matches_stock": calibrated.get("camera_matches_stock"),
+                    "status": {**calibrated.get("calibration_status", {}),
+                               **record["partition_calibration"]["status"]},
+                    "removed_distortion_caches": calibrated.get("removed_distortion_caches", []),
+                    "partition_files": record["partition_calibration"]["files"],
                     "candidate_sha256": calibrated["sha256"]}
                 _private_write(record_path, record)
+                for key, status in calibrated.get("calibration_status", {}).items():
+                    if key not in ("touchscreen", "factory_record"):
+                        print("Calibration {}: {}".format(key, status), flush=True)
                 if calibrated.get("camera_matches_stock"):
                     print("The selected var backup's camera files match this package's defaults; "
                           "the saved files and robot identity were copied into fresh var.", flush=True)
