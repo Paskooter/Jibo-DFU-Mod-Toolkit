@@ -56,6 +56,24 @@ class FlowTests(unittest.TestCase):
                 else:
                     self.assertEqual(result, "Submitted for review")
                     self.assertEqual(len(self.client.requests), 1)
+    def test_decline_against_real_loopback_client_makes_zero_http_requests(self):
+        from test_calibration_client import Server, Ed25519PrivateKey
+        import os
+        import jibo_calibration_client as wire
+        if Ed25519PrivateKey is None:
+            self.skipTest("optional cryptography unavailable")
+        with Server() as server, patch.dict(os.environ, JIBO_CALIBRATION_ORIGIN="http://127.0.0.1:" + str(server.http.server_port)):
+            self.api.calibration_client_factory = lambda: wire.CalibrationClient(self.api.BACKUP_ROOT / "calibration", core=core)
+            for answer in (None, "local"):
+                with tempfile.TemporaryDirectory() as directory:
+                    self.api.BACKUP_ROOT = Path(directory)
+                    def select(*args, **kwargs):
+                        self.assertEqual(server.requests, [])
+                        return answer
+                    session = self.flow.SharingFlow(self.api, select)
+                    self.assertEqual(session.on_verified_var_backup_ready(self.backup, self.api.calibration_identity()), "Not shared")
+                    self.assertEqual(server.requests, [])
+
     def test_one_callback_per_operation_failure_is_nonblocking(self):
         count = []
         session = self.flow.SharingFlow(self.api, lambda *a, **k: count.append(1) or "share")
