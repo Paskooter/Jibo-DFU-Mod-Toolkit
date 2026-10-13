@@ -197,7 +197,7 @@ class CalibrationClient:
             if length is not None and (not length.isdigit() or int(length) > MAX_BODY):
                 raise ClientError("Calibration response exceeds the size limit.")
             chunks, size = [], 0
-            while True:
+            while not response.isclosed():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ClientError("Calibration request timed out.")
