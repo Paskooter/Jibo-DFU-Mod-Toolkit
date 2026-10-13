@@ -51,8 +51,8 @@ class HookTests(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
-    def run_hook(self, script=None, **changes):
-        result = subprocess.run([shutil.which("busybox"), "sh", str(script or ASSETS / "boot-network-status.sh")],
+    def run_hook(self, **changes):
+        result = subprocess.run([shutil.which("busybox"), "sh", str(ASSETS / "boot-network-status.sh")],
                                 env=dict(self.env, **changes), capture_output=True,
                                 text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -112,12 +112,7 @@ class HookTests(unittest.TestCase):
 
     def test_completed_ota_history_does_not_disable_the_feature(self):
         (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": None, "items": [{}]}))
-        trace = self.root / "hook.trace"
-        script = self.root / "traced-hook.sh"
-        script.write_text((ASSETS / "boot-network-status.sh").read_text().replace(
-            'apply_status >/dev/null 2>&1',
-            '{ set -x; apply_status; set +x; } >"' + str(trace) + '" 2>&1'))
-        calls = self.run_hook(script=script)
+        calls = self.run_hook()
         if len(calls) != 1:
             # Keep CI failures attributable to the actual guard/host boundary,
             # rather than an uninformative mount-count mismatch.
@@ -127,8 +122,7 @@ class HookTests(unittest.TestCase):
                                    env=self.env, capture_output=True, text=True, timeout=10)
             self.fail("Completed OTA was not mounted: " +
                       (self.var / "boot-network-status.log").read_text() +
-                      f"guard exit={guard.returncode}, stdout={guard.stdout!r}, stderr={guard.stderr!r}\n" +
-                      trace.read_text())
+                      f"guard exit={guard.returncode}, stdout={guard.stdout!r}, stderr={guard.stderr!r}")
 
     def test_malformed_ota_state_is_fail_closed(self):
         (self.root / "var/jibo/ota.json").write_text("invalid JSON")
