@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 import ssl
 from pathlib import Path
 import subprocess
@@ -19,6 +20,7 @@ class FakeFlashServer:
     def __init__(self, *, tls=False, tls_hostname=None):
         self.files = {}
         self.requests = []
+        self.tcp_nodelay = []
         self.redirects = {}
         self.statuses = {}
         self.responses = {}  # Per-path scripted (status, Retry-After) errors.
@@ -43,6 +45,14 @@ class FakeFlashServer:
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
+            def setup(self):
+                super().setup()
+                # Deadline probes control delay explicitly, not through the
+                # host's Nagle/delayed-ACK packet-coalescing policy.
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                fixture.tcp_nodelay.append(self.connection.getsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_NODELAY))
+
             def log_message(self, *args):
                 pass
 

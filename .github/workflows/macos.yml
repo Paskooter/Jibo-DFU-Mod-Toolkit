@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install native dependencies
         run: |
-          brew install python@3.12 dfu-util libusb e2fsprogs openssl@3
+          brew install --overwrite python@3.12 dfu-util libusb e2fsprogs openssl@3
           "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$RUNNER_TEMP/portability-venv"
           "$RUNNER_TEMP/portability-venv/bin/python" -m pip install pytest pillow
           printf '%s\n' "$RUNNER_TEMP/portability-venv/bin" >> "$GITHUB_PATH"
