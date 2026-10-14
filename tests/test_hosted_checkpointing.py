@@ -64,6 +64,21 @@ class CheckpointTests(HostedFixture):
         path = Path(h.download_image(self.row['id'], dest_dir=self.dest))
         self.assertEqual(h.c.hash_file(path), self.row['sha256'])
 
+    def test_byte_threshold_checkpoints_before_elapsed_interval(self):
+        checkpoints = []
+        real_atomic = h._atomic
+        def atomic(path, raw):
+            if path.name.endswith('.part.json'):
+                checkpoints.append(json.loads(raw)['bytes'])
+            return real_atomic(path, raw)
+        self.assertEqual(h._CHECKPOINT_BYTES, 8 * 1024 * 1024)
+        self.assertEqual(h._CHECKPOINT_SECONDS, 2.0)
+        with patch.object(h, '_CHECKPOINT_BYTES', 65536), \
+                patch.object(h, '_CHECKPOINT_SECONDS', float('inf')), \
+                patch.object(h, '_atomic', side_effect=atomic):
+            h.download_image('latest', dest_dir=self.dest)
+        self.assertEqual(checkpoints, [0, 65536, 131072, self.row['size']])
+
     def test_elapsed_interval_checkpoints_before_byte_threshold(self):
         real_atomic = h._atomic
         checkpoints = []
