@@ -245,8 +245,8 @@ def _url(url):
     if not isinstance(url, str):
         raise HostedError('signature', 'Hosted URL must be text')
     parsed = urllib.parse.urlsplit(url)
-    origin = urllib.parse.urlsplit(ORIGIN)
-    if parsed.scheme != origin.scheme or parsed.netloc != origin.netloc or parsed.username or \
+    origins = c.CONTRACT['image_origins'] if ORIGIN == c.CONTRACT['origin'] and parsed.path.startswith('/flash/images/') else (ORIGIN,)
+    if not any(url.startswith(origin + '/') for origin in origins) or parsed.username or \
             parsed.password or parsed.query or parsed.fragment or '%' in parsed.path or \
             not parsed.path.startswith('/flash/') or any(part in ('..', '.') for part in parsed.path.split('/')) or \
             not re.fullmatch(r'/[a-zA-Z0-9._/-]+', parsed.path) or '//' in parsed.path:
@@ -257,6 +257,10 @@ def _url(url):
 class _Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _url(newurl)  # Refuse before urllib opens the target.
+        source, target = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if (source.scheme, source.netloc) != (target.scheme, target.netloc) or \
+                source.path.startswith('/flash/images/') and not target.path.startswith('/flash/images/'):
+            raise HostedError('signature', 'Hosted redirect must remain on the request origin and image route')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -462,7 +466,8 @@ def _index(raw, cache, *, freshness=True):
             _url(row.get(field))
         if c.utc(row.get('released_at')) > now + c.CONTRACT['limits']['future_clock_skew_seconds']:
             c.fail('Future image release')
-        if row['url'] != ORIGIN + '/flash/images/' + row['id'] + '/' + row['sha256'] + '.tar.bz2' or row['manifest_url'] != ORIGIN + '/flash/manifests/' + row['id'] + '.json':
+        image_origins = c.CONTRACT['image_origins'] if ORIGIN == c.CONTRACT['origin'] else (ORIGIN,)
+        if row['url'] not in {origin + '/flash/images/' + row['id'] + '/' + row['sha256'] + '.tar.bz2' for origin in image_origins} or row['manifest_url'] != ORIGIN + '/flash/manifests/' + row['id'] + '.json':
             c.fail('URL disagrees with signed image id/hash')
         c.text(row.get('notes'), 'notes', 2048)
         c.text(row.get('acceptance_scope'), 'acceptance scope', 2048)

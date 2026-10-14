@@ -59,7 +59,8 @@ def check_schema(value, schema, path='$', *, origin=None):
                 raise ValueError(path + ': invalid base64') from exc
             if base64.b64encode(raw).decode() != value or (fmt == 'ed25519-signature' and len(raw) != 64):
                 raise ValueError(path + ': noncanonical base64/signature')
-        if fmt == 'image-url' and not re.fullmatch(re.escape(origin) + r'/flash/images/[a-z0-9][a-z0-9.-]{0,95}/[0-9a-f]{64}\.tar\.bz2', value):
+        image_origins = CONTRACT['image_origins'] if origin == CONTRACT['origin'] else (origin,)
+        if fmt == 'image-url' and not any(re.fullmatch(re.escape(pinned) + r'/flash/images/[a-z0-9][a-z0-9.-]{0,95}/[0-9a-f]{64}\.tar\.bz2', value) for pinned in image_origins):
             raise ValueError(path + ': unsafe image URL')
         if fmt == 'manifest-url' and not re.fullmatch(re.escape(origin) + r'/flash/manifests/[a-z0-9][a-z0-9.-]{0,95}\.json', value):
             raise ValueError(path + ': unsafe manifest URL')
