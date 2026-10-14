@@ -189,7 +189,7 @@ class FakeFlashServer:
         self.thread.join()
         self.tmp.cleanup()
 
-    def make_image(self, image_id='synthetic-13', *, sequence=1, expires=None):
+    def make_image(self, image_id='synthetic-13', *, sequence=1, expires=None, member_size=32768):
         """Canonical A2 wire fixture; dummy bytes, never hardware firmware."""
         import io
         import os
@@ -199,7 +199,7 @@ class FakeFlashServer:
         identity = {'id': image_id, 'base_release': '13.0.0-test-only',
                     'components': {k: '0.0.0-test-only' for k in ('os', 'services', 'oobe-config', '@be/be')},
                     'profile': 'jibo-t124-stock-gpt-13-v1', 'strategy': 'compact-prefix-v1'}
-        content = {role: os.urandom(32768) for role in ('rootfs', 'services', 'skills', 'var')}
+        content = {role: os.urandom(member_size) for role in ('rootfs', 'services', 'skills', 'var')}
         members = [{'name': f'phoenix-{image_id}/flash_jibo/output/images/{role}.ext4',
                     'role': role, 'size': len(raw), 'sha256': self.sha(raw),
                     'geometry': {'block_size': 4096, 'block_count': len(raw)//4096, 'features': []}}
