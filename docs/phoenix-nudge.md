@@ -1,7 +1,7 @@
 # Optional Phoenix connection path
 
-The toolkit finishes mode and Wi-Fi setup on its own. It does **not** repoint
-Jibo or enroll him in Phoenix. After a successful int-developer mode and Wi-Fi
+The toolkit finishes mode and Wi-Fi setup on its own. It does **not** connect
+Jibo to Phoenix or enroll him. After a successful int-developer mode and Wi-Fi
 setup, an optional card explains the separate jibo.io console steps, without
 another confirmation or popup.
 

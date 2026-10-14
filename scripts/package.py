@@ -122,6 +122,11 @@ def main():
         "jibo_dfu_pipeline.py": ROOT / "jibo_dfu_pipeline.py",
         "jibo_images.py": ROOT / "jibo_images.py",
         "jibo_updates.py": ROOT / "jibo_updates.py",
+        "jibo_hosted_updates.py": ROOT / "jibo_hosted_updates.py",
+        "jibo_flash_policy.py": ROOT / "jibo_flash_policy.py",
+        "jibo_calibration_client.py": ROOT / "jibo_calibration_client.py",
+        "jibo_flash_contract.py": ROOT / "jibo_flash_contract.py",
+        "jibo_flash_schema.py": ROOT / "jibo_flash_schema.py",
         "jibo_tui.py": ROOT / "jibo_tui.py",
         "jibo_gui.py": ROOT / "jibo_gui.py",
         "jibo_gui_core.py": ROOT / "jibo_gui_core.py",
@@ -148,6 +153,9 @@ def main():
     except (ValueError, KeyError, TypeError) as exc:
         parser.error("Boot network status assets are invalid: " + str(exc))
     data["assets/boot-network-status/manifest.json"] = manifest_raw
+    for name in ('contract-v1.json', 'trust.json', 'flash-release-public.pem'):
+        key = 'assets/flash-images/' + name
+        data[key] = _read_file(parser, key, ROOT / key)
 
     for name, content in data.items():
         if b"PRIVATE KEY-----" in content:

@@ -57,6 +57,7 @@ class UpdatePackage:
     images: Mapping[str, Path]
     archive_members: Mapping[str, str]
     version: str | None = None
+    phoenix: dict | None = None
 
     @property
     def is_archive(self) -> bool:
@@ -81,7 +82,7 @@ def _image_set(directory: Path) -> dict[str, Path] | None:
             continue
         paths[filename] = candidate
     # A usable base flash contains all four vendor images.  The caller can
-    # preserve var without sending var.ext4, but it must be present to support
+    # var.ext4 must be present to support
     # an explicit fresh/OOBE install.
     if {"rootfs.ext4", "services.ext4", "skills.ext4"}.issubset(paths):
         return paths
@@ -195,7 +196,13 @@ def validate_package(path: str | os.PathLike[str]) -> UpdatePackage:
     source = selected.resolve()
     if source.is_file() and source.name.lower().endswith(ARCHIVE_SUFFIXES):
         members = _archive_images(source)
-        return UpdatePackage(source, source.stem, {}, members, _version_from_name(source.name))
+        import jibo_flash_contract as contract
+        try:
+            phoenix = contract.verify_archive(source)
+        except (contract.ContractError, OSError, tarfile.TarError) as exc:
+            raise UpdateError('Phoenix package authentication refused: ' + str(exc)) from exc
+        return UpdatePackage(source, source.stem, {}, members,
+                             phoenix['id'] if phoenix else _version_from_name(source.name), phoenix)
     if not source.is_dir():
         raise UpdateError("Update package does not exist or is not a directory/archive: " + str(source))
     found = _find_images_directory(source)
@@ -205,7 +212,43 @@ def validate_package(path: str | os.PathLike[str]) -> UpdatePackage:
     for filename, image in paths.items():
         if image.stat().st_size <= 0:
             raise UpdateError("Update image is empty: " + str(image))
-    return UpdatePackage(source, source.name, paths, {}, _version_from_name(source.name))
+    phoenix = _directory_phoenix(source, images_dir, paths)
+    return UpdatePackage(source, source.name, paths, {},
+                         phoenix['id'] if phoenix else _version_from_name(source.name), phoenix)
+
+
+def _directory_phoenix(source, images_dir, paths):
+    import jibo_flash_contract as contract
+    markers = []
+    for current, directories, files in os.walk(source):
+        current = Path(current)
+        if len(current.relative_to(source).parts) > 6:
+            directories[:] = []
+            continue
+        directories[:] = [name for name in directories if not (current / name).is_symlink()]
+        if 'phoenix-flash.json' in files:
+            markers.append(current / 'phoenix-flash.json')
+        if len(markers) > 1:
+            raise UpdateError('Duplicate recognized Phoenix metadata in extracted package')
+    if not markers:
+        return None
+    marker = markers[0]
+    if marker.is_symlink() or not marker.is_file() or not 0 < marker.stat().st_size <= contract.ENVELOPE_MAX:
+        raise UpdateError('Unsafe Phoenix metadata in extracted package')
+    try:
+        raw = marker.read_bytes()
+        metadata = contract.validate_metadata(contract.verify_envelope(raw, 'metadata'))
+        base = marker.parent
+        if base.name != 'phoenix-' + metadata['id'] or images_dir != base / 'flash_jibo/output/images':
+            contract.fail('Extracted metadata path disagrees with signed image id')
+        for member in metadata['members']:
+            image = paths.get(contract.ROLES[member['role']])
+            if image is None or image.is_symlink() or image.stat().st_size != member['size'] or \
+                    contract.hash_file(image) != member['sha256']:
+                contract.fail('Extracted hosted filesystem does not match signed member pin', 'hash')
+        return {**metadata, '_metadata_sha256': hashlib.sha256(raw).hexdigest()}
+    except (contract.ContractError, OSError) as exc:
+        raise UpdateError('Extracted Phoenix package authentication refused: ' + str(exc)) from exc
 
 
 def discover_packages(folder: str | os.PathLike[str]) -> list[UpdatePackage]:
@@ -341,10 +384,8 @@ def parse_gpt_prefix(data: bytes, sector_size: int = 512) -> dict[str, int]:
     return capacities
 
 
-def _required_capacities(capacities: Mapping[str, int], preserve_var: bool) -> dict[str, int]:
-    required = {"rootfsA", "rootfsB", "services", "skills"}
-    if not preserve_var:
-        required.add("var")
+def _required_capacities(capacities: Mapping[str, int]) -> dict[str, int]:
+    required = {"rootfsA", "rootfsB", "services", "skills", "var"}
     missing = sorted(name for name in required if name not in capacities)
     if missing:
         raise UpdateError("DFU did not report byte capacities for: " + ", ".join(missing) + ".")
@@ -619,13 +660,14 @@ def _copy_sparse(source: Path, destination: Path) -> None:
         os.fsync(dst.fileno())
 
 
-def _extract_archive_images(package: UpdatePackage, destination: Path) -> dict[str, Path]:
+def _extract_archive_images(package: UpdatePackage, destination: Path, source_stream=None) -> dict[str, Path]:
     extracted: dict[str, Path] = {}
     try:
         # Stream through compressed tar once. Random extraction from a .bz2
         # tar repeatedly decompresses earlier members and can take minutes.
         requested = {member_name: filename for filename, member_name in package.archive_members.items()}
-        with tarfile.open(package.source, mode="r|*") as archive:
+        opener = {"fileobj": source_stream} if source_stream is not None else {"name": package.source}
+        with tarfile.open(mode="r|*", **opener) as archive:
             for member in archive:
                 filename = requested.get(member.name)
                 if filename is None:
@@ -642,6 +684,12 @@ def _extract_archive_images(package: UpdatePackage, destination: Path) -> dict[s
                     shutil.copyfileobj(stream, output, 1024 * 1024)
                 if target.stat().st_size != member.size:
                     raise UpdateError("Extracted update image size changed: " + filename)
+                if package.phoenix:
+                    import jibo_flash_contract as contract
+                    expected = next(item for item in package.phoenix['members']
+                                    if contract.ROLES[item['role']] == filename)
+                    if member.size != expected['size'] or contract.hash_file(target) != expected['sha256']:
+                        raise UpdateError('Extracted hosted image changed from signed metadata pin')
                 extracted[filename] = target
                 if len(extracted) == len(requested):
                     break
@@ -655,31 +703,46 @@ def _extract_archive_images(package: UpdatePackage, destination: Path) -> dict[s
 
 
 @contextmanager
-def _package_images(package: UpdatePackage) -> Iterator[Mapping[str, Path]]:
+def _package_images(package: UpdatePackage, workdir=None) -> Iterator[Mapping[str, Path]]:
     if not package.is_archive:
         yield package.images
         return
-    with tempfile.TemporaryDirectory(prefix="jibo-update-package-") as temporary:
-        yield _extract_archive_images(package, Path(temporary))
+    with tempfile.TemporaryDirectory(prefix="jibo-update-package-",
+                                     dir=workdir if package.phoenix else None) as temporary:
+        if package.phoenix:
+            import jibo_flash_contract as contract
+            # One O_NOFOLLOW descriptor for both authentication and extraction:
+            # a replaced pathname cannot select another payload between phases.
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+            with os.fdopen(os.open(package.source, flags), 'rb') as stream:
+                try:
+                    metadata = package.phoenix
+                    contract.verify_archive(stream, {**metadata, 'unpacked_size': contract.validate_members(metadata),
+                                                     'embedded_metadata_sha256': metadata['_metadata_sha256']})
+                except contract.ContractError as exc:
+                    raise UpdateError('Hosted source changed before extraction: ' + str(exc)) from exc
+                stream.seek(0)
+                yield _extract_archive_images(package, Path(temporary), stream)
+        else:
+            yield _extract_archive_images(package, Path(temporary))
 
 
 def prepare_images(
     package: UpdatePackage | str | os.PathLike[str],
-    preserve_var: bool,
     capacities: Mapping[str, int],
     workdir: str | os.PathLike[str],
 ) -> dict[str, Path]:
     """Create exact-capacity ext4 images for a later DFU writer.
 
     The returned mapping is keyed by DFU alternate name. ``rootfs.ext4`` is
-    prepared once and mapped to both rootfsA and rootfsB.  ``var`` is omitted
-    entirely when ``preserve_var`` is true.  All writes occur under ``workdir``;
+    prepared once and mapped to both rootfsA and rootfsB. All five partition
+    targets are always prepared. All writes occur under ``workdir``;
     the original package files are read-only inputs and never modified.
     """
 
     if not isinstance(package, UpdatePackage):
         package = validate_package(package)
-    targets = _required_capacities(capacities, preserve_var)
+    targets = _required_capacities(capacities)
     selected_destination = Path(workdir).expanduser()
     if selected_destination.is_symlink():
         raise UpdateError("Prepared image work directory cannot be a symbolic link.")
@@ -688,9 +751,7 @@ def prepare_images(
     if destination.is_symlink() or not destination.is_dir():
         raise UpdateError("Prepared image work directory must be a real directory.")
 
-    selected_filenames = ["rootfs.ext4", "services.ext4", "skills.ext4"]
-    if not preserve_var:
-        selected_filenames.append("var.ext4")
+    selected_filenames = ["rootfs.ext4", "services.ext4", "skills.ext4", "var.ext4"]
     with _package_images(package) as image_paths:
         missing = [filename for filename in selected_filenames if filename not in image_paths]
         if missing:
@@ -701,8 +762,7 @@ def prepare_images(
             "services.ext4": targets["services"],
             "skills.ext4": targets["skills"],
         }
-        if not preserve_var:
-            file_targets["var.ext4"] = targets["var"]
+        file_targets["var.ext4"] = targets["var"]
         created: list[Path] = []
         try:
             for filename in selected_filenames:
@@ -753,8 +813,7 @@ def prepare_images(
                       "rootfsB": prepared["rootfs.ext4"],
                       "services": prepared["services.ext4"],
                       "skills": prepared["skills.ext4"]}
-            if not preserve_var:
-                result["var"] = prepared["var.ext4"]
+            result["var"] = prepared["var.ext4"]
             return result
         except BaseException:
             for output in created:
@@ -764,20 +823,19 @@ def prepare_images(
 
 def prepare_compact_images(
     package: UpdatePackage | str | os.PathLike[str],
-    preserve_var: bool,
     capacities: Mapping[str, int],
     workdir: str | os.PathLike[str],
 ) -> CompactImageSet:
     """Copy the stock ext4 prefixes without expanding them to GPT capacity.
 
     Raw DFU writes are sector bounded.  The target release's init hook grows
-    these filesystems on first boot; a preserved var needs the package's stock
-    resize script so the caller can safely rearm that hook after the writes.
+    these filesystems on first boot, including the fresh var. Validate the
+    package's resize script and boot hook before returning any write candidates.
     """
 
     if not isinstance(package, UpdatePackage):
         package = validate_package(package)
-    targets = _required_capacities(capacities, False)
+    targets = _required_capacities(capacities)
     selected_destination = Path(workdir).expanduser()
     if selected_destination.is_symlink():
         raise UpdateError("Prepared image work directory cannot be a symbolic link.")
@@ -787,7 +845,7 @@ def prepare_compact_images(
         raise UpdateError("Prepared image work directory must be a real directory.")
 
     selected_filenames = ["rootfs.ext4", "services.ext4", "skills.ext4", "var.ext4"]
-    with _package_images(package) as image_paths:
+    with _package_images(package, workdir=destination) as image_paths:
         missing = [filename for filename in selected_filenames if filename not in image_paths]
         if missing:
             raise UpdateError("The package cannot perform a compact first-boot update; missing: " +
@@ -821,8 +879,7 @@ def prepare_compact_images(
                 shutil.copyfile(source, output)
                 if output.stat().st_size != source_size:
                     raise UpdateError("Compact image copy has an unexpected size: " + filename)
-                if filename != "var.ext4" or not preserve_var:
-                    prepared[filename] = output
+                prepared[filename] = output
 
             stock_script = _read_ext4_file(Path(image_paths["var.ext4"]),
                                            "/etc/first_boot_resize",
@@ -839,8 +896,7 @@ def prepare_compact_images(
                 "services": prepared["services.ext4"],
                 "skills": prepared["skills.ext4"],
             }
-            if not preserve_var:
-                files["var"] = prepared["var.ext4"]
+            files["var"] = prepared["var.ext4"]
             return CompactImageSet(files, stock_script)
         except BaseException:
             for output in created:

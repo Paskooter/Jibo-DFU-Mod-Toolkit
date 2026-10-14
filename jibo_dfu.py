@@ -22,6 +22,9 @@ import time
 import jibo_dfu_bounded as bounded
 import jibo_images as images
 import jibo_updates as updates
+import jibo_flash_policy as flash_policy
+import jibo_hosted_updates as hosted
+import jibo_calibration_client as calibration_service
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1299,112 +1302,6 @@ def _package_content_sha256(package):
     return digest.hexdigest()
 
 
-def _validate_resume_manifest(manifest_path, package, preserve_var,
-                              capacities, partitions):
-    """Load a failed preserve-var attempt and validate its resumable prefix."""
-    supplied = Path(manifest_path).expanduser()
-    if supplied.is_symlink() or not supplied.is_file():
-        raise DfuError("Resume record is missing or is a symbolic link: " + str(supplied))
-    if supplied.stat().st_size > 1_048_576:
-        raise DfuError("Resume record is too large to validate safely.")
-    try:
-        old = json.loads(supplied.read_text())
-    except (OSError, ValueError) as exc:
-        raise DfuError("Could not read the resume record: " + str(exc)) from exc
-    if not isinstance(old, dict) or old.get("schema") != 1 or \
-            old.get("kind") != "jibo-full-flash-update":
-        raise DfuError("Resume record is not a supported full-flash update manifest.")
-    if old.get("status") not in {"failed", "writing", "preparing", "backing up var"}:
-        raise DfuError("Only an incomplete or failed update can be resumed.")
-    if not preserve_var or old.get("var_policy") != "preserve current configuration":
-        raise DfuError("Resume currently requires the original preserve-var policy.")
-    recorded_package = old.get("package")
-    try:
-        if not isinstance(recorded_package, str) or \
-                Path(recorded_package).expanduser().resolve() != Path(package.source).resolve():
-            raise DfuError("The selected package path does not match the failed update record.")
-    except OSError as exc:
-        raise DfuError("Could not validate the package path in the resume record.") from exc
-    accepted_versions = {value for value in
-                         (package.version, package.name, Path(package.source).name,
-                          Path(package.source).stem) if value}
-    if old.get("version") not in accepted_versions:
-        raise DfuError("The selected package version does not match the failed update record.")
-    expected_plan = [{"name": name, "bytes": capacities[name]} for name in partitions]
-    if old.get("partitions") != expected_plan:
-        raise DfuError("The failed update plan does not match the live GPT and selected policy.")
-    writes = old.get("writes")
-    if not isinstance(writes, list) or len(writes) > len(partitions):
-        raise DfuError("The failed update record has an invalid write list.")
-    clean_writes = []
-    allowed_statuses = {"write started", "writing bounded skills chunks", "verified",
-                        "transfer complete", "verification failed", "failed"}
-    for index, entry in enumerate(writes):
-        if not isinstance(entry, dict) or index >= len(partitions) or \
-                entry.get("partition") != partitions[index]:
-            raise DfuError("The failed update record is not a contiguous partition prefix.")
-        name = partitions[index]
-        candidate_hash = entry.get("candidate_sha256")
-        if not isinstance(candidate_hash, str) or not _SHA256_RE.fullmatch(candidate_hash):
-            raise DfuError("The failed update record has an invalid candidate hash for " + name + ".")
-        if entry.get("size_bytes") != capacities[name] or entry.get("status") not in allowed_statuses:
-            raise DfuError("The failed update record has invalid size or status for " + name + ".")
-        clean = {"partition": name, "candidate_sha256": candidate_hash,
-                 "size_bytes": capacities[name], "status": entry["status"]}
-        if old.get("image_strategy") == "compact-prefix-v1":
-            transfer_bytes = entry.get("transfer_bytes")
-            if not isinstance(transfer_bytes, int) or transfer_bytes <= 0 or \
-                    transfer_bytes > capacities[name] or transfer_bytes % SKILLS_SECTOR_SIZE:
-                raise DfuError("The failed compact update record has an invalid transfer size for " + name + ".")
-            clean["transfer_bytes"] = transfer_bytes
-        readback_hash = entry.get("readback_sha256")
-        if readback_hash is not None:
-            if not isinstance(readback_hash, str) or not _SHA256_RE.fullmatch(readback_hash):
-                raise DfuError("The failed update record has an invalid readback hash for " + name + ".")
-            clean["readback_sha256"] = readback_hash
-        if clean["status"] == "verified" and readback_hash != candidate_hash:
-            raise DfuError("The failed update record marks " + name + " verified with a different hash.")
-        clean_writes.append(clean)
-
-    backups = old.get("backups")
-    backup = backups.get("var") if isinstance(backups, dict) else None
-    if not isinstance(backup, dict):
-        raise DfuError("The failed update has no reusable var rollback backup.")
-    image_value, manifest_value, backup_hash = (backup.get("image"), backup.get("manifest"),
-                                                 backup.get("sha256"))
-    if not isinstance(image_value, str) or not isinstance(manifest_value, str) or \
-            not isinstance(backup_hash, str) or not _SHA256_RE.fullmatch(backup_hash):
-        raise DfuError("The failed update's var backup reference is incomplete.")
-    image = Path(image_value).expanduser()
-    backup_manifest = Path(manifest_value).expanduser()
-    if image.is_symlink() or not image.is_file() or image.stat().st_size != EXPECTED_VAR_SIZE or \
-            backup_manifest.is_symlink() or not backup_manifest.is_file():
-        raise DfuError("The saved var rollback image or manifest is missing or invalid.")
-    try:
-        backup_record = json.loads(backup_manifest.read_text())
-    except (OSError, ValueError) as exc:
-        raise DfuError("Could not read the saved var backup manifest.") from exc
-    if not isinstance(backup_record, dict) or backup_record.get("kind") != "jibo-var-backup" or \
-            backup_record.get("partition") != "var" or \
-            backup_record.get("size_bytes") != EXPECTED_VAR_SIZE or \
-            backup_record.get("sha256") != backup_hash or \
-            Path(str(backup_record.get("image", ""))).name != image.name:
-        raise DfuError("The saved var backup manifest does not match the failed update record.")
-    if _sha256_file(image) != backup_hash:
-        raise DfuError("The saved var rollback image hash does not match its manifest.")
-    if backup.get("size_bytes", EXPECTED_VAR_SIZE) != EXPECTED_VAR_SIZE:
-        raise DfuError("The saved var rollback image has an unexpected size.")
-    if backup.get("device_tag") and backup_record.get("device_tag") and \
-            backup["device_tag"] != backup_record["device_tag"]:
-        raise DfuError("The saved var backup identity does not match the failed update record.")
-    result = dict(old)
-    result["writes"] = clean_writes
-    result["backups"] = {"var": {**backup, "image": str(image.resolve()),
-                                  "manifest": str(backup_manifest.resolve()),
-                                  "sha256": backup_hash}}
-    result["_manifest_path"] = str(supplied.resolve())
-    result["_legacy_full_image_resume"] = old.get("image_strategy") != "compact-prefix-v1"
-    return result
 
 
 _STOCK_13_RESIZE_COMMANDS = [
@@ -1432,102 +1329,10 @@ _STOCK_13_RESIZE_COMMANDS = [
 ]
 
 
-def _rearm_preserved_var_resize_script(stock_script, resize_tag):
-    """Tag the stock 13 resize body while leaving preserved var data intact."""
-    if not isinstance(resize_tag, str) or not re.fullmatch(r"[0-9a-f]{32}", resize_tag):
-        raise DfuError("The first-boot resize tag is invalid.")
-    try:
-        source = stock_script.decode("ascii")
-    except (AttributeError, UnicodeDecodeError) as exc:
-        raise DfuError("The package first-boot resize script is not plain ASCII.") from exc
-    commands = [line.strip() for line in source.splitlines()
-                if line.strip() and not line.lstrip().startswith("#")]
-    if not source.startswith("#!/bin/sh\n") or commands != _STOCK_13_RESIZE_COMMANDS[1:]:
-        raise DfuError("Compact preserve-var mode supports only the known safe 13.0 stock resize script; "
-                       "this package's script differs or may format a partition.")
-
-    # The robot's var partition is preserved, so do not unmount or fsck it.
-    # The target release stock body is retained for the four filesystems this
-    # update writes: active/inactive rootfs, services, and skills.
-    body = [line for line in commands[5:-2]
-            if line not in ("/bin/umount /var",
-                            "/usr/sbin/e2fsck -f /dev/mmcblk0p5",
-                            "/usr/sbin/resize2fs /dev/mmcblk0p5")]
-    body = [line.replace("e2fsck -f ", "e2fsck -f -p ") + ' || [ "$?" -eq 1 ]'
-            if line in ("/usr/sbin/e2fsck -f /dev/mmcblk0p4",
-                        "/usr/sbin/e2fsck -f /dev/mmcblk0p6") else line
-            for line in body]
-    lines = [
-        "#!/bin/sh",
-        "tag=" + resize_tag,
-        "marker=/var/etc/first_boot_resize.done",
-        'if [ "$(cat "$marker" 2>/dev/null)" = "$tag" ]',
-        "then",
-        '    echo "First boot filesystem configuration already complete"',
-        "    exit 0",
-        "fi",
-        "set -e",
-        *body,
-        'printf \'%s\\n\' "$tag" > "$marker"',
-        "",
-    ]
-    replacement = ("\n".join(lines)).encode("ascii")
-    if len(replacement) > FILE_LEVEL_MAX_BYTES:
-        raise DfuError("The rearmed first-boot resize script exceeds the file mailbox limit.")
-    return replacement
 
 
-def _preflight_resize_script_write(dfu_util, port, replacement, workdir):
-    """Confirm the file loader and current var script can accept this replacement."""
-    _file_loader_context(port, dfu_util, ("var",), True)
-    metadata = _stat_partition_file_rpc(dfu_util, port, "var", "/etc/first_boot_resize",
-                                        workdir, quiet=True)
-    current = _read_partition_file_rpc(dfu_util, port, "var", "/etc/first_boot_resize",
-                                       workdir, quiet=True)
-    if len(current) != metadata["size_bytes"]:
-        raise DfuError("The current first-boot resize script changed during preflight.")
-    if not current.startswith(b"#!/bin/sh\n") or b"/var/etc/first_boot_resize.done" not in current or \
-            b"resize2fs" not in current:
-        raise DfuError("The preserved var /etc/first_boot_resize file is not a recognized shell resize script.")
-    if len(replacement) > metadata["allocated_bytes"]:
-        raise DfuError("The rearmed first-boot resize script needs {} bytes but the preserved file has only {} "
-                       "bytes allocated.".format(len(replacement), metadata["allocated_bytes"]))
-    return metadata
 
 
-def _prepare_preserved_var_resize_image(dfu_util, port, replacement, workdir,
-                                        current_image=None):
-    """Patch the live var image when its legacy file layout cannot use file RPC."""
-    workdir = Path(workdir)
-    candidate = workdir / "preserved-var.img"
-    if current_image is None:
-        before_hash = _upload_partition(dfu_util, port, "var", EXPECTED_VAR_SIZE, candidate)
-    else:
-        source = Path(current_image)
-        if source.is_symlink() or not source.is_file() or source.stat().st_size != EXPECTED_VAR_SIZE:
-            raise DfuError("The saved current var image is missing or has the wrong size.")
-        shutil.copyfile(source, candidate)
-        before_hash = _sha256_file(candidate)
-    try:
-        images._replay_journal_on_copy(candidate)
-        before_metadata = images._file_metadata(candidate, "/etc/first_boot_resize")
-        current = images._extract(candidate, "/etc/first_boot_resize",
-                                  workdir / "current-resize-script")
-        if not current.startswith(b"#!/bin/sh\n") or \
-                b"/var/etc/first_boot_resize.done" not in current or b"resize2fs" not in current:
-            raise DfuError("The preserved var resize script is not recognized; var was not changed.")
-        images._replace_file(candidate, "/etc/first_boot_resize", replacement, workdir)
-        images._check_ext4(candidate)
-        after_metadata = images._file_metadata(candidate, "/etc/first_boot_resize")
-        if after_metadata != before_metadata:
-            raise DfuError("The offline resize script edit changed its ownership or permissions.")
-        return {"image": str(candidate), "size_bytes": EXPECTED_VAR_SIZE,
-                "before_sha256": before_hash, "candidate_sha256": _sha256_file(candidate),
-                "script_sha256": hashlib.sha256(replacement).hexdigest(),
-                "permissions": after_metadata}
-    except (DfuError, images.ImageError, OSError):
-        candidate.unlink(missing_ok=True)
-        raise
 
 
 def _backup_manifest(directory, port, image_path, digest, operations=None, device_tag=None,
@@ -1623,6 +1428,32 @@ def _select_factory_calibration_backup(device_tag, preferred, stock_var):
                    "calibration. No partition write was attempted.")
 
 
+def _resolve_factory_fresh_var(device_tag, backup, stock, destination, port, dfu_util):
+    """Prefer the robot's verified local set; remote measurement fallback needs local identity."""
+    try:
+        source = _select_factory_calibration_backup(device_tag, backup, stock)
+    except DfuError:
+        if not calibration_service.CALIBRATION_SHARING_AVAILABLE:
+            raise DfuError("This Jibo's calibration was not found in a local backup. "
+                           "Nothing was written to the robot.") from None
+        from jibo_calibration_flow import active
+        session = active()
+        if session is None:
+            raise  # Scripted/CLI write approval does not authorize a network lookup.
+        from jibo_calibration_restore import local_identity, build_fresh_var
+        _verify_var_backup_for_robot(backup, device_tag)
+        local_identity(backup["image"])
+        identity = calibration_identity(port, dfu_util)
+        download = session.lookup_for_fresh_setup(identity)
+        if download is None:
+            raise DfuError("No calibration source confirmed. No partition write was attempted.")
+        if calibration_identity(port, dfu_util) != identity:
+            raise DfuError("Connected robot changed; no downloaded calibration was used.")
+        candidate = build_fresh_var(stock, backup["image"], destination, download.files)
+        return backup, candidate, download
+    return source, images.build_factory_fresh_var(stock, source["image"], destination), None
+
+
 def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
     """Associate a stable loader identity only after a full-image hash match."""
     if not _has_unique_device_tag(device_tag):
@@ -1643,6 +1474,15 @@ def _bind_verified_backup_identity(backup, device_tag, expected_sha256):
 
 
 def _prepare_current_and_baseline(dfu_util, port, device_tag, directory):
+    identity = _calibration_capture_identity(port, dfu_util)
+    result = _prepare_current_and_baseline_without_event(dfu_util, port, device_tag, directory)
+    _calibration_backup_event({"status": "existing verified backup reused" if not result["baseline_matches_current"] else "backup complete",
+                               "image": str(result["baseline"]), "sha256": result["baseline_sha256"]},
+                              identity, port, dfu_util)
+    return result
+
+
+def _prepare_current_and_baseline_without_event(dfu_util, port, device_tag, directory):
     current = Path(directory) / "current-var.img"
     current_hash = _upload_var(dfu_util, port, current)
     baseline = (_find_verified_backup(device_tag) if _has_unique_device_tag(device_tag) else
@@ -1711,7 +1551,86 @@ def _raise_live_operation_error(directory, operation, state, error):
     raise DfuError(details) from error
 
 
+def calibration_identity(port=None, dfu_util=None):
+    """Read an exact, unanimous CID from the selected supported loader. Never normalize."""
+    selected_port, _, _, output = _dfu_context(port, dfu_util or tool("dfu-util"), include_output=True)
+    serials = re.findall(r'serial="([^"]*)"', output)
+    if (not serials or len(set(serials)) != 1 or not re.fullmatch(r"[0-9a-f]{32}", serials[0]) or
+            serials[0] == "0" * 32):
+        raise DfuError("Database unavailable: this recovery loader has no supported hardware ID.")
+    return {"cid_serial": serials[0], "usb_port": selected_port}
+
+
+def calibration_partition_images(identity):
+    """Only hash/size-verified partition backups already bound to this exact CID."""
+    cid = identity.get("cid_serial")
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9a-f]{32}", cid) or cid == "0" * 32:
+        return {}
+    tag = "serial-sha256:" + hashlib.sha256(cid.encode("ascii")).hexdigest()
+    selected = {}
+    if not BACKUP_ROOT.is_dir() or BACKUP_ROOT.is_symlink():
+        return selected
+    manifests = sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json"),
+                       key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    for manifest in manifests:
+        try:
+            if manifest.is_symlink() or manifest.parent.is_symlink() or manifest.stat().st_size > 16384:
+                continue
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+            partition = record.get("partition")
+            destination = "rootfs_image" if partition in ("rootfsA", "rootfsB", "rootfs") else "skills_image" if partition == "skills" else None
+            tags = set(record.get("device_tags", ())) | {record.get("device_tag")}
+            if (destination is None or destination in selected or record.get("kind") != "jibo-partition-backup" or
+                    record.get("status") == "failed" or tag not in tags):
+                continue
+            image = manifest.parent / Path(record.get("image", "partition.img")).name
+            if (image.is_symlink() or not image.is_file() or image.stat().st_size <= 0 or
+                    image.stat().st_size != record.get("size_bytes") or _sha256_file(image) != record.get("sha256")):
+                continue
+            selected[destination] = str(image)
+        except (OSError, ValueError, TypeError):
+            continue
+    return selected
+
+
+def _calibration_capture_identity(port, dfu_util):
+    if not calibration_service.CALIBRATION_SHARING_AVAILABLE:
+        return None
+    try:
+        from jibo_calibration_flow import active
+    except ImportError:
+        return None  # Optional sharing must not break older offline packaged installs.
+    session = active()
+    if session is None or getattr(session, "seen", False):
+        return None
+    try:
+        return calibration_identity(port, dfu_util)
+    except Exception:
+        session.outcome = "Not shared"
+        session.detail = "Backup saved; calibration sharing unavailable (no supported hardware ID)."
+        return None
+
+
+def _calibration_backup_event(backup, identity, port, dfu_util):
+    if not calibration_service.CALIBRATION_SHARING_AVAILABLE or identity is None:
+        return
+    try:
+        if calibration_identity(port, dfu_util) != identity:
+            return
+        from jibo_calibration_flow import on_verified_var_backup_ready
+        on_verified_var_backup_ready(backup, identity)
+    except Exception:
+        pass  # A sharing/UI/ID failure cannot invalidate a verified backup.
+
+
 def backup_var(port=None, dfu_util=None, out=None, refresh=False, expected_identity=None):
+    identity = _calibration_capture_identity(port, dfu_util)
+    result = _backup_var_without_event(port, dfu_util, out, refresh, expected_identity)
+    _calibration_backup_event(result, identity, port, dfu_util)
+    return result
+
+
+def _backup_var_without_event(port=None, dfu_util=None, out=None, refresh=False, expected_identity=None):
     dfu_util = dfu_util or tool("dfu-util")
     port, _, device_tag = _dfu_context(port, dfu_util)
     existing = (_find_verified_backup(device_tag)
@@ -1884,23 +1803,121 @@ def write_var(image, port=None, dfu_util=None, out=None, confirmation=None):
                             baseline_hash=state["baseline_sha256"])
 
 
-def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
+def _saved_calibration_partitions(device_tag, names, capacities):
+    """Enumerate verified LOCAL inputs for a flash, not the backup capture flow."""
+    if not _has_unique_device_tag(device_tag) or not BACKUP_ROOT.is_dir():
+        return
+    for manifest in sorted(BACKUP_ROOT.glob("partition-backup-*/backup-manifest.json"), reverse=True):
+        try:
+            if manifest.is_symlink() or manifest.parent.is_symlink():
+                continue
+            record = json.loads(manifest.read_text())
+            tags = set(record.get("device_tags", ()))
+            tags.add(record.get("device_tag"))
+            name = record.get("partition")
+            if record.get("kind") != "jibo-partition-backup" or device_tag not in tags or \
+                    name not in names or record.get("size_bytes") != capacities[name]:
+                continue
+            image = manifest.parent / "partition.img"
+            if image.is_symlink() or not image.is_file() or image.stat().st_size != capacities[name]:
+                continue
+            digest = _sha256_file(image)
+            if digest != record.get("sha256"):
+                continue
+            yield {"image": str(image), "sha256": digest, "manifest": str(manifest)}
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+
+def _prepare_partition_calibration(prepared, capacities, device_tag, workdir):
+    """Use existing same-robot partition backups; do not capture or alter them."""
+    groups = (("rootfs", "touchscreen", ("rootfsA", "rootfsB")),
+              ("skills", "factory_record", ("skills",)))
+    report = {"status": {}, "sources": {}, "files": []}
+    for partition, key, names in groups:
+        selected = None
+        for backup in _saved_calibration_partitions(device_tag, names, capacities):
+            if selected is None:
+                selected = backup
+            with tempfile.TemporaryDirectory(prefix="calibration-check-", dir=workdir) as temp:
+                _spec, raw, _status, _metadata = images._calibration_item(backup["image"], key, temp)
+            if raw is not None:
+                selected = backup
+                break
+        for name in names:
+            built = images.build_calibrated_partition(
+                prepared[name], selected["image"] if selected else None,
+                Path(workdir) / ("factory-calibrated-" + name + ".ext4"), partition)
+            prepared[name] = Path(built["image"])
+            report["status"].update(built["calibration_status"])
+            for path in built["calibration_files"]:
+                if path not in report["files"]:
+                    report["files"].append(path)
+        if selected:
+            report["sources"][partition] = selected
+    return report
+
+
+def _confirm_update_plan(plan, confirmation):
+    if callable(confirmation):
+        return bool(confirmation(plan))
+    if confirmation is None:
+        return _ask_confirmation('Flash this package?', UPDATE_CONFIRMATION)
+    if confirmation != UPDATE_CONFIRMATION:
+        raise DfuError("For an update write, --confirm must be exactly 'FLASH UPDATE'.")
+    return True
+
+
+def _hosted_space_precheck(metadata, out, var_capacity):
+    import jibo_flash_contract
+    required = jibo_flash_contract.workspace_bytes(metadata, var_capacity)
+    volumes = {}
+    for selected, budget in ((Path(out).expanduser().absolute() if out else BACKUP_ROOT,
+                               required), (BACKUP_ROOT, var_capacity + 1024**3)):
+        if any(parent.is_symlink() for parent in (selected, *selected.parents)):
+            raise DfuError('Hosted operation/backup paths cannot contain symlinks')
+        existing = selected
+        while not existing.exists():
+            existing = existing.parent
+        device = existing.stat().st_dev
+        prior = volumes.get(device)
+        if prior is None or budget > prior[1]:
+            volumes[device] = (existing, budget)
+    for path, budget in volumes.values():
+        if shutil.disk_usage(path).free < budget:
+            raise DfuError('Not enough free space for hosted private preparation/rollback: ' + str(budget) + ' bytes required')
+
+
+
+
+def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, resume_from=None,
-                 verify_readback=False, fresh_with_calibration=False):
-    """Install compact official ext4 prefixes and resize them on first boot."""
-    if preserve_var and fresh_with_calibration:
-        raise DfuError("Preserving var and creating fresh var with calibration are separate choices.")
+                 verify_readback=False, unsafe_without_calibration=False):
+    """Install fresh userspace filesystems, optionally restoring this robot's calibration."""
+    if resume_from is not None:
+        raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup; "
+                       "select the package again for a new reviewed flash. No USB action was attempted.")
+    if var_policy not in flash_policy.POLICIES:
+        raise DfuError("Choose keep-calibration or without-calibration.")
+    fresh_with_calibration = var_policy == flash_policy.KEEP
+    if not fresh_with_calibration and not dry_run and unsafe_without_calibration is not True:
+        raise DfuError("Flashing without calibration requires explicit unsafe confirmation.")
+    package = _call_with_progress(lambda: updates.validate_package(package_path),
+                                  "Checking the selected update package")
+    phoenix = getattr(package, 'phoenix', None)
+    if phoenix:
+        verify_readback = True
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
         raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
     if selected["state"] == "rcm":
         raise DfuError("The robot is in RCM/APX. Enter DFU with ShofEL before installing an update.")
-    package = _call_with_progress(lambda: updates.validate_package(package_path),
-                                  "Checking the selected update package")
     port, names, device_tag, alt_output = _dfu_context(
         selected["port"], dfu_util, include_output=True)
-    partitions = [name for name in UPDATE_ORDER if name != "var" or not preserve_var]
+    if phoenix and not _has_unique_device_tag(device_tag):
+        raise DfuError('Hosted writes require the current loader with stable eMMC identity; no USB write attempted')
+    partitions = list(UPDATE_ORDER)
     skills_aliases = [name for name in names if name.startswith("skills-")]
     if "skills" not in names and not skills_aliases:
         raise DfuError("This DFU loader does not expose the skills partition or its bounded skills-### alternatives.")
@@ -1910,95 +1927,43 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
     capacities = _read_gpt_capacities(dfu_util, port, names)
     skills_chunks = _validate_skills_chunk_alternatives(
         capacities["skills"], names, alt_output)
-    resume_record = None
-    resume_path = None
-    legacy_resume = False
-    if resume_from is not None:
-        if not preserve_var:
-            raise DfuError("Resume currently requires --preserve-var.")
-        resume_path = Path(resume_from).expanduser().resolve()
-        resume_record = _validate_resume_manifest(
-            resume_from, package, preserve_var, capacities, partitions)
-        legacy_resume = resume_record.get("_legacy_full_image_resume", False)
-    var_policy = ("preserve current configuration" if preserve_var else
-                  "fresh package var with matching robot identity and camera calibration"
-                  if fresh_with_calibration else
-                  "replace with package var image (fresh setup and lost local settings)")
     plan = {"package": str(package.source), "version": package.version,
             "usb_port": port, "var_policy": var_policy,
+            "calibration_choice": flash_policy.KEEP_LABEL if fresh_with_calibration else flash_policy.WITHOUT_LABEL,
+            "calibration_detail": flash_policy.KEEP_DETAIL if fresh_with_calibration else flash_policy.WITHOUT_DETAIL,
             "image_strategy": "compact-prefix-v1",
-            "filesystem_resize": ("Transfer compact stock image prefixes; first boot expands rootfs, services, and skills while var data is preserved." if preserve_var else
-                                   "Transfer compact stock image prefixes; target init expands the filesystems at first boot."),
+            "filesystem_resize": "Transfer compact image prefixes; target init expands the filesystems at first boot.",
             "rollback_backup": "var only; other partitions are restored from the package",
             "partitions": [{"name": name, "bytes": capacities[name]} for name in partitions],
             "skills_transfer": ("compact official image prefix through bounded DFU writes"
                                 if skills_chunks else "compact official image prefix through its named DFU alternative"),
             "readback_policy": "source image prefix readback" if verify_readback else "DFU transfer completion",
             "status": "plan only" if dry_run else "awaiting confirmation"}
-    if resume_record is not None:
-        plan["resume_from"] = str(resume_path)
-        plan["previously_attempted_partitions"] = [entry["partition"]
-                                                    for entry in resume_record["writes"]]
-        plan["resume_check"] = ("reflash compact prefixes from the beginning; prior full-partition hashes are not comparable"
-                                 if legacy_resume else
-                                 "check prior compact prefixes; skip only on candidate hash match")
+    if phoenix:
+        plan['phoenix'] = {'schema': 1, 'id': phoenix['id'], 'profile': phoenix['profile'],
+                           'strategy': phoenix['strategy'], 'base_release': phoenix['base_release'],
+                           'components': phoenix['components'],
+                           'metadata_sha256': phoenix['_metadata_sha256'],
+                           'var_policy': var_policy, 'image_notice': flash_policy.PHOENIX_LINE,
+                           'scope': 'Userspace filesystems only; no boot0/boot1, BCT, GPT, fuses or universal brick recovery'}
+        _hosted_space_precheck(phoenix, out, capacities['var'])
     if dry_run:
         return plan
-    print("\nOfficial full-flash update plan:")
+    print("\nFull-flash update plan:")
     print(json.dumps(plan, indent=2))
-    print("This writes compact stock image prefixes; first boot expands the flashed filesystems, then the robot resets.")
-    if verify_readback:
-        print("Each written source prefix will be read back and compared with the package image.")
-    if preserve_var:
-        print("Var data stays in place; first boot expands rootfs, services, and skills.")
-    elif fresh_with_calibration:
-        print("Fresh var will include this robot's identity and camera calibration, with OOBE mode and no old Wi-Fi or user data.")
-    if resume_record is None:
-        print("Only var gets a rollback backup. A fresh var replaces current settings with the package image.")
-    else:
-        print("Resume uses the saved var backup and checks prior partition writes before deciding to skip or rewrite them.")
-    if callable(confirmation):
-        if not confirmation(plan):
-            return {**plan, "status": "cancelled"}
-    elif confirmation is None:
-        if not _ask_confirmation("Flash this package?", UPDATE_CONFIRMATION):
-            return {**plan, "status": "cancelled"}
-    elif confirmation != UPDATE_CONFIRMATION:
-        raise DfuError("For an update write, --confirm must be exactly 'FLASH UPDATE'.")
+    if not _confirm_update_plan(plan, confirmation):
+        return {**plan, 'status': 'cancelled'}
 
-    directory = _new_operation_dir(out, "flash-update-resume" if resume_record else "flash-update")
+    directory = _new_operation_dir(out, "flash-update")
     record_path = directory / "update-manifest.json"
     record = {"schema": 1, "kind": "jibo-full-flash-update", "created_utc": _utc_now(),
               **plan, "status": "preparing", "backups": {}, "writes": []}
-    if preserve_var:
-        record["resize_tag"] = ((resume_record.get("resize_tag") if resume_record and not legacy_resume else None)
-                                or secrets.token_hex(16))
-    try:
-        record["package_sha256"] = _package_content_sha256(package)
-        if resume_record is not None:
-            previous_package_hash = resume_record.get("package_sha256")
-            if previous_package_hash is not None and \
-                    previous_package_hash != record["package_sha256"]:
-                raise DfuError("The selected package content does not match the failed update record.")
-            record["resumed_from"] = str(resume_path)
-            record["backups"] = resume_record["backups"]
-            if legacy_resume:
-                record["legacy_full_image_attempts"] = resume_record["writes"]
-                record["legacy_resume_reflashed_compact"] = True
-            else:
-                record["writes"] = resume_record["writes"]
-            record["resume_started_utc"] = _utc_now()
-    except (DfuError, OSError) as exc:
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-        raise
+    record["package_sha256"] = _package_content_sha256(package)
     _private_write(record_path, record)
     try:
         with tempfile.TemporaryDirectory(prefix="prepared-", dir=directory) as prepared_dir:
             compact_images = _call_with_progress(
-                lambda: updates.prepare_compact_images(package, preserve_var, capacities, prepared_dir),
+                lambda: updates.prepare_compact_images(package, capacities, prepared_dir),
                 "Preparing compact partition images on this computer")
             prepared = dict(compact_images.images)
             missing_candidates = [name for name in partitions if name not in prepared]
@@ -2016,51 +1981,29 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                                    .format(name))
                 transfer_sizes[name] = transfer_size
             candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
-            resize_script = None
-            resize_method = "file-rpc"
-            if preserve_var:
-                resize_script = _rearm_preserved_var_resize_script(
-                    compact_images.resize_script, record["resize_tag"])
-                preflight_dir = Path(directory) / "resize-preflight"
-                preflight_dir.mkdir(mode=0o700)
-                try:
-                    try:
-                        record["resize_script_preflight"] = _preflight_resize_script_write(
-                            dfu_util, port, resize_script, preflight_dir)
-                    except FileRpcStatusError as exc:
-                        if exc.status != 3:
-                            raise
-                        resize_method = "full-var-image"
-                        record["resize_script_preflight"] = {
-                            "method": resize_method,
-                            "reason": "existing resize script uses an ext4 layout outside the file mailbox limits"}
-                finally:
-                    shutil.rmtree(preflight_dir, ignore_errors=True)
-                _private_write(record_path, record)
-            if resume_record is not None:
-                backup = record["backups"]["var"]
-                record["status"] = "checking saved var"
-                _private_write(record_path, record)
-                if _has_unique_device_tag(device_tag):
-                    _verify_var_backup_for_robot(backup, device_tag)
-            else:
-                record["status"] = "backing up var"
-                _private_write(record_path, record)
-                # A calibrated fresh flash captures the current var first;
-                # other policies keep their existing reusable-backup behavior.
-                var_backup = (backup_var(port, dfu_util, refresh=True)
-                              if fresh_with_calibration else backup_var(port, dfu_util))
-                record["backups"]["var"] = var_backup
-                _private_write(record_path, record)
+            if phoenix:
+                signed = {member['role']: member for member in phoenix['members']}
+                for name in partitions:
+                    role = 'rootfs' if name in ('rootfsA', 'rootfsB') else name
+                    if candidate_hashes[name] != signed[role]['sha256'] or transfer_sizes[name] != signed[role]['size']:
+                        raise DfuError('Prepared hosted prefix differs from its authenticated member hash/size')
+            record["status"] = "backing up var"
+            _private_write(record_path, record)
+            backup = backup_var(port, dfu_util, refresh=True)
+            _verify_var_backup_for_robot(backup, device_tag)
+            record["backups"]["var"] = backup
+            _private_write(record_path, record)
 
             if fresh_with_calibration:
+                record["partition_calibration"] = _prepare_partition_calibration(
+                    prepared, capacities, device_tag, prepared_dir)
+                for key, status in record["partition_calibration"]["status"].items():
+                    print("Calibration {}: {}".format(key, status), flush=True)
                 record["status"] = "preparing fresh var with calibration"
                 _private_write(record_path, record)
-                source = _select_factory_calibration_backup(
-                    device_tag, record["backups"]["var"], prepared["var"])
-                calibrated = images.build_factory_fresh_var(
-                    prepared["var"], source["image"],
-                    Path(prepared_dir) / "factory-fresh-var.ext4")
+                source, calibrated, remote_calibration = _resolve_factory_fresh_var(
+                    device_tag, record["backups"]["var"], prepared["var"],
+                    Path(prepared_dir) / "factory-fresh-var.ext4", port, dfu_util)
                 prepared["var"] = Path(calibrated["image"])
                 candidate_hashes["var"] = calibrated["sha256"]
                 record["factory_calibration"] = {
@@ -2069,29 +2012,53 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                     "files": calibrated["calibration_files"],
                     "identity_restored": True, "mode": "oobe",
                     "camera_matches_stock": calibrated.get("camera_matches_stock"),
+                    "status": {**calibrated.get("calibration_status", {}),
+                               **record["partition_calibration"]["status"]},
+                    "removed_distortion_caches": calibrated.get("removed_distortion_caches", []),
+                    "partition_files": record["partition_calibration"]["files"],
                     "candidate_sha256": calibrated["sha256"]}
+                if remote_calibration is not None:
+                    verify_readback = True
+                    record["factory_calibration"]["remote_manifest"] = remote_calibration.manifest
+                    record["readback_policy"] = "mandatory source image prefix readback (database calibration)"
+                    resolved_plan = dict(plan, calibration_source="Community reviewed; not factory-authenticated",
+                                         calibration_files=calibrated["calibration_files"],
+                                         calibration_revision=remote_calibration.manifest["revision"],
+                                         calibration_digest=remote_calibration.manifest["bundle_sha256"],
+                                         identity_source="this robot's verified local rollback backup",
+                                         readback_policy=record["readback_policy"])
+                    if not callable(confirmation) or not confirmation(resolved_plan):
+                        record["status"] = "cancelled"
+                        _private_write(record_path, record)
+                        return {"status": "cancelled", "message": "Resolved calibration write plan was not confirmed. No partition write was attempted."}
+                    identity = calibration_identity(port, dfu_util)
+                    from jibo_calibration_client import load_core
+                    if load_core().robot_key_from_cid(identity["cid_serial"]) != remote_calibration.manifest["robot_key"]:
+                        raise DfuError("Connected robot changed; no partition write was attempted.")
                 _private_write(record_path, record)
+                for key, status in calibrated.get("calibration_status", {}).items():
+                    if key not in ("touchscreen", "factory_record"):
+                        print("Calibration {}: {}".format(key, status), flush=True)
                 if calibrated.get("camera_matches_stock"):
                     print("The selected var backup's camera files match this package's defaults; "
                           "the saved files and robot identity were copied into fresh var.", flush=True)
 
-            var_resize_image = None
-            if preserve_var and resize_method == "full-var-image":
-                current_backup = (record["backups"]["var"].get("image")
-                                  if resume_record is None and
-                                  record["backups"]["var"].get("status") == "backup complete"
-                                  else None)
-                print("The existing resize script uses a legacy file layout. " +
-                      ("Preparing the newly saved var image" if current_backup else
-                       "Reading the current var image") +
-                      " to keep its data and update that script.", flush=True)
-                record["status"] = "preparing preserved var resize image"
+            # Signed package prefixes were checked BEFORE local calibration edits.
+            # Freeze hashes of the actual personalized candidates for readback.
+            candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
+            for name in partitions:
+                if Path(prepared[name]).stat().st_size != transfer_sizes[name]:
+                    raise DfuError("Calibration changed the partition prefix length; no write attempted.")
+            if phoenix:
+                record['phoenix']['archive_sha256'] = record['package_sha256']
+                record['phoenix']['device_tag'] = device_tag
                 _private_write(record_path, record)
-                var_resize_image = _prepare_preserved_var_resize_image(
-                    dfu_util, port, resize_script, Path(prepared_dir), current_backup)
-                record["preserved_var_resize_image"] = {
-                    key: value for key, value in var_resize_image.items() if key != "image"}
-                _private_write(record_path, record)
+                current = select_device(devices(), port)
+                if current is None or current['state'] != 'dfu':
+                    raise DfuError('Robot disconnected or changed mode before hosted writes')
+                rechecked = _dfu_context(port, dfu_util, include_output=True)
+                if rechecked[2] != device_tag or _read_gpt_capacities(dfu_util, port, rechecked[1]) != capacities:
+                    raise DfuError('Robot identity or GPT changed before first hosted write')
 
             def write_and_verify(name, candidate, digest, entry):
                 entry["status"] = "write started"
@@ -2126,117 +2093,16 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
                 entry["status"] = "verified" if verify_readback else "transfer complete"
                 _private_write(record_path, record)
 
-            previous_count = len(record["writes"])
-            for index, name in enumerate(partitions):
+            for name in partitions:
                 candidate = prepared[name]
                 digest = candidate_hashes[name]
-                if index < previous_count:
-                    entry = record["writes"][index]
-                    if entry["status"] in ("verified", "transfer complete") and \
-                            entry["candidate_sha256"] == digest and \
-                            entry.get("transfer_bytes") == transfer_sizes[name]:
-                        entry["resumed_without_write"] = True
-                        _private_write(record_path, record)
-                        continue
-                    record["status"] = "checking previous write"
-                    _private_write(record_path, record)
-                    if name == "skills" and skills_chunks:
-                        actual = _upload_skills_prefix(
-                            dfu_util, port, transfer_sizes[name], skills_chunks,
-                            workdir=directory)
-                    else:
-                        with tempfile.TemporaryDirectory(prefix="resume-readback-", dir=directory) as readback_dir:
-                            readback = Path(readback_dir) / "partition.img"
-                            actual = _upload_partition(
-                                dfu_util, port, name, transfer_sizes[name], readback,
-                                capacities[name])
-                    entry["resume_readback_sha256"] = actual
-                    if actual == digest:
-                        entry["candidate_sha256"] = digest
-                        entry["transfer_bytes"] = transfer_sizes[name]
-                        entry["readback_sha256"] = actual
-                        entry["status"] = "verified"
-                        entry["resumed_without_write"] = True
-                        _private_write(record_path, record)
-                        continue
-                    entry["previous_candidate_sha256"] = entry["candidate_sha256"]
-                    entry["candidate_sha256"] = digest
-                    entry["transfer_bytes"] = transfer_sizes[name]
-                    entry["status"] = "write started"
-                    _private_write(record_path, record)
-                    write_and_verify(name, candidate, digest, entry)
-                else:
-                    entry = {"partition": name, "candidate_sha256": digest,
-                             "size_bytes": capacities[name],
-                             "transfer_bytes": transfer_sizes[name],
-                             "status": "write started"}
-                    record["writes"].append(entry)
-                    write_and_verify(name, candidate, digest, entry)
-            if preserve_var:
-                if resize_method == "file-rpc":
-                    file_transaction = write_partition_file_live(
-                        "var", "/etc/first_boot_resize", resize_script,
-                        port=port, dfu_util=dfu_util,
-                        out=Path(directory) / "resize-file-transaction",
-                        confirmation=True, guided=True)
-                    if file_transaction.get("status") not in ("verified", "already current"):
-                        raise DfuError("The first-boot resize script was not safely armed; the robot remains in DFU and was not reset.")
-                    record["first_boot_resize_rearm"] = {
-                        "status": file_transaction["status"],
-                        "method": resize_method,
-                        "tag": record["resize_tag"],
-                        "file_transaction": file_transaction.get("operation_directory"),
-                        "preserved_var_data": True,
-                    }
-                else:
-                    record["status"] = "writing preserved var resize image"
-                    record["preserved_var_resize_write"] = {
-                        "size_bytes": EXPECTED_VAR_SIZE,
-                        "candidate_sha256": var_resize_image["candidate_sha256"],
-                        "status": "write started"}
-                    _private_write(record_path, record)
-                    run_with_progress(
-                        _partition_transfer_argv(dfu_util, port, "var", "-D",
-                                                 var_resize_image["image"]),
-                        timeout=14400,
-                        download_size=EXPECTED_VAR_SIZE,
-                        allow_progress_completion=True,
-                        label="Writing preserved var with first-boot resize script")
-                    record["preserved_var_resize_write"]["status"] = "transfer complete"
-                    _private_write(record_path, record)
-                    if verify_readback:
-                        with tempfile.TemporaryDirectory(prefix="var-readback-", dir=directory) as readback_dir:
-                            actual_hash = _upload_partition(
-                                dfu_util, port, "var", EXPECTED_VAR_SIZE,
-                                Path(readback_dir) / "var.img")
-                        record["preserved_var_resize_write"]["readback_sha256"] = actual_hash
-                        if actual_hash != var_resize_image["candidate_sha256"]:
-                            raise DfuError("The preserved var image did not match its full readback; "
-                                           "the robot remains in DFU and was not reset.")
-                    check_dir = Path(prepared_dir) / "resize-readback"
-                    check_dir.mkdir(mode=0o700)
-                    try:
-                        actual_script = _read_partition_file_rpc(
-                            dfu_util, port, "var", "/etc/first_boot_resize",
-                            check_dir, quiet=True)
-                        actual_stat = _stat_partition_file_rpc(
-                            dfu_util, port, "var", "/etc/first_boot_resize",
-                            check_dir, quiet=True)
-                    finally:
-                        shutil.rmtree(check_dir, ignore_errors=True)
-                    expected_permissions = int(var_resize_image["permissions"]["mode"], 8)
-                    if actual_script != resize_script or actual_stat["mode"] != expected_permissions or \
-                            actual_stat["uid"] != int(var_resize_image["permissions"]["uid"]) or \
-                            actual_stat["gid"] != int(var_resize_image["permissions"]["gid"]):
-                        raise DfuError("The preserved var resize script did not match its file readback; "
-                                       "the robot remains in DFU and was not reset.")
-                    record["first_boot_resize_rearm"] = {
-                        "status": "verified", "method": resize_method,
-                        "tag": record["resize_tag"], "preserved_var_data": True,
-                        "script_sha256": var_resize_image["script_sha256"]}
-                    record["preserved_var_resize_write"]["status"] = (
-                        "verified" if verify_readback else "script checked")
-                _private_write(record_path, record)
+                if _sha256_file(candidate) != digest:
+                    raise DfuError("Prepared image changed before write; robot remains in DFU.")
+                entry = {"partition": name, "candidate_sha256": digest,
+                         "size_bytes": capacities[name], "transfer_bytes": transfer_sizes[name],
+                         "status": "write started"}
+                record["writes"].append(entry)
+                write_and_verify(name, candidate, digest, entry)
         record["status"] = "verified; reset pending" if verify_readback else "transferred; reset pending"
         _private_write(record_path, record)
         try:
@@ -2250,12 +2116,10 @@ def flash_update(package_path, preserve_var, port=None, dfu_util=None, out=None,
         _private_write(record_path, record)
         return {"status": record["status"], "package": str(package.source),
                 "var_policy": plan["var_policy"],
-                "transferred_partitions": partitions + (["var"] if var_resize_image else []),
-                "verified_partitions": (partitions + (["var"] if var_resize_image else [])
-                                        if verify_readback else []),
-                "manifest": str(record_path), "backups": record["backups"],
-                "resumed_from": str(resume_path) if resume_record is not None else None}
-    except (DfuError, updates.UpdateError, images.ImageError, OSError) as exc:
+                "transferred_partitions": partitions,
+                "verified_partitions": partitions if verify_readback else [],
+                "manifest": str(record_path), "backups": record["backups"]}
+    except (DfuError, updates.UpdateError, images.ImageError, OSError, calibration_service.ClientError) as exc:
         record["status"] = "failed"
         record["error"] = str(exc)
         _private_write(record_path, record)
@@ -3071,6 +2935,54 @@ def _launch_gui():
     return jibo_gui_core.launch(sys.modules[__name__], fallback=_launch_menu)
 
 
+def flash_hosted_update(package_path, *, var_policy=flash_policy.KEEP, port=None,
+                        dfu_util=None, out=None, confirmation=None,
+                        dry_run=False, resume_from=None, unsafe_without_calibration=False):
+    """Authenticate the local hosted artifact before the reviewed DFU flow."""
+    if resume_from is not None:
+        raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup.")
+    if var_policy not in flash_policy.POLICIES:
+        raise hosted.HostedError('incompatible', 'Unsupported calibration choice')
+    path = hosted._safe_path(package_path)
+    with hosted._lock(path.with_name(path.name + '.lock')):
+        hosted.verify_local_image(path)
+        return flash_update(path, var_policy, port=port, dfu_util=dfu_util, out=out,
+                            confirmation=confirmation, dry_run=dry_run,
+                            verify_readback=True, unsafe_without_calibration=unsafe_without_calibration)
+
+
+def _hosted_local_selection(image_id, directory):
+    if image_id == 'latest':
+        try:
+            image_id = hosted.cached_catalog(cache_dir=Path(directory) / '.hosted').latest_id
+        except hosted.HostedError as exc:
+            raise hosted.HostedError('offline', 'Latest unavailable offline; select an exact completed image id or explicitly download first') from exc
+    matches = [image for image in hosted.local_hosted_images(directory) if image.id == image_id]
+    if len(matches) != 1:
+        raise hosted.HostedError('offline', 'No unique verified local download for that id; use download-update explicitly first')
+    return matches[0].downloaded_path
+
+
+def _hosted_cli_list(directory, offline):
+    from dataclasses import asdict
+    try:
+        catalog = (hosted.cached_catalog(cache_dir=Path(directory) / '.hosted') if offline else
+                   hosted.fetch_catalog(cache_dir=Path(directory) / '.hosted'))
+    except hosted.HostedError as exc:
+        if not offline or exc.code not in ('offline', 'expired'):
+            raise
+        catalog = hosted.Catalog(tuple(hosted.local_hosted_images(directory)), None, '', True,
+                                 exc.code + ': ' + str(exc))
+    rows = []
+    for image in catalog.images:
+        rows.append({**asdict(image), 'source': 'hosted', 'recommended': image.is_latest,
+                     'available': image.compatible and (image.offered or image.downloaded_path is not None),
+                     'downloaded': image.downloaded_path is not None, 'path': image.downloaded_path,
+                     'reason': image.incompatible_reason, 'var_policies': hosted.hosted_var_policies(image)})
+    return {'images': rows, 'latest_id': catalog.latest_id, 'from_cache': catalog.from_cache,
+            'error': catalog.error}
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--gui":
@@ -3215,13 +3127,30 @@ def main(argv=None):
     _add_confirmation_argument(write)
     list_updates = sub.add_parser("list-updates", help="List official full-flash packages in an updates folder")
     list_updates.add_argument("--directory", type=Path, default=Path.cwd() / "updates")
+    for command, help_text in (('list-hosted-updates', 'List signed hosted Phoenix offers (no USB)'),
+                               ('download-update', 'Download/verify a Phoenix image only (no USB)'),
+                               ('flash-hosted-update', 'Destructive reviewed Phoenix flash with robot-specific var')):
+        hosted_parser = sub.add_parser(command, help=help_text)
+        hosted_parser.add_argument('--directory', type=Path, default=Path.cwd() / 'updates')
+        hosted_parser.add_argument('--offline', action='store_true', help='Make no network requests; use authenticated local artifacts/cache')
+        if command != 'list-hosted-updates':
+            hosted_parser.add_argument('--image', required=True, help='Exact immutable image id or latest (latest requires an unexpired catalog)')
+        if command == 'flash-hosted-update':
+            var_group = hosted_parser.add_mutually_exclusive_group()
+            var_group.add_argument('--keep-calibration', action='store_true', help=flash_policy.KEEP_LABEL + ' (default)')
+            var_group.add_argument('--without-calibration', action='store_true', help=flash_policy.WITHOUT_LABEL + '; requires --confirm FLASH UPDATE')
+            hosted_parser.add_argument('--confirm', help='Exactly FLASH UPDATE; otherwise a cancel-default review is required')
+            hosted_parser.add_argument('--verify-readback', action='store_true', help='Always forced for hosted writes')
+            hosted_parser.add_argument('--dry-run', action='store_true', help='Inspect a verified local artifact/DFU only; never download or write')
+            hosted_parser.add_argument('--resume-from', type=Path)
+            _add_device_arguments(hosted_parser)
+            _add_dfu_argument(hosted_parser)
+            _add_operation_argument(hosted_parser)
     flash = sub.add_parser("flash-update", help="Back up and install an official full-flash package")
     flash.add_argument("package", type=Path, help="Extracted package directory or official .tar.bz2 archive")
-    policy = flash.add_mutually_exclusive_group(required=True)
-    policy.add_argument("--preserve-var", action="store_true", help="Keep current identity, mode, Wi-Fi, and user settings")
-    policy.add_argument("--fresh-var", action="store_true", help="Replace var with the package image for fresh setup")
-    policy.add_argument("--fresh-var-with-calibration", action="store_true",
-                        help="Use fresh package var with this robot's saved identity and camera calibration")
+    policy = flash.add_mutually_exclusive_group()
+    policy.add_argument("--keep-calibration", action="store_true", help=flash_policy.KEEP_LABEL + " (default)")
+    policy.add_argument("--without-calibration", action="store_true", help=flash_policy.WITHOUT_LABEL + "; requires --confirm FLASH UPDATE")
     _add_device_arguments(flash)
     _add_dfu_argument(flash)
     _add_operation_argument(flash)
@@ -3231,7 +3160,7 @@ def main(argv=None):
     flash_confirmation.add_argument("--yes", action="store_true",
                                     help="Confirm the reviewed update plan for scripted writes")
     flash.add_argument("--resume-from", type=Path,
-                       help="Resume an incomplete preserve-var update from its update-manifest.json")
+                       help="Interrupted flashes cannot currently resume; see the saved rollback record")
     flash.add_argument("--verify-readback", action="store_true",
                        help="Read back each transferred package-image prefix and compare its SHA-256")
     verify = sub.add_parser("verify-update-write",
@@ -3369,16 +3298,38 @@ def main(argv=None):
                 tool("dfu-util", args.dfu_util), args.operation_dir,
                 True if args.yes else None)
             password = None
+        elif args.command == 'list-hosted-updates':
+            result = _hosted_cli_list(args.directory, args.offline)
+        elif args.command == 'download-update':
+            path = (_hosted_local_selection(args.image, args.directory)
+                    if args.offline else hosted.download_image(args.image, dest_dir=args.directory))
+            checked = hosted.verify_local_image(path)
+            result = {'status': 'verified download; no robot action', 'path': path,
+                      'id': checked['image'].id, 'sha256': checked['archive_sha256']}
+        elif args.command == 'flash-hosted-update':
+            if args.without_calibration and not args.dry_run and args.confirm != UPDATE_CONFIRMATION:
+                raise DfuError('Without calibration requires --without-calibration and --confirm exactly FLASH UPDATE.')
+            if args.offline or args.dry_run:
+                path = _hosted_local_selection(args.image, args.directory)
+            else:
+                path = hosted.download_image(args.image, dest_dir=args.directory)
+            result = flash_hosted_update(path, port=args.port, dfu_util=args.dfu_util,
+                out=args.operation_dir, confirmation=args.confirm, dry_run=args.dry_run,
+                resume_from=args.resume_from,
+                var_policy=flash_policy.WITHOUT if args.without_calibration else flash_policy.KEEP,
+                unsafe_without_calibration=args.without_calibration)
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
                       for path in _update_candidates(args.directory)]
         elif args.command == "flash-update":
-            result = flash_update(args.package, args.preserve_var, args.port,
-                                  tool("dfu-util", args.dfu_util), args.operation_dir,
+            if args.without_calibration and not args.dry_run and args.confirm != UPDATE_CONFIRMATION:
+                raise DfuError('Without calibration requires --without-calibration and --confirm exactly FLASH UPDATE; --yes is not enough.')
+            result = flash_update(args.package,
+                                  flash_policy.WITHOUT if args.without_calibration else flash_policy.KEEP,
+                                  args.port, tool("dfu-util", args.dfu_util), args.operation_dir,
                                   UPDATE_CONFIRMATION if args.yes else args.confirm,
                                   args.dry_run, args.resume_from, args.verify_readback,
-                                  **({"fresh_with_calibration": True}
-                                     if args.fresh_var_with_calibration else {}))
+                                  unsafe_without_calibration=args.without_calibration)
         elif args.command == "verify-update-write":
             result = verify_update_write(args.manifest, args.partition, args.port,
                                          tool("dfu-util", args.dfu_util))
@@ -3387,6 +3338,9 @@ def main(argv=None):
                                args.operation_dir, "WRITE VAR" if args.yes else args.confirm)
         print(json.dumps(result, indent=2, default=str))
         return 1 if isinstance(result, dict) and result.get("status") == "mismatch" else 0
+    except hosted.HostedError as exc:
+        print('Hosted error [' + exc.code + ']: ' + str(exc), file=sys.stderr)
+        return 130 if exc.code == 'canceled' else 3 if exc.code == 'dependency' else 1
     except (DfuError, images.ImageError, updates.UpdateError, OSError) as exc:
         print("Error: " + str(exc), file=sys.stderr)
         return 1

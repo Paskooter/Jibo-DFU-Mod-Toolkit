@@ -376,12 +376,15 @@ class CursesPromptTests(unittest.TestCase):
             "package": "jibo-pvt-flash-build.tar.bz2",
             "version": "5.4.2",
             "usb_port": "1-1",
-            "var_policy": "preserve current configuration",
+            "var_policy": "keep-calibration",
+            "calibration_choice": "Keep this Jibo's calibration (recommended)",
+            "calibration_detail": "Wi-Fi, pairing and settings start fresh.",
             "partitions": [{"name": "rootfsA", "bytes": 100},
                            {"name": "skills", "bytes": 200}],
         }, "Review the update plan.")
         self.assertIn("jibo-pvt-flash-build.tar.bz2", update)
-        self.assertIn("preserve current configuration", update)
+        self.assertIn("Keep this Jibo's calibration (recommended)", update)
+        self.assertIn("Wi-Fi, pairing and settings start fresh.", update)
         self.assertIn("rootfsA (100 bytes)", update)
         self.assertIn("skills (200 bytes)", update)
 
@@ -641,13 +644,13 @@ class CursesPromptTests(unittest.TestCase):
         flash = Mock(return_value={"status": "transferred"})
         api = SimpleNamespace(_update_candidates=lambda _folder: [Path("rtm.tar.bz2")],
                               flash_update=flash)
-        with patch.object(jibo_tui, "select_option", side_effect=("0", "factory")) as choose:
+        with patch.object(jibo_tui, "select_option", side_effect=("0", "keep-calibration")) as choose:
             result = jibo_tui._run_update(api, port="1-1")
         self.assertEqual(result["status"], "transferred")
         choices = choose.call_args_list[1].args[1]
-        self.assertIn(("factory", "Fresh setup with this robot's saved calibration"), choices)
-        self.assertTrue(flash.call_args.kwargs["fresh_with_calibration"])
-        self.assertFalse(flash.call_args.kwargs["preserve_var"])
+        self.assertEqual([c.key for c in choices], ["keep-calibration", "without-calibration"])
+        self.assertEqual(flash.call_args.kwargs["var_policy"], "keep-calibration")
+        self.assertFalse(flash.call_args.kwargs["unsafe_without_calibration"])
 
 
 if __name__ == "__main__":

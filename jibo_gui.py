@@ -8,6 +8,8 @@ function. This module imports tkinter at the top on purpose: the launcher
 imports it lazily and reports a missing Tk with a pointer to the text menu.
 """
 
+import os
+from pathlib import Path
 import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -359,11 +361,12 @@ class OptionRow(tk.Frame):
         self.indicator.pack(side="left", padx=(16, 12), pady=12, anchor="n")
         body = tk.Frame(self)
         body.pack(side="left", fill="both", expand=True, pady=(11, 11), padx=(0, 16))
-        self.label = tk.Label(body, text=item.label, font=theme.base, anchor="w",
-                              justify="left")
+        self.label = tk.Label(body, text=item.label, anchor="w", justify="left",
+                              font=theme.bold if getattr(item, "tone", "") == "recommended"
+                              else theme.base)
         self.label.pack(fill="x")
         self.reason = None
-        if not item.enabled and item.reason:
+        if item.reason:
             self.reason = tk.Label(body, text=item.reason, font=theme.small, anchor="w",
                                    justify="left")
             self.reason.pack(fill="x", pady=(2, 0))
@@ -394,14 +397,15 @@ class OptionRow(tk.Frame):
 
     def paint(self):
         enabled, chosen = self.item.enabled, self.selected
-        bg = P["accent_soft"] if chosen else P["surface"]
-        border = P["accent"] if chosen else P["border"]
+        danger = getattr(self.item, "tone", "") == "danger"
+        bg = P["danger_soft"] if danger else (P["accent_soft"] if chosen else P["surface"])
+        border = P["danger"] if danger else (P["accent"] if chosen else P["border"])
         self.configure(bg=bg, highlightbackground=border, highlightcolor=border)
         for widget in self._parts[1:]:
             widget.configure(bg=bg)
-        self.label.configure(fg=P["text"] if enabled else P["disabled"])
+        self.label.configure(fg=P["danger_text"] if danger else P["text"] if enabled else P["disabled"])
         if self.reason is not None:
-            self.reason.configure(fg=P["faint"])
+            self.reason.configure(fg=P["danger_text"] if danger else P["muted"])
         canvas = self.indicator
         canvas.delete("all")
         ring = P["accent"] if chosen else (P["border_strong"] if enabled else P["border"])
@@ -626,6 +630,9 @@ class ToolkitWindow:
         self.progress_status = tk.Label(card, text="", font=theme.mono, bg=P["surface"],
                                         fg=P["muted"], anchor="w")
         self.progress_status.pack(fill="x", padx=20, pady=(8, 16))
+        # Shown only while a Phoenix image list check or download runs.
+        self.progress_cancel = ttk.Button(card, text="Cancel download", command=self.cancel_download)
+        self._cancel_shown = False
         tk.Label(page, text="OPERATION LOG", font=theme.caps, bg=P["bg"], fg=P["muted"],
                  anchor="w").pack(fill="x", pady=(18, 6))
         self.progress_log = TextBox(page, theme, font=theme.mono, height=8, wrap="word")
@@ -750,6 +757,25 @@ class ToolkitWindow:
                 self._progress_running = False
             self.progress_bar.configure(mode="determinate", value=state.percent)
         self.progress_log.set("\n".join(state.lines), see_end=True)
+        self._render_download_controls()
+
+    def _render_download_controls(self):
+        active = self.controller.download_active
+        if active and not self._cancel_shown:
+            self.progress_cancel.state(["!disabled"])
+            self.progress_cancel.pack(anchor="e", padx=20, pady=(0, 16))
+            self._cancel_shown = True
+            self.root.bind("<Escape>", lambda _event: self.cancel_download())
+        elif not active and self._cancel_shown:
+            self.progress_cancel.pack_forget()
+            self._cancel_shown = False
+            if self.prompt is None:
+                self.root.unbind("<Escape>")
+
+    def cancel_download(self):
+        if self.controller.cancel_download():
+            self.progress_cancel.state(["disabled"])
+            self.progress_status.configure(text="Canceling... what was already saved is kept.")
 
     def _stop_progress(self):
         if getattr(self, "_progress_running", False):
@@ -765,7 +791,8 @@ class ToolkitWindow:
         self.prompt = prompt
         builders = {"select": self._build_select, "confirm": self._build_confirm,
                     "multi": self._build_multi, "text": self._build_text,
-                    "message": self._build_message}
+                    "message": self._build_message,
+                    "calibration-consent": self._build_calibration_consent}
         builders.get(prompt.kind, self._build_message)(page, prompt)
         page.bind("<Escape>", lambda _event: self.answer(None))
         self.root.bind("<Escape>", lambda _event: self.answer(None))
@@ -869,11 +896,30 @@ class ToolkitWindow:
         self.controls = {"boot_enabled": enabled, "checkbox": checkbox, "remove": remove,
                          "primary": go, "cancel": cancel}
 
+    def _build_calibration_consent(self, page, prompt):
+        """Owner-approved Share default; showing this page never authorizes upload."""
+        self._header(page, prompt.title, kicker=self._kicker())
+        buttons = self._button_bar(page)
+        disclosure = TextBox(page, self.theme, height=14)
+        disclosure.pack(fill="both", expand=True, pady=(18, 0))
+        disclosure.set(prompt.detail)
+        labels = {item.key: item.label for item in prompt.items}
+        share = ttk.Button(buttons, text=labels["share"], style="Accent.TButton",
+                           command=lambda: self.answer("share"))
+        share.pack(side="right")
+        local = ttk.Button(buttons, text=labels["local"], command=lambda: self.answer("local"))
+        local.pack(side="right", padx=(0, 10))
+        for widget in (share, local):
+            widget.bind("<Return>", lambda event: event.widget.invoke() or "break")
+            widget.bind("<KP_Enter>", lambda event: event.widget.invoke() or "break")
+        share.focus_set()
+        self.controls = {"primary": share, "cancel": local, "disclosure": disclosure}
+
     def _build_confirm(self, page, prompt):
         writes = prompt.title.lower().startswith("confirm")
         self._header(page, prompt.title, kicker=self._kicker())
         self._callout(page, prompt.prompt or "Review the details, then select Confirm to "
-                      "continue.", "warning" if writes else "info").pack(fill="x", pady=(14, 0))
+                      "continue.", "danger" if "(unsafe)" in prompt.title else "warning" if writes else "info").pack(fill="x", pady=(14, 0))
         buttons = self._button_bar(page)
         review = TextBox(page, self.theme, height=10)
         review.pack(fill="both", expand=True, pady=(14, 0))
@@ -1179,6 +1225,8 @@ class ToolkitWindow:
                     state = True
                 elif kind == "output":
                     output = True
+                elif kind == "download":
+                    output = True
                 elif kind == "started":
                     if self.page_name != "progress":
                         self.show_progress()
@@ -1224,13 +1272,20 @@ class ToolkitWindow:
             return
         if self.controller.busy:
             pending = self.controller.pending_prompt
-            if pending is None or pending.answered:
+            if self.controller.download_active:
+                if not messagebox.askyesno(
+                        "Stop the download and quit?",
+                        "No robot is being changed. What was already downloaded is kept "
+                        "and continues next time. Quit now?", icon="warning", default="no",
+                        parent=self.root):
+                    return
+            elif pending is None or pending.answered:
                 messagebox.showwarning(
                     "Operation in progress",
                     "A robot operation is still running. Closing the window now could "
                     "interrupt a USB transfer. Wait until it finishes.", parent=self.root)
                 return
-            if not messagebox.askyesno(
+            elif not messagebox.askyesno(
                     "Cancel and quit?",
                     "The open question will be answered with Cancel, then the window "
                     "closes. Quit now?", icon="warning", default="no", parent=self.root):
@@ -1265,6 +1320,21 @@ def main(api):
     root = create_root()
     controller = core.GuiController(api, preferences_path=api.BACKUP_ROOT / ".phoenix-guidance.json")
     ToolkitWindow(root, controller)
+    # Only the Windows release wrapper supplies this per-launch marker. A mapped
+    # main window, not a startup delay or a child widget, authorizes console hiding.
+    ready_file = os.environ.get('JIBO_GUI_READY_FILE')
+    if ready_file:
+        def signal_ready():
+            if root.winfo_viewable():
+                Path(ready_file).write_text('ready\n', encoding='ascii')
+
+        def on_map(event):
+            if event.widget is root:
+                root.after_idle(signal_ready)
+
+        root.bind('<Map>', on_map, add='+')
+        # The root may already have mapped while constructing widgets.
+        root.after_idle(signal_ready)
     with core.capture_output(controller):
         root.mainloop()
     return 0

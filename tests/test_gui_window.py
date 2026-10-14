@@ -8,7 +8,7 @@ import jibo_gui_core as core
 from gui_fakes import FakeApi
 
 pytestmark = pytest.mark.skipif(os.environ.get("JIBO_GUI_TEST_DISPLAY") != "1",
-                                reason="opt-in real-window lane requires Tk and a display")
+                                reason="opt-in real-window tests require Tk and a display")
 
 
 @pytest.fixture

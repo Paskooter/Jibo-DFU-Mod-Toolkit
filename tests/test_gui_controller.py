@@ -316,16 +316,16 @@ def test_full_var_fallback_is_an_explicit_choice_then_separate_confirmation(stat
     assert prompts[-1].kind == "confirm" and prompts[-1].initial == "cancel"
 
 
-@pytest.mark.parametrize("policy", ["preserve", "fresh", "factory"])
+@pytest.mark.parametrize("policy", ["keep-calibration", "without-calibration"])
 @pytest.mark.parametrize("approve", ["cancel", "confirm"])
 def test_flash_policies_keep_original_backend_confirmation(policy, approve):
     api = FakeApi()
-    c, prompts = controller(api, ("0", policy, approve))
+    c, prompts = controller(api, ("0", policy, *(("confirm",) if policy == "without-calibration" else ()), approve))
     c.start_action("flash-update")
     assert outcome(c).status == ("verified" if approve == "confirm" else "cancelled")
     assert api.writes == (["flash_update"] if approve == "confirm" else [])
-    assert api.calls[-1][2]["preserve_var"] == (policy == "preserve")
-    assert api.calls[-1][2]["fresh_with_calibration"] == (policy == "factory")
+    assert api.calls[-1][2]["var_policy"] == policy
+    assert api.calls[-1][2]["unsafe_without_calibration"] == (policy == "without-calibration")
     assert "var only" in prompts[-1].detail
     assert "rootfsA" in prompts[-1].detail and "skills" in prompts[-1].detail
 

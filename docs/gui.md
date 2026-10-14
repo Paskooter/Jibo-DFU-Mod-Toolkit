@@ -79,12 +79,28 @@ Available operations use `jibo_tui.execute_action()` and the original
   SHA-256 readback; the exact shared review still precedes writing.
 - **Save/check var backup:** reuse the backend's verified robot-specific
   baseline, show transfer progress and the resulting path.
-- **Official update:** select from the toolkit folder's `updates` directory,
-  choose preserve / fresh / fresh with this robot's calibration, and review
-  the original full-flash plan. Like the TUI, the default checks DFU transfer
-  completion, **not full update readback**. For the CLI's optional
-  `--verify-readback` or resume path, use the documented CLI; these extra
-  scripting options are not added to the guided GUI.
+- **Flash a package:** select from the toolkit folder's `updates` directory or
+  choose a hosted Phoenix image. The default is **Keep this Jibo's calibration
+  (recommended)**; the only alternative is **Flash without calibration (unsafe)**.
+  Both write fresh var, save a fresh verified backup before writing and review
+  the full-flash plan. Unsafe is red and requires a separate confirmation with
+  **Cancel** focused by default. Declining it writes nothing.
+- **Keep calibration:** restores camera measurements and his name, plus supported
+  motion/microphone files when present. Touchscreen calibration and the factory
+  record require existing verified same-robot rootfs/skills partition backups.
+  Wi-Fi, pairing and settings start fresh in OOBE. Without calibration uses
+  the package var unchanged; without a valid identity, setup may not work until
+  his identity is restored from a backup.
+- **Phoenix images:** the list starts with **Latest Phoenix image — recommended**;
+  **Download a Phoenix image (no robot needed)** downloads without USB. Downloads
+  run on the worker thread with a **Cancel download** button (Esc also cancels).
+  Phoenix writes always read back every transferred prefix. Their review states:
+  **This image connects Jibo to Phoenix (jibo.io). After flashing he starts at the
+  setup screens; finish setup at jibo.io.** Ordinary package reviews omit this line.
+  See [Phoenix images from jibo.io](hosted-flash-images.md).
+- **Interrupted flash:** keep the rollback copy and record. Resume currently
+  refuses before USB action; select the package again for a new reviewed flash.
+  For ordinary packages, the CLI's `--verify-readback` enables full prefix checks.
 - **More tools:** partition-layout check, selected-partition backup/restore,
   writing an edited var image, inspecting/editing local backups, and
   **Remove boot-screen Wi-Fi/IP status**. To restore only var from a backup
@@ -96,6 +112,15 @@ Radio choices use Up/Down and Enter; partition checklists use Up/Down, Space,
 A (select all), N (clear), then Enter. Tab reaches buttons and text fields.
 Esc cancels the open question. Image/manifest inputs include file/folder
 pickers. Review text and long logs are scrollable and selectable/copyable.
+
+## Flash-choice screenshots
+
+![Two calibration choices with Keep preselected and unsafe in red](images/gui/flash-calibration.png)
+
+![Separate unsafe confirmation with Cancel focused by default](images/gui/flash-without-calibration-confirm.png)
+
+These neutral documentation fixtures are captured with
+`scripts/flash_docs_screenshots.py`; they never access USB.
 
 ## Safety and threading contract
 
@@ -128,133 +153,21 @@ because boot-status or fallback operations can use full-var instead.
   when submitted or cancelled. This is not a claim of cryptographic memory
   erasure in Python/Tk. Synthetic test passwords are used in verification.
 
-## Verification report
+## Offline verification
 
-**Scope:** local automated verification used Linux and an isolated device
-boundary. The owner has also tested the GUI, USB handoff and real write flows
-successfully on Windows and Linux.
-
-### Verified locally
-
-Recorded on 2026-10-12 UTC from clean revision
-`51a6bf176430e9b085bce7c87f4cd52634192921` (the subsequent report commit changes
-only this document). Python 3.10 and the test-only Tk 8.6.12 overlay were used.
-
-| Lane / command | Real execution result |
-| --- | --- |
-| Baseline before completion: `python3 -m pytest -q` | **273 passed, 47 subtests passed** |
-| Final headless suite: `python3 -m pytest -q` | **346 passed, 13 intentionally skipped, 47 subtests passed** |
-| Final real-window suite: `JIBO_GUI_TEST_DISPLAY=1 xvfb-run -a python3 -m pytest -q` | **359 passed, 47 subtests passed**, no skips |
-| Original unittest lane: `python3 -m unittest discover -s tests -q` | **273 tests, OK** |
-| GUI-specific test collection | **86 cases**: 61 headless controller, 12 launcher/package, 13 actual Tk window cases |
-| Source real-window walkthrough: `scripts/gui_smoke.py` | **103 screenshots, 459 checks, 0 Tk callback errors** |
-| Same walkthrough using modules extracted from a test `.pyz` | **103 screenshots, 459 checks, 0 Tk callback errors** |
-| Existing Node renderer/OTA tests, five invocations | **92 passed**: 8 OTA helper, 28 current X11, 28 early X11, 20 DOM display, 8 DOM source |
-| `bash -n` on all four shell entries; `desktop-file-validate` | Exit **0** |
-
-The two final walkthrough lanes produced **206 screenshots and 918 checks**
-in total. Each walkthrough exercised real Tk widgets, a real worker thread,
-Cancel/Confirm and password flows, numeric progress, fallback/errors, local
-mode/Wi-Fi edits, selected-var backup/restore, all update policies, boot-status
-removal, 920×640 scrollable review, actual file/manifest/folder dialogs, and
-native close-warning/default-No quit dialogs. Each lane recorded 20 fake
-backend calls and 10 approved **simulated** device-write operations; these
-are not hardware writes.
-
-Evidence paths (local, ephemeral `/dev/shm`, not committed):
-
-- `/dev/shm/dfu-gui-shots/receipt.json` and the 103 named source screenshots
-  directly beside it; `sheet-00.png` through `sheet-12.png` are contact sheets.
-- `/dev/shm/dfu-gui-shots/packaged/receipt.json` and its 103 screenshots.
-  Receipts identify the actual imported GUI/controller/TUI file paths and
-  include screenshot hashes, checks and `dirty: false`.
-- `pytest-headless.xml`, `pytest-xvfb.xml`, `unittest.log`, `node-results.json`
-  and the five `node-*.log` files under `/dev/shm/dfu-gui-shots/`.
-- `/dev/shm/dfu-gui-package/artifact.json`, `fake-inputs.pyz` and `runtime/`.
-  All **14 checked runtime source/asset files** extracted from that archive
-  matched the checkout byte-for-byte. Both GUI modules and the private TUI
-  source were imported from the extracted directory during the packaged lane.
-  **The archive uses synthetic test loader/tool inputs and test loader pins;
-  it is not a flashable or distributable production package.** This proves
-  GUI inclusion/extraction/runtime behavior, not a native-tools release build.
-- An earlier exploratory `expanded-preview/` receipt is marked dirty and is
-  not counted or cited as final evidence.
-
-The source screenshots were visually reviewed across the contact sheets,
-with full-size review and native modal checks. No major clipping or overlap
-was found, including the minimum-size review footer, scrollbar and both
-buttons. The visible boot checkbox was checked by default; the armed review
-showed an enabled red Confirm button. Initial pale Confirm is intentional,
-not a disabled-workflow bug.
-
-### Defects found and proved fixed
-
-Real-window tests initially exposed Tk `Tcl_Obj` conversion errors in label
-wrapping, the missing boot-status checkbox and missing checklist keyboard
-navigation. Later named failing tests exposed an approval-to-close race,
-stale enabled actions after USB enumeration failure, and misleading “quick
-edit” titles on full-var operations. Desktop validation caught missing `$`
-escaping in the Linux entry. These were fixed and the real lanes rerun.
-No backend device-operation code, `jibo_tui.py`, `jibo_images.py` or pinned
-boot assets were changed by the GUI completion work.
-
-Two independent negative controls also ran on disposable **fake-only** copies
-of the controller, leaving the repository untouched:
-
-- Removing the busy guard made
-  `test_duplicate_start_and_refresh_refused_until_action_finishes` fail:
-  **1 failed**, expected exit 1.
-- Forcing review approval made
-  `test_mode_write_requires_explicit_confirm` fail for rejected answers:
-  **8 failed, 2 passed**, expected exit 1. The two explicit-confirm cases
-  continued to pass, distinguishing approval from mere backend invocation.
-
-Actual outputs are in `falsification.json`, `falsify-duplicate-start.log` and
-`falsify-explicit-approval.log` under the screenshot directory. The unmodified
-controller's corresponding tests pass.
-
-### Environment issue, not a product test result
-
-Invoking this host's standalone `pytest` executable initially omitted the
-checkout from its import path and caused collection errors. Using
-`python3 -m pytest` resolved that; no dependency installation or fabricated
-results were substituted. System Python has no installed Tk, so the already
-available extracted overlay was reused. There is no PowerShell runtime on
-this host: the Windows launcher received structural assertions only, not a
-PowerShell execution claim.
-
-### Reproduce the fake lanes
-
-From the toolkit root, with Python 3.10+ and pytest installed:
+The tests use synthetic ext4 filesystems, test-only signing keys and isolated
+USB boundaries. No automated test flashes a robot. Headless tests cover shared
+flows and backend safety; opt-in real-window tests exercise actual Tk widgets:
 
 ```sh
-python3 -m pytest -q
-# Opt-in actual Tk widgets (not a display mock):
-JIBO_GUI_TEST_DISPLAY=1 xvfb-run -a python3 -m pytest -q
-# Real-window walkthrough using only tests/gui_fakes.py:
-xvfb-run -a -s '-screen 0 1400x1000x24' \
-  python3 scripts/gui_smoke.py --out /dev/shm/dfu-gui-shots
-bash -n run.sh run-macos.sh run-gui.sh 'Jibo DFU Toolkit.command'
-desktop-file-validate 'Jibo DFU Toolkit.desktop'
+python3 -m pytest -q tests
+JIBO_GUI_TEST_DISPLAY=1 xvfb-run -a python3 -m pytest -q tests
+python3 -m unittest discover -s tests
 ```
 
-Normal headless test runs intentionally skip the real-window tests unless
-`JIBO_GUI_TEST_DISPLAY=1` is set. The Tk smoke requires ImageMagick's `import`
-for X-window captures. On this host the system Python lacks installed Tk;
-verification uses the **pre-existing extracted test-only overlay** by sourcing
-`/dev/shm/dfu-gui-tk/env.sh`. Those files are not repository content, install
-prerequisites, or distributed toolkit artifacts.
+Real-window tests require Tk and a display. Screenshot fixtures contain neutral
+example packages and settings, not robot data. The gallery never draws Jibo.
 
-### Owner-tested platforms
-
-The owner has tested the GUI, USB handoff and real write flows successfully
-on Windows and Linux, and the toolkit on an Intel Mac (macOS 10.15, MacPorts
-tools).
-
-### Open acceptance gates
-
-- **macOS Apple silicon:** experimental; not yet tested.
-- **Hardware/firmware:** no new evidence for RAM slot 3, boot-status release
-  compatibility on real robots, services-OTA overlay timing, calibration
-  preservation or interrupted-flash recovery. Keep all existing README
-  hardware caveats and gates in force.
+Windows and Linux GUI/USB flows and the Intel Mac toolkit have previously been
+owner-tested. Apple silicon remains experimental. This calibration flash change
+still needs separately authorized hardware boot, readback and recovery acceptance.

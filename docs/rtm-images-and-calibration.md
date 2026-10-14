@@ -15,6 +15,9 @@ Four archived full-flash packages with `RTM` in their filenames are cached in
 The archive provides checksum lists for [stable-builds](https://pvindex.org/repository/platformos/builds/stable-builds/sha256.txt)
 and [release-production](https://pvindex.org/repository/platformos/builds/release-production/sha256.txt).
 
+Signed Phoenix images on the official 13.0.0 base are described in
+[Phoenix images from jibo.io](hosted-flash-images.md).
+
 ## Factory calibration after flashing
 
 The [archived flashing guide](https://pvindex.org/confluence/display/ENG/How+to+Flash+a+Robot+-+Simple)
@@ -38,26 +41,74 @@ the RTM package alone does not recreate the final factory state.
 
 ## Using the existing per-robot `var` backups
 
-The toolkit's **Preserve current var** option retains the robot's identity and
-calibration, but also retains its other current settings and data. **Use package
-var for a fresh setup** replaces the whole `var` filesystem and loses those
-per-robot files. **Fresh setup with this robot's saved calibration** starts from
-the package's stock `var`, first captures a current rollback backup, then copies
-the three camera calibration JSON files and identity from a SHA-256-verified
-backup associated with the connected robot, preferring the `var` image read
-immediately before the flash,
-sets the hostname and OOBE mode, and checks the edited filesystem before
-writing. It leaves old Wi-Fi credentials and user data behind. The matching
-backup is selected automatically. If the saved camera files match the package
-defaults, they are still copied and the update record notes that match. If no
-matching backup with the identity and camera files exists,
-the flash stops before writing any partition. The equivalent CLI switch is
-`flash-update PACKAGE --fresh-var-with-calibration --yes`.
+**Keep this Jibo's calibration (recommended)** is the default. It starts from the
+package's stock var, takes a fresh verified current-var rollback backup, then copies
+camera calibration and identity from a verified same-robot backup, preferring the
+image read immediately before this flash. Supported IMU and microphone files are
+restored when present, with their exact bytes, ownership and permissions. It sets
+hostname, hosts and OOBE mode and checks the edited filesystem before writing.
+Wi-Fi, pairing and user settings start fresh. Saved camera files that match package
+defaults are still copied and their status is recorded. If this robot's identity
+and camera calibration are not available in a verified local backup, the flash
+stops without writing to the robot. Calibration backups and restores stay on this computer.
 
-This option restores the camera files documented in the archived flashing
-guide. The guide also runs `imu_test_calib` as a separate physical calibration
-step. Its output was not present in the inspected `var` backups, so copying
-`var` files cannot substitute for performing that test if it is needed.
+The CLI defaults to this policy too: `flash-update PACKAGE --keep-calibration --yes`.
+
+### What is preserved
+
+| Item | Live path | Keep this Jibo's calibration |
+| --- | --- | --- |
+| Left/right camera lenses | `/var/jibo/lps/CameraModelParamsL.json`, `CameraModelParamsR.json` | Required, copied from the matching local `var` backup |
+| Camera-to-camera alignment | `/var/jibo/lps/InterCameraTransform.json` | Required, copied from the same backup |
+| Motion sensor corrections | `/var/jibo/imu/imu-cal.json` | Copied when present and supported; absent or unsupported is reported |
+| Six microphone measurements | `/var/jibo/audio/audio_calibration.json` | Copied when present and supported, including historical unquoted `mic1`–`mic6` output; absent or unsupported is reported |
+| Touchscreen affine calibration | `/etc/pointercal` | Copied into both incoming rootfs images only when a verified same-robot rootfs backup contains a supported file |
+| Factory calibration record | `/opt/mfg/calibration_manifest.json` | Copied into the incoming skills image only when a verified same-robot skills backup contains a supported file |
+
+A flash replaces rootfs and skills under **both calibration choices**. With
+**Keep this Jibo's calibration (recommended)**, the toolkit
+checks its existing local partition backups for the conditional touchscreen and
+factory record items before any partition write. It does not capture new rootfs
+or skills backups automatically. Without a matching partition backup it reports
+**not preserved (no backup of that partition)**. A `var` backup cannot recover
+these two files. The toolkit never invents a missing `pointercal`, follows a
+calibration symlink, or supports a `TSLIB_CALIBFILE` override in this profile.
+Use **Back up selected partitions** before flashing to retain the existing
+rootfs/skills files if you need them.
+
+**Flash without calibration (unsafe)** copies no per-robot measurements or identity;
+its fresh verified rollback backup retains them locally. It writes the package var
+unchanged. Camera, motion and hearing may not work properly, and setup may fail
+without a valid identity. A separate Cancel-default confirmation is required.
+**Keep this Jibo's calibration (recommended)** copies the supported measurements
+listed above plus identity, not photos, factory captures, distortion caches,
+accounts or old network settings. Missing IMU/audio does not block it; per-item
+status in the output and local update record states what was restored.
+Unsupported or oversized originals remain unchanged in the private backup.
+
+Every `distortionPrecomputeFile_*` entry in the fresh candidate's LPS directory
+is removed, including old naming variants and package caches. A stale cache can
+override restored camera JSON. The original backups and package images are not
+changed. File readback, ownership/mode checks, unchanged image length and a
+read-only ext4 check run before accepting an edited image.
+
+The pure `jibo_calibration.py` v3 extractor accepts only capped, regular files
+with exact schemas. It never exports identity, credentials, Wi-Fi, keys, camera
+captures, face data, radio NVS or caches. The local camera/identity restore keeps
+its existing package-schema compatibility check; this is separate from strict
+public-export eligibility. A format check is not proof of factory provenance or
+physical performance. The toolkit does not run manufacturing tests or move the
+robot during preservation. Saving microphone measurements does not establish
+which runtime reader uses them; offline image checks are not a hardware restore test.
+
+The factory-record grammar is pinned to
+[`manufacturing/automation_scripts@6ea44333f8707d140050d864c80ff1ceb96614bb`](https://pvindex.org/gitea/manufacturing/automation_scripts/src/commit/6ea44333f8707d140050d864c80ff1ceb96614bb/src/calibration_file_check.py):
+exact `imu`/`camera` objects with `timedate` and `passfail` strings. Accepted dates
+are empty, valid 14-digit `YYYYMMDDhhmmss` production timestamps, or the writer's
+12-digit `YYMMDDhhmmss` example. Accepted results are empty, `False` (the
+mainboard initializer), `PASS` or `FAIL`; arbitrary strings stay local. The
+production timestamp and result constants come from `jibo_test_shared.py`, with
+updates in `mainboard_test.py` and `camera_test.py` at that same revision.
 
 ## Wi-Fi after an RTM2 flash
 

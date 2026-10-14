@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "test_only": false,
+  "keys": {
+    "phoenix-flash-2026-10": "flash-release-public.pem"
+  }
+}

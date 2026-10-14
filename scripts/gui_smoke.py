@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-window GUI smoke + screenshot evidence. All device calls use FakeApi.
 
-Run under Xvfb: python3 scripts/gui_smoke.py --out /dev/shm/dfu-gui-shots
+Run under Xvfb: python3 scripts/gui_smoke.py --out gui-shots
 Requires Tk and ImageMagick's `import`. Never opens jibo_dfu's device layer.
 `--runtime-root` exercises GUI modules extracted from a test package.
 """
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("/dev/shm/dfu-gui-shots"))
+    parser.add_argument("--out", type=Path, default=Path("gui-shots"))
     parser.add_argument("--runtime-root", type=Path, default=ROOT)
     args = parser.parse_args()
     sys.path.insert(0, str(ROOT / "tests"))
@@ -202,12 +202,12 @@ def main():
                 flow("more-tools", [("42-restore-tool", "restore-partitions"),
                      ("43-restore-path", str(manifest)), ("44-restore-var-checklist", ("var",)),
                      ("45-restore-review", "confirm")], "46-restore-success")
-            flow("flash-update", [("47-update-package", "0"), ("48-update-preserve-policy", "preserve"),
+            flow("flash-update", [("47-update-package", "0"), ("48-update-calibration-policy", "keep-calibration"),
                  ("49-update-review", "confirm")], "50-update-success")
-            flow("flash-update", [("51-update-fresh-package", "0"), ("52-update-fresh-policy", "fresh"),
+            flow("flash-update", [("51-update-fresh-package", "0"), ("52-update-calibration-policy", "keep-calibration"),
                  ("53-update-fresh-review-cancel", None)], "54-update-cancelled")
-            flow("flash-update", [("55-update-factory-package", "0"), ("56-update-factory-policy", "factory"),
-                 ("57-update-factory-review", "confirm")], "58-update-factory-success")
+            flow("flash-update", [("55-update-factory-package", "0"), ("56-update-unsafe-policy", "without-calibration"),
+                 ("57-update-unsafe-confirmation", "confirm"), ("57b-update-write-review", "confirm")], "58-update-factory-success")
             flow("more-tools", [("59-remove-tool", "remove-boot-network-status"),
                  ("60-remove-boot-review", "confirm")], "61-remove-success")
             flow("more-tools", [("62-write-var-tool", "write-var"), ("63-write-var-path", "/tmp/edited-var.img"),

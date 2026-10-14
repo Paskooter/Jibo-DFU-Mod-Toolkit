@@ -25,6 +25,10 @@ SOURCES = ("jibo_dfu.py", "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py",
            "assets/boot-network-status/startup-view-dom.js",
            "assets/boot-network-status/boot-network-status.sh",
            "assets/boot-network-status/ota-safe-overlay.js",
+           "jibo_hosted_updates.py", "jibo_flash_policy.py", "jibo_flash_contract.py", "jibo_flash_schema.py",
+           "jibo_calibration_client.py",
+           "assets/flash-images/contract-v1.json", "assets/flash-images/trust.json",
+           "assets/flash-images/flash-release-public.pem",
            "assets/boot-network-status/manifest.json")
 TOOLS = ("tools/shofel2_t124", "tools/intermezzo.bin",
          "tools/dfu_stage2.bin", "tools/dfu-util")

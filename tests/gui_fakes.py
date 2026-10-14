@@ -62,7 +62,7 @@ class FakeApi:
                  "before_size_bytes": 17, "candidate_size_bytes": 26}]}
         elif name == "flash_update":
             plan = {"package": str(args[0]), "version": "13.0.0", "usb_port": "1-1",
-                    "var_policy": "preserve current configuration" if kwargs["preserve_var"] else "fresh setup",
+                    "var_policy": kwargs["var_policy"],
                     "rollback_backup": "var only; other partitions are restored from the package",
                     "partitions": [{"name": n, "bytes": 524288000} for n in ("rootfsA", "rootfsB", "services", "skills")]}
         elif name == "restore_partitions":
@@ -145,3 +145,171 @@ class FakeApi:
     def edit_wifi(self, *args):
         self.calls.append(("edit_wifi", args[:3], {}))
         return {"image": args[1]}
+
+
+# -- hosted Phoenix images (synthetic stand-in for jibo_hosted_updates) -------
+# Field names mirror jibo_hosted_updates' data classes so a renamed field fails here.
+import threading
+import time
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class HostedImage:
+    id: str
+    version: str
+    base_release: str = "13.0.0"
+    components: dict = field(default_factory=dict)
+    size: int = 4000
+    sha256: str = "c" * 64
+    profile: str = "phoenix"
+    strategy: str = "preserve"
+    released_at: str = "2026-10-01"
+    notes: str = ""
+    offered: bool = True
+    is_latest: bool = False
+    compatible: bool = True
+    incompatible_reason: object = None
+    downloaded_path: object = None
+
+
+@dataclass(frozen=True)
+class Catalog:
+    images: tuple
+    latest_id: object
+    fetched_at: str = "2026-10-12T12:00:00Z"
+    from_cache: bool = False
+    error: object = None
+
+
+@dataclass(frozen=True)
+class Progress:
+    phase: str
+    bytes: int
+    total: object
+    percent: object
+    rate: object
+    eta: object
+    message: str = ""
+
+
+class HostedError(Exception):
+    def __init__(self, code, message=""):
+        self.code = code
+        super().__init__(message or code)
+
+
+class CancelToken:
+    def __init__(self):
+        self._event = threading.Event()
+
+    def cancel(self):
+        self._event.set()
+
+    @property
+    def cancelled(self):
+        return self._event.is_set()
+
+
+def sample_catalog(**changes):
+    images = (HostedImage("phx-2", "2.0.0", is_latest=True, sha256="2" * 64),
+              HostedImage("phx-1", "1.0.0", sha256="1" * 64, released_at="2026-09-01"))
+    values = dict(images=images, latest_id="phx-2")
+    values.update(changes)
+    return Catalog(**values)
+
+
+class FakeHosted:
+    """Synthetic hosted backend: no network, no files, no USB."""
+    HostedError = HostedError
+    CancelToken = CancelToken
+
+    def __init__(self, catalog=None, error=None, local=(), path="updates/phoenix-phx-2.tar.bz2"):
+        self.catalog = sample_catalog() if catalog is None and error is None else catalog
+        self.error = error
+        self.local = list(local)
+        self.path = path
+        self.cached = None                # Catalog returned by cached_catalog, else offline
+        self.download_error = None
+        self.gate = None                  # threading.Event: hold the download until set/cancelled
+        self.started = threading.Event()
+        self.calls = []
+        self.threads = []
+        self.progress = None
+        self.cancel = None
+
+    def fetch_catalog(self, *, cache_dir=None, timeout=15.0, cancel=None):
+        self.calls.append(("fetch_catalog", str(cache_dir), timeout))
+        self.threads.append(threading.current_thread())
+        if self.error is not None:
+            raise self.error
+        return self.catalog
+
+    def cached_catalog(self, *, cache_dir=None, error=None):
+        self.calls.append(("cached_catalog", str(cache_dir)))
+        if self.cached is not None:
+            return Catalog(self.cached.images, self.cached.latest_id, from_cache=True, error=error)
+        raise HostedError("offline", "No saved list")
+
+    def local_hosted_images(self, dest_dir=None):
+        self.calls.append(("local_hosted_images", str(dest_dir)))
+        return list(self.local)
+
+    def download_image(self, image_id, *, dest_dir=None, progress=None, cancel=None):
+        self.calls.append(("download_image", image_id, str(dest_dir)))
+        self.threads.append(threading.current_thread())
+        self.progress, self.cancel = progress, cancel
+        progress(Progress("download", 1000, 4000, 25.0, 500.0, 6.0))
+        self.started.set()
+        if self.gate is not None:
+            deadline = time.monotonic() + 15.0   # a failing test must never strand this thread
+            while not self.gate.wait(0.01):
+                if cancel is not None and cancel.cancelled:
+                    progress(Progress("canceled", 1000, 4000, 25.0, None, None, "canceled"))
+                    raise HostedError("canceled", "Hosted operation canceled; no robot action performed")
+                if time.monotonic() > deadline:
+                    raise HostedError("http", "synthetic gate was never released")
+        if self.download_error is not None:
+            raise self.download_error
+        progress(Progress("verify", 4000, 4000, 100.0, None, None))
+        progress(Progress("done", 4000, 4000, 100.0, None, None))
+        return self.path
+
+    def hosted_var_policies(self, image):
+        return [("keep-calibration", True, ""), ("without-calibration", True, "")]
+
+
+class FakeHostedApi(FakeApi):
+    """Device fake with a hosted backend and the public flash_hosted_update seam."""
+
+    def __init__(self, hosted=None, state="dfu", packages=()):
+        super().__init__(state=state)
+        self.hosted = hosted if hosted is not None else FakeHosted()
+        self.packages = [Path(p) for p in packages]
+        self.fail_flashes = 0             # raise a recorded failure before this many flashes
+
+    def flash_hosted_update(self, package_path, *, var_policy="keep-calibration", port=None, dfu_util=None,
+                            out=None, confirmation=None, dry_run=False, resume_from=None, unsafe_without_calibration=False):
+        self.calls.append(("flash_hosted_update", (str(package_path),),
+                           {"var_policy": var_policy, "port": port, "resume_from": resume_from}))
+        assert callable(confirmation), "hosted installs must pass a review callback"
+        if self.fail_flashes:
+            self.fail_flashes -= 1
+            # Same shape as jibo_dfu.flash_update's failure (B 5755f3f jibo_dfu.py:2376-2380).
+            raise RuntimeError("USB transfer stopped.\nUpdate record: updates/op/update-manifest.json")
+        plan = {"package": str(package_path), "version": "13.0.0", "usb_port": "1-1",
+                "var_policy": var_policy,
+                "partitions": [{"name": n, "bytes": 524288000} for n in ("rootfsA", "rootfsB")],
+                "phoenix": {"id": "phx-2", "profile": "phoenix", "base_release": "13.0.0",
+                            "scope": "Userspace filesystems only; no boot0/boot1, BCT, GPT",
+                            "var_policy": var_policy,
+                            "archive_sha256": "2" * 64, "var_write_bytes": 524288000,
+                            "var_candidate_sha256": "d" * 64}}
+        if not confirmation(plan):
+            return {**plan, "status": "cancelled", "manifest": "updates/op/flash-update.json"}
+        self.writes.append("flash_hosted_update")
+        # Same keys as jibo_dfu.flash_update's success return (B 5755f3f jibo_dfu.py:2369-2375).
+        return {"status": "verified", "package": str(package_path), "var_policy": plan["var_policy"],
+                "transferred_partitions": ["rootfsA", "rootfsB", "var"],
+                "verified_partitions": ["rootfsA", "rootfsB", "var"],
+                "manifest": "updates/op/flash-update.json", "backups": {}, "resumed_from": None}

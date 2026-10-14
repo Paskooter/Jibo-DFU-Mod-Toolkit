@@ -66,7 +66,7 @@ class EntryTests(unittest.TestCase):
                 patch.object(j, "enter_shofel_dfu") as enter, \
                 patch.object(j, "run_with_progress") as transfer:
             with self.assertRaisesRegex(j.DfuError, "Enter DFU with ShofEL"):
-                j.flash_update(self.root / "package", preserve_var=True, port="1-2",
+                j.flash_update(self.root / "package", var_policy="keep-calibration", port="1-2",
                                dfu_util="dfu-util")
         enter.assert_not_called()
         transfer.assert_not_called()
@@ -74,7 +74,7 @@ class EntryTests(unittest.TestCase):
     def test_flash_update_cli_no_longer_accepts_signed_recovery_options(self):
         errors = io.StringIO()
         with redirect_stderr(errors), self.assertRaises(SystemExit) as caught:
-            j.main(["flash-update", str(self.root / "package"), "--preserve-var", "--bundle",
+            j.main(["flash-update", str(self.root / "package"), "--keep-calibration", "--bundle",
                     str(self.root / "bundle")])
         self.assertEqual(caught.exception.code, 2)
         self.assertIn("unrecognized arguments: --bundle", errors.getvalue())
@@ -86,13 +86,13 @@ class EntryTests(unittest.TestCase):
                 patch.object(j, "flash_update", return_value={"status": "verified"}) as flash, \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(j.main([
-                "flash-update", str(self.root / "package.tar.bz2"), "--preserve-var",
+                "flash-update", str(self.root / "package.tar.bz2"), "--keep-calibration",
                 "--port", "1-1", "--resume-from", str(manifest),
                 "--yes",
             ]), 0)
         flash.assert_called_once_with(
-            Path(self.root / "package.tar.bz2"), True, "1-1", "/usr/bin/dfu-util",
-            None, "FLASH UPDATE", False, manifest, False,
+            Path(self.root / "package.tar.bz2"), "keep-calibration", "1-1", "/usr/bin/dfu-util",
+            None, "FLASH UPDATE", False, manifest, False, unsafe_without_calibration=False,
         )
 
     def test_flash_update_cli_selects_fresh_calibrated_var(self):
@@ -101,10 +101,10 @@ class EntryTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(j.main([
                 "flash-update", str(self.root / "package.tar.bz2"),
-                "--fresh-var-with-calibration", "--yes",
+                "--keep-calibration", "--yes",
             ]), 0)
-        self.assertFalse(flash.call_args.args[1])
-        self.assertTrue(flash.call_args.kwargs["fresh_with_calibration"])
+        self.assertEqual(flash.call_args.args[1], "keep-calibration")
+        self.assertFalse(flash.call_args.kwargs["unsafe_without_calibration"])
 
 
 if __name__ == "__main__":

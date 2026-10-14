@@ -8,9 +8,14 @@ import curses
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import queue
 import re
 import sys
 import textwrap
+import threading
+
+import jibo_flash_policy as flash_policy
+import jibo_calibration_client as calibration_service
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,9 @@ class MenuItem:
     label: str
     enabled: bool = True
     reason: str = ""
+    # Presentation only: "recommended", "group" (expand/collapse) or "status".
+    # Text always carries the meaning too, so no-color terminals lose nothing.
+    tone: str = ""
 
 
 FILE_LEVEL_VAR_ALTS = frozenset(("jibo-file-v1", "jibo-file-var-in",
@@ -132,8 +140,13 @@ def status_lines(readiness):
             "DFU is not the same as RCM/APX. Restart into RCM/APX, then load the matching recovery.")
 
 
-def build_menu_items(readiness, update_packages=()):
-    """Build actions with disabled reasons instead of hiding their requirements."""
+def build_menu_items(readiness, update_packages=(), hosted_available=False):
+    """Build actions with disabled reasons instead of hiding their requirements.
+
+    ``hosted_available`` means the toolkit can offer Phoenix images from jibo.io;
+    a chosen image is downloaded and checked before the usual reviewed flash, so
+    an empty ./updates folder no longer disables the update action.
+    """
     is_rcm = readiness.state == "rcm"
     is_dfu = readiness.state == "dfu-ready"
     if readiness.state == "none":
@@ -187,7 +200,7 @@ def build_menu_items(readiness, update_packages=()):
                 update_reason += " It also does not expose: " + ", ".join(other_missing) + "."
         else:
             update_reason = "The recovery loader does not expose: " + ", ".join(missing_update) + "."
-    elif not packages:
+    elif not packages and not hosted_available:
         update_reason = "No packages found in ./updates."
     else:
         update_reason = ""
@@ -202,12 +215,414 @@ def build_menu_items(readiness, update_packages=()):
         MenuItem("set-mode-wifi", "Set mode and configure Wi-Fi" +
                  (" (quick edit)" if _can_edit_var_files(readiness) else ""),
                  is_dfu, connection_reason),
-        MenuItem("flash-update", "Install an official update package",
-                 is_dfu and not missing_update and bool(packages), update_reason),
+        MenuItem("flash-update", UPDATE_ACTION_LABEL if hosted_available else
+                 "Install an official update package",
+                 is_dfu and not missing_update and (bool(packages) or hosted_available),
+                 update_reason),
         MenuItem("backup-var", "Save or check a var backup", is_dfu, connection_reason),
-        MenuItem("more-tools", "More tools and local images"),
     ]
+    if hosted_available:
+        # Browsing and downloading never touch USB, so no robot is needed.
+        items.append(MenuItem("download-phoenix", DOWNLOAD_ACTION_LABEL))
+    items.append(MenuItem("more-tools", "More tools and local images"))
     return tuple(items)
+
+
+UPDATE_ACTION_LABEL = "Install a Phoenix image or an official update"
+DOWNLOAD_ACTION_LABEL = "Download a Phoenix image (no robot needed)"
+HOSTED_MODULE = "jibo_hosted_updates"
+CHOOSER_TIMEOUT = 5.0
+LATEST_LABEL = "Latest Phoenix image \u2014 recommended"
+KEEP_DATA_LABEL = flash_policy.KEEP_LABEL
+_HOSTED_ERROR_TEXT = {
+    "offline": "Can't reach jibo.io right now.",
+    "signature": "The Phoenix image list could not be checked, so it is not shown.",
+    "hash": "The download did not match its published checksum and was not used.",
+    "expired": "The Phoenix image list is out of date, so it is not shown.",
+    "incompatible": "This image does not fit this toolkit or robot.",
+    "canceled": "Download canceled. Start it again to pick up where it stopped.",
+    "http": "jibo.io answered with an error.",
+    "disk": "There is not enough free space to save the image.",
+    "rate_limited": "jibo.io is busy. Try again in a few minutes.",
+    "dependency": "This copy of the toolkit can't check Phoenix images.",
+    "check-canceled": "The image list check was canceled.",
+}
+_PHASE_TEXT = {
+    "index": "Checking the image list", "manifest": "Checking the image details",
+    "download": "Downloading", "verify": "Checking the download",
+    "done": "Download complete", "error": "Download stopped", "canceled": "Download canceled",
+}
+
+
+def hosted_module(api=None):
+    """Return the hosted-image backend exposed by the device API, or None.
+
+    The real ``jibo_dfu`` imports ``jibo_hosted_updates`` as ``hosted`` and
+    provides ``flash_hosted_update``; without both, this toolkit cannot install
+    a Phoenix image, so the chooser stays the plain local-package list. Nothing
+    here imports or contacts the network.
+    """
+    injected = getattr(api, "hosted", None)
+    if injected is None or injected is False:
+        return None  # older device layer, or an embedder/test turned it off
+    if not callable(getattr(api, "flash_hosted_update", None)):
+        return None
+    return injected
+
+
+def hosted_folders():
+    """``(updates, cache)``: the toolkit's working folder, never a pyz temp root."""
+    updates = Path.cwd() / "updates"
+    return updates, updates / ".hosted"
+
+
+def hosted_error_text(code, fallback=""):
+    return _HOSTED_ERROR_TEXT.get(code) or fallback or "Phoenix images are unavailable right now."
+
+
+def _human_bytes(value):
+    value = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1000 or unit == "GB":
+            return ("%d %s" % (value, unit)) if unit == "B" else ("%.1f %s" % (value, unit))
+        value /= 1000.0
+    return "%.1f GB" % value
+
+
+def format_progress(progress):
+    """One plain line with bytes, percent, rate and time left when known."""
+    text = _PHASE_TEXT.get(getattr(progress, "phase", ""), "Working")
+    percent = getattr(progress, "percent", None)
+    if percent is not None:
+        text += " %d%%" % int(max(0.0, min(100.0, percent)))
+    done, total = getattr(progress, "bytes", 0) or 0, getattr(progress, "total", None)
+    details = []
+    if done or total:
+        details.append(_human_bytes(done) + (" of " + _human_bytes(total) if total else ""))
+    rate, eta = getattr(progress, "rate", None), getattr(progress, "eta", None)
+    if rate:
+        details.append(_human_bytes(rate) + "/s")
+    if eta is not None and getattr(progress, "phase", "") == "download":
+        seconds = int(max(0, eta))
+        details.append(("about %d min left" % ((seconds + 59) // 60)) if seconds >= 60
+                       else ("%d s left" % seconds))
+    return text + (" \u2014 " + ", ".join(details) if details else "")
+
+
+def _image_label(image, prefix=""):
+    label = (prefix + ": " if prefix else "") + "Phoenix " + str(image.version)
+    if getattr(image, "base_release", ""):
+        label += " (on " + str(image.base_release) + ")"
+    if getattr(image, "downloaded_path", None):
+        label += " \u2014 downloaded"
+    return label
+
+
+def _same_file(left, right):
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return str(left) == str(right)
+
+
+def hosted_chooser_items(catalog=None, local_hosted=(), packages=(), show_older=False,
+                         error_code=None):
+    """Build the image chooser in display order.
+
+    Returns ``(items, choices)``. ``choices`` maps an enabled key to
+    ``("hosted", HostedImage)`` or ``("local", Path)``. The signed latest image
+    comes first; a missing, incompatible or failed latest never promotes an
+    older row. Local packages keep their original order below, minus files that
+    are already shown as downloaded Phoenix images.
+    """
+    items, choices = [], {}
+    images = tuple(getattr(catalog, "images", ()) or ()) if catalog is not None else ()
+    latest_id = getattr(catalog, "latest_id", None) if catalog is not None else None
+    latest = next((image for image in images if image.id == latest_id and image.is_latest), None)
+    saved_list = bool(getattr(catalog, "from_cache", False))
+    problem = error_code or (getattr(catalog, "error", None) if catalog is not None else None)
+    # A saved list carries "code: detail"; only the code picks the plain text.
+    problem = str(problem).split(":", 1)[0].strip() if problem else None
+    if latest is not None and latest.offered:
+        label = _image_label(latest, LATEST_LABEL)
+        if saved_list:
+            label += " (saved list)"
+        enabled = bool(latest.compatible)
+        reason = "" if enabled else (hosted_error_text("incompatible") +
+                                     (" " + latest.incompatible_reason
+                                      if latest.incompatible_reason else ""))
+        items.append(MenuItem("hosted:" + latest.id, label, enabled, reason, tone="recommended"))
+        if enabled:
+            choices["hosted:" + latest.id] = ("hosted", latest)
+    if problem:
+        items.append(MenuItem("status:catalog", "Phoenix images: " + hosted_error_text(problem) +
+                              (" Showing the last checked list." if saved_list else "") +
+                              " Local packages below still work.", False,
+                              hosted_error_text(problem), tone="status"))
+    elif catalog is None:
+        items.append(MenuItem("status:catalog", "Phoenix images: not checked yet.", False,
+                              "Local packages below still work.", tone="status"))
+    shown_hosted = [image for image in images if image.offered]
+    known = {(image.id, image.sha256) for image in shown_hosted}
+    downloaded = [image for image in local_hosted or ()
+                  if (image.id, image.sha256) not in known]
+    for image in downloaded:
+        key = "hosted:" + image.id
+        if key in choices:
+            continue
+        enabled = bool(getattr(image, "compatible", True))
+        items.append(MenuItem(key, _image_label(image, "Saved Phoenix image"), enabled,
+                              "" if enabled else hosted_error_text("incompatible")))
+        if enabled:
+            choices[key] = ("hosted", image)
+    hosted_paths = [image.downloaded_path for image in tuple(shown_hosted) + tuple(downloaded)
+                    if getattr(image, "downloaded_path", None)]
+    for index, package in enumerate(packages or ()):
+        if any(_same_file(package, path) for path in hosted_paths):
+            continue
+        key = "local:%d" % index
+        items.append(MenuItem(key, Path(package).name))
+        choices[key] = ("local", Path(package))
+    older = [image for image in shown_hosted if latest is None or image.id != latest.id]
+    if older:
+        items.append(MenuItem("older", ("Hide older Phoenix images" if show_older else
+                                        "Show older Phoenix images (%d)" % len(older)),
+                              tone="group"))
+        if show_older:
+            for image in older:
+                key = "hosted:" + image.id
+                enabled = bool(image.compatible)
+                items.append(MenuItem(key, "  " + _image_label(image) +
+                                      (" \u2014 " + image.released_at if image.released_at else ""),
+                                      enabled, "" if enabled else
+                                      hosted_error_text("incompatible")))
+                if enabled:
+                    choices[key] = ("hosted", image)
+    return tuple(items), choices
+
+
+def flash_policy_items():
+    return (MenuItem(flash_policy.KEEP, flash_policy.KEEP_LABEL, reason=flash_policy.KEEP_DETAIL,
+                     tone="recommended"),
+            MenuItem(flash_policy.WITHOUT, flash_policy.WITHOUT_LABEL,
+                     reason=flash_policy.WITHOUT_DETAIL, tone="danger"))
+
+
+def hosted_policy_items(hosted, image):
+    """The same fresh-setup choices apply to every authenticated image."""
+    return flash_policy_items()
+
+
+def _choose_flash_policy():
+    return select_option(
+        "Choose calibration handling", flash_policy_items(),
+        prompt="Choose what to put back after flashing.",
+        detail="Both choices start with a fresh image. A new verified backup is saved before writing.",
+        initial=flash_policy.KEEP)
+
+
+def _unsafe_flash_confirmation():
+    return confirm_action(flash_policy.UNSAFE_TITLE, flash_policy.UNSAFE_DETAIL)
+
+
+def looks_like_phoenix_package(path):
+    """Phoenix archives use phoenix-*.tar.bz2 names; the backend still decides."""
+    return Path(str(path)).name.lower().startswith("phoenix-")
+
+
+def _error_code(error):
+    return getattr(error, "code", None) or "http"
+
+
+def _progress_session(screen, title, detail, events, cancel, thread):
+    _start_screen(screen)
+    screen.timeout(100)
+    dim = getattr(curses, "A_DIM", 0)
+    line, cancelling = "Starting...", False
+    while True:
+        try:
+            while True:
+                line = format_progress(events.get_nowait())
+        except queue.Empty:
+            pass
+        row, height, _width = _screen_heading(screen, title, detail)
+        _addstr(screen, row + 1, 0, line)
+        _addstr(screen, height - 1, 0, "Canceling..." if cancelling else "Esc or c  Cancel", dim)
+        screen.refresh()
+        if not thread.is_alive():
+            return
+        key = screen.getch()
+        if key in (27, ord("c"), ord("C")) and not cancelling:
+            cancel.cancel()
+            cancelling = True
+
+
+def run_with_progress(title, work, cancel, detail=""):
+    """Run ``work(report, cancel)`` off the screen thread; return ``(value, error)``.
+
+    The terminal shows the latest progress line and cancels on Esc or c. Network
+    work never runs on the thread that draws the screen.
+    """
+    events, box = queue.Queue(), {}
+
+    def target():
+        try:
+            box["value"] = work(events.put, cancel)
+        except Exception as exc:  # handed back to the flow, never raised here
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, name="jibo-hosted-work", daemon=True)
+    thread.start()
+    try:
+        if _terminal_available():
+            curses.wrapper(lambda screen: _progress_session(
+                screen, title, detail, events, cancel, thread))
+        thread.join()
+    except KeyboardInterrupt:
+        cancel.cancel()
+        thread.join()
+        raise
+    return box.get("value"), box.get("error")
+
+
+def _load_chooser(hosted):
+    """Fetch the signed list (5 s) and the verified downloads; never raises."""
+    updates_dir, cache_dir = hosted_folders()
+    catalog, error = run_with_progress(
+        "Checking for Phoenix images",
+        lambda report, cancel: hosted.fetch_catalog(cache_dir=cache_dir, timeout=CHOOSER_TIMEOUT,
+                                                    cancel=cancel),
+        hosted.CancelToken(), detail="Looking for the latest Phoenix image on jibo.io.")
+    code = None
+    if error is not None:
+        catalog = None
+        code = "check-canceled" if _error_code(error) == "canceled" else _error_code(error)
+        if code == "check-canceled":
+            # Canceling the check may still show the last signed list (no network).
+            try:
+                catalog = hosted.cached_catalog(cache_dir=cache_dir, error=code)
+            except Exception:
+                catalog = None
+    try:
+        local = tuple(hosted.local_hosted_images(updates_dir))
+    except Exception:
+        local = ()
+    return catalog, local, code
+
+
+def _choose_image(api, hosted, title, include_local):
+    updates_dir, _ = hosted_folders()
+    packages = ()
+    if include_local:
+        try:
+            packages = tuple(api._update_candidates(updates_dir))
+        except Exception:
+            packages = ()
+    catalog, local, code = _load_chooser(hosted)
+    show_older = False
+    while True:
+        items, choices = hosted_chooser_items(catalog, local, packages, show_older, code)
+        if not choices and not any(item.key == "older" for item in items):
+            return None, "No Phoenix images or local packages are available. " + \
+                (hosted_error_text(code) if code else "")
+        key = select_option(title, items, prompt="Select an image to continue.",
+                            detail="Phoenix images come from jibo.io and are checked before use. "
+                                   "Local packages are read from " + str(updates_dir) + ".")
+        if key is None:
+            return None, "No image selected."
+        if key == "older":
+            show_older = not show_older
+            continue
+        if key in choices:
+            return choices[key], ""
+
+
+def _download_chosen(hosted, image):
+    """Return ``(path, message)``; resumes a stopped download of the same image."""
+    if getattr(image, "downloaded_path", None):
+        return image.downloaded_path, ""
+    updates_dir, _ = hosted_folders()
+    path, error = run_with_progress(
+        "Downloading Phoenix " + str(image.version),
+        lambda report, cancel: hosted.download_image(image.id, dest_dir=updates_dir,
+                                                     progress=report, cancel=cancel),
+        hosted.CancelToken(),
+        detail="No robot is needed while downloading. Canceling keeps what was already saved.")
+    if error is not None:
+        return None, hosted_error_text(_error_code(error), str(error))
+    return path, ""
+
+
+def _hosted_confirmation_details(plan):
+    details = _confirmation_details(plan, "Review the Phoenix image install before writing.")
+    phoenix = plan.get("phoenix") if isinstance(plan, dict) else None
+    if not isinstance(phoenix, dict):
+        return details
+    lines = [details, "", flash_policy.PHOENIX_LINE, "",
+             "This is a Phoenix image on an official Jibo base, not an official Jibo release."]
+    for key, label in (("id", "Phoenix image"), ("base_release", "Official base"),
+                       ("profile", "Profile"), ("archive_sha256", "Archive SHA-256"),
+                       ("scope", "What it changes"), ("var_retention", "This robot's data")):
+        if phoenix.get(key):
+            lines.append("{}: {}".format(label, phoenix[key]))
+    if phoenix.get("var_write_bytes"):
+        lines.append("Var write: {} bytes, read back after writing.".format(phoenix["var_write_bytes"]))
+    if phoenix.get("var_candidate_sha256"):
+        lines.append("New var SHA-256: {}".format(phoenix["var_candidate_sha256"]))
+    lines.append("Only var gets a rollback copy. The boot chain and partition table are not changed "
+                 "or repaired by this install.")
+    return "\n".join(lines)
+
+
+def _install_hosted(api, hosted, image, path, port):
+    policy = _choose_flash_policy()
+    if policy is None:
+        return {"status": "cancelled", "message": "No calibration choice selected. Nothing was written."}
+    if policy == flash_policy.WITHOUT and not _unsafe_flash_confirmation():
+        return {"status": "cancelled", "message": "Nothing was written."}
+    confirmation = lambda plan: confirm_action("Confirm Phoenix image install",
+                                               _hosted_confirmation_details(plan))
+    result = api.flash_hosted_update(path, var_policy=policy, port=port,
+                                     confirmation=confirmation,
+                                     unsafe_without_calibration=policy == flash_policy.WITHOUT)
+    # The backend's result is the reviewed flash result; name the image for the summary.
+    return {**result, "phoenix_image": str(image.version)} if isinstance(result, dict) else result
+
+
+_UPDATE_RECORD = re.compile(r"^Update record: (.+)$", re.M)
+
+
+def failed_update_record(error):
+    """The operation record a failed flash names (``...\\nUpdate record: PATH``), else None."""
+    match = _UPDATE_RECORD.search(str(error))
+    return match.group(1).strip() if match else None
+
+
+def _run_hosted_update(api, hosted, port=None):
+    choice, message = _choose_image(api, hosted, "Choose an image to install", include_local=True)
+    if choice is None:
+        return {"status": "cancelled", "message": message}
+    kind, value = choice
+    if kind == "local":
+        return _run_local_update(api, value, port, phoenix_marked=looks_like_phoenix_package(value))
+    path, message = _download_chosen(hosted, value)
+    if path is None:
+        return {"status": "cancelled", "message": message}
+    return _install_hosted(api, hosted, value, path, port)
+
+
+def _run_hosted_download(api):
+    hosted = hosted_module(api)
+    if hosted is None:
+        raise RuntimeError(hosted_error_text("dependency"))
+    choice, message = _choose_image(api, hosted, "Choose a Phoenix image to download",
+                                    include_local=False)
+    if choice is None:
+        return {"status": "cancelled", "message": message}
+    path, message = _download_chosen(hosted, choice[1])
+    if path is None:
+        return {"status": "cancelled", "message": message}
+    return {"status": "downloaded", "image": str(path), "version": str(choice[1].version)}
 
 
 def _addstr(screen, y, x, value, attr=0, width=None):
@@ -302,22 +717,30 @@ def _select_session(screen, title, options, prompt="", detail="", initial=None,
         row += 1
         dim = getattr(curses, "A_DIM", 0)
         reverse = getattr(curses, "A_REVERSE", 0)
-        available = max(1, height - row - 4)
+        hint = (items[selected].reason if items and items[selected].reason else prompt)
+        if items and not items[selected].enabled and not hint:
+            hint = "This action is unavailable."
+        hint_lines = _wrap(hint, max(1, width - 2))
+        available = max(1, height - row - len(hint_lines) - 2)
         start = max(0, min(selected - available + 1, len(items) - available))
         for index in range(start, min(len(items), start + available)):
             item = items[index]
             text = ("> " if index == selected else "  ") + item.label
             attr = 0 if item.enabled else dim
+            if item.enabled and item.tone == "recommended":
+                attr |= getattr(curses, "A_BOLD", 0)
+            if item.tone == "danger":
+                try:
+                    curses.init_pair(1, curses.COLOR_RED, -1)
+                    attr |= curses.color_pair(1) | getattr(curses, "A_BOLD", 0)
+                except curses.error:
+                    attr |= getattr(curses, "A_BOLD", 0)
             if index == selected:
                 attr |= reverse
             _addstr(screen, row + index - start, 0, text, attr)
 
-        hint_y = min(height - 3, row + available)
-        if items and not items[selected].enabled:
-            hint = items[selected].reason or "This action is unavailable."
-        else:
-            hint = prompt
-        for offset, segment in enumerate(_wrap(hint, max(1, width - 2))):
+        hint_y = min(height - 2, row + available)
+        for offset, segment in enumerate(hint_lines[:max(0, height - hint_y - 1)]):
             _addstr(screen, hint_y + offset, 0, segment, dim)
         _addstr(screen, height - 1, 0,
                 "↑/↓ Select   Enter Open   Esc " + str(cancel_label), dim)
@@ -516,7 +939,8 @@ def confirm_action(title, message, phrase=None):
         detail += "\nConfirmation: " + str(phrase)
     choice = select_option(
         title,
-        (MenuItem("cancel", "Cancel"), MenuItem("confirm", "Confirm")),
+        (MenuItem("cancel", "Cancel"), MenuItem("confirm", "Confirm",
+             tone="danger" if title == flash_policy.UNSAFE_TITLE else "")),
         prompt="Review the details, then select Confirm to continue.",
         detail=detail,
         initial="cancel")
@@ -567,7 +991,17 @@ def _result_summary(action, result):
         lines = [("Backup ready: " if status == "backup complete" else "Restored: ") +
                  ", ".join(names) + ".", "Record: " + str(result["manifest"])]
     elif action == "flash-update":
-        lines = ["Official update: {}.".format(status)]
+        if result.get("phoenix_image"):
+            lines = ["Phoenix {} install: {}.".format(result["phoenix_image"], status)]
+            if result.get("manifest"):
+                lines.append("Record: " + str(result["manifest"]))
+        else:
+            lines = ["Official update: {}.".format(status)]
+    elif action == "download-phoenix":
+        lines = ["Phoenix {} is downloaded and checked.".format(result.get("version", "image")),
+                 "Saved at: " + str(result.get("image", "")),
+                 "Installing it is a separate step: put the robot in DFU, then choose "
+                 "\"" + UPDATE_ACTION_LABEL + "\"."]
     elif action == "probe-dfu-gpt" or "partition_sizes_bytes" in result:
         lines = ["Partition layout checked."]
     elif action == "write-var":
@@ -583,6 +1017,11 @@ def _result_summary(action, result):
         return _screen_lines(result)
     if result.get("operation_directory"):
         lines.append("Operation record: " + str(result["operation_directory"]))
+    if calibration_service.CALIBRATION_SHARING_AVAILABLE and result.get("calibration_sharing") is not None:
+        lines.append("Local backup: verified")
+        lines.append("Calibration sharing: " + result["calibration_sharing"])
+        if result.get("calibration_sharing_detail"):
+            lines.extend(result["calibration_sharing_detail"].splitlines())
     return lines
 
 
@@ -654,7 +1093,8 @@ class TerminalMenu:
             packages = self.api._update_candidates(folder)
         except Exception:
             packages = ()
-        self.items = build_menu_items(self.readiness, packages)
+        self.items = build_menu_items(self.readiness, packages,
+                                      hosted_available=hosted_module(self.api) is not None)
         self.selected = next((index for index, item in enumerate(self.items)
                               if item.key == selected_key),
                              min(self.selected, len(self.items) - 1) if self.items else 0)
@@ -774,6 +1214,7 @@ def _action_hint(key):
         "configure-wifi": "Enter a network; review the proposed change and confirm before writing.",
         "set-mode-wifi": "Choose a mode and network; apply both in one reviewed operation.",
         "flash-update": "Choose a package and var policy; review the flash plan before confirming.",
+        "download-phoenix": "Download and check a Phoenix image now; installing it is a separate, reviewed step.",
         "write-var": "Select an edited image; review and confirm before writing.",
         "inspect-backup": "Read mode and Wi-Fi presence from a local image without showing credentials.",
         "edit-backup": "Create an edited copy of a local image. The source image is kept unchanged.",
@@ -804,8 +1245,9 @@ def _confirmation_details(plan, introduction):
         ("package", "Package"),
         ("version", "Version"),
         ("usb_port", "USB port"),
-        ("var_policy", "Var policy"),
         ("filesystem_resize", "Filesystem resize"),
+        ("calibration_choice", "Calibration choice"),
+        ("calibration_detail", "Calibration details"),
         ("rollback_backup", "Rollback backup"),
         ("partition", "Partition"),
         ("size_bytes", "Size (bytes)"),
@@ -814,6 +1256,12 @@ def _confirmation_details(plan, introduction):
         ("baseline_backup", "Rollback backup"),
         ("baseline_sha256", "Backup SHA-256"),
         ("source_manifest", "Backup set"),
+        ("calibration_source", "Calibration source"),
+        ("calibration_files", "Calibration files"),
+        ("calibration_revision", "Calibration revision"),
+        ("calibration_digest", "Calibration digest"),
+        ("identity_source", "Identity source"),
+        ("readback_policy", "Readback policy"),
     )
     for key, label in fields:
         if plan.get(key) is not None:
@@ -856,7 +1304,29 @@ def _select_mode(title="Set robot mode"):
         detail="Mode changes are written to the robot only after the change plan is reviewed.")
 
 
+def _run_local_update(api, package, port=None, phoenix_marked=False):
+    """Review calibration choice, unsafe consent, then the partition write plan."""
+    policy = _choose_flash_policy()
+    if policy is None:
+        return {"status": "cancelled", "message": "No calibration choice selected."}
+    if policy == flash_policy.WITHOUT and not _unsafe_flash_confirmation():
+        return {"status": "cancelled", "message": "Nothing was written."}
+
+    def confirmation(plan):
+        if isinstance(plan, dict) and plan.get("phoenix"):
+            return confirm_action("Confirm Phoenix image install", _hosted_confirmation_details(plan))
+        return confirm_action(
+            "Confirm full-flash update",
+            _confirmation_details(plan, "Review the package, calibration choice, and partitions before writing."))
+    return api.flash_update(package, var_policy=policy, port=port,
+                            confirmation=confirmation,
+                            unsafe_without_calibration=policy == flash_policy.WITHOUT)
+
+
 def _run_update(api, port=None):
+    hosted = hosted_module(api)
+    if hosted is not None:
+        return _run_hosted_update(api, hosted, port)
     folder = Path.cwd() / "updates"
     packages = api._update_candidates(folder)
     if not packages:
@@ -868,27 +1338,27 @@ def _run_update(api, port=None):
         detail="Packages are read from " + str(folder) + ".")
     if package_key is None:
         return {"status": "cancelled", "message": "No package selected."}
-    policy_key = select_option(
-        "Choose var handling",
-        (("preserve", "Preserve current var and robot settings"),
-         ("fresh", "Use package var for a fresh setup"),
-         ("factory", "Fresh setup with this robot's saved calibration")),
-        prompt="Choose how the update handles the var partition.",
-        detail=("Preserve keeps the current robot identity, mode, Wi-Fi, and user configuration.\n"
-                "Fresh replaces those settings with the package image.\n"
-                "Fresh with calibration restores this robot's identity and camera calibration, sets OOBE mode, and clears old Wi-Fi and user data."))
-    if policy_key is None:
-        return {"status": "cancelled", "message": "No var policy selected."}
     package = packages[int(package_key)]
-    confirmation = lambda plan: confirm_action(
-        "Confirm full-flash update",
-        _confirmation_details(plan, "Review the package, var policy, and partitions before writing."))
-    return api.flash_update(package, preserve_var=policy_key == "preserve", port=port,
-                            confirmation=confirmation,
-                            fresh_with_calibration=policy_key == "factory")
+    return _run_local_update(api, package, port, phoenix_marked=looks_like_phoenix_package(package))
 
 
 def execute_action(api, key, readiness):
+    """One calibration policy/session for the same GUI and TUI action."""
+    if not calibration_service.CALIBRATION_SHARING_AVAILABLE:
+        return _execute_action(api, key, readiness)
+    try:
+        from jibo_calibration_flow import SharingFlow, operation
+    except ImportError:
+        return _execute_action(api, key, readiness)  # Older packaged offline installs remain usable.
+    with operation(SharingFlow(api, select_option)) as sharing:
+        result = _execute_action(api, key, readiness)
+        if isinstance(result, dict) and sharing.outcome is not None:
+            result = dict(result, calibration_sharing=sharing.outcome,
+                          calibration_sharing_detail=sharing.detail)
+        return result
+
+
+def _execute_action(api, key, readiness):
     """Run an action selected from the main screen using the shared curses prompts."""
     if key == "enter-dfu-shofel":
         if readiness.state != "rcm":
@@ -905,6 +1375,18 @@ def execute_action(api, key, readiness):
             return {"status": "cancelled", "message": "DFU entry was cancelled."}
         return api.enter_shofel_dfu(port=readiness.port,
                                     confirm_meerkat_rev02=True)
+    if key in ("calibration-sharing", "calibration-lookup", "calibration-remove"):
+        calibration_service.require_available()
+        from jibo_calibration_flow import active
+        sharing = active()
+        identity = api.calibration_identity(port=readiness.port)
+        if key == "calibration-sharing":
+            return sharing.settings(identity)
+        if key == "calibration-remove":
+            return sharing.remove(identity)
+        download = sharing.lookup_for_fresh_setup(identity)
+        return {"status": "complete" if download else "cancelled",
+                "message": "Reviewed calibration verified; no robot write was made. Use fresh setup to apply it with local identity." if download else "No downloaded calibration used."}
     if key == "backup-var":
         return api.backup_var(port=readiness.port)
     if key == "probe-dfu-gpt":
@@ -1035,6 +1517,8 @@ def execute_action(api, key, readiness):
         return api.boot_network_status_live("remove", port=readiness.port, confirmation=confirmation)
     if key == "flash-update":
         return _run_update(api, port=readiness.port)
+    if key == "download-phoenix":
+        return _run_hosted_download(api)
     if key == "more-tools":
         options = []
         if readiness.state == "dfu-ready":
@@ -1043,6 +1527,10 @@ def execute_action(api, key, readiness):
                             ("restore-partitions", "Restore selected partitions"),
                             ("write-var", "Write an edited var image"),
                             ("remove-boot-network-status", "Remove boot-screen Wi-Fi/IP status")))
+            if calibration_service.CALIBRATION_SHARING_AVAILABLE:
+                options.extend((("calibration-sharing", "Calibration sharing"),
+                                ("calibration-lookup", "Look up this Jibo's calibration"),
+                                ("calibration-remove", "Remove my shared calibration")))
         options.extend((("inspect-backup", "Inspect a local var backup"),
                         ("edit-backup", "Edit a local var backup")))
         selected = select_option("More tools", options,

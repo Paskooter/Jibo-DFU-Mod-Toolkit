@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -151,7 +151,7 @@ def _replace_file(image, image_path, content, workdir):
         raise ImageError("The edited file did not match its offline readback.")
 
 
-def _put_factory_file(image, image_path, content, workdir, mode):
+def _put_factory_file(image, image_path, content, workdir, mode, source_metadata=None):
     """Replace a stock file or add a missing per-robot file on a disposable image."""
     existing = _extract(image, image_path, Path(workdir) / "existing", optional=True)
     if existing is not None:
@@ -159,6 +159,8 @@ def _put_factory_file(image, image_path, content, workdir, mode):
         _run_debugfs(image, "rm " + image_path, writable=True)
     else:
         metadata = {"mode": format(0o100000 | mode, "07o"), "uid": "0", "gid": "0"}
+    if source_metadata is not None:
+        metadata = source_metadata
     replacement = Path(workdir) / "replacement"
     replacement.write_bytes(content)
     replacement.chmod(0o600)
@@ -217,18 +219,88 @@ def factory_calibration_available(backup, stock):
     return True
 
 
+def _calibration_item(backup, key, workdir):
+    # Lazy import avoids a cycle: the pure extractor uses our debugfs helpers.
+    import jibo_calibration as calibration
+    spec = next(item for item in calibration.ITEMS if item.key == key)
+    try:
+        raw, status = calibration._read_item(backup, spec, Path(workdir) / key)
+    except calibration.CalibrationError as exc:
+        raise ImageError("Could not inspect saved calibration: " + key) from exc
+    metadata = _file_metadata(backup, spec.image_path) if raw is not None else None
+    return spec, raw, status, metadata
+
+
+def _put_calibration_item(candidate, spec, raw, metadata, workdir):
+    import jibo_calibration as calibration
+    # No symlink traversal, including parents in the incoming package image.
+    parents = list(reversed(PurePosixPath(spec.image_path).parents))
+    for parent in parents:
+        stat = calibration._image_stat(candidate, str(parent))
+        if stat is None:
+            _run_debugfs(candidate, "mkdir " + str(parent), writable=True)
+            for field, value in (("mode", "040755"), ("uid", "0"), ("gid", "0")):
+                _run_debugfs(candidate, "set_inode_field {} {} {}".format(parent, field, value), writable=True)
+        elif stat[0] != "directory":
+            raise ImageError("Calibration destination parent is not a directory.")
+    stat = calibration._image_stat(candidate, spec.image_path)
+    if stat is not None and stat[0] != "regular":
+        raise ImageError("Calibration destination is not a regular file.")
+    _put_factory_file(candidate, spec.image_path, raw, workdir, 0o644, source_metadata=metadata)
+    if _file_metadata(candidate, spec.image_path) != metadata:
+        raise ImageError("Restored calibration permissions did not match the backup.")
+
+
+def _distortion_caches(image):
+    output = _run_debugfs(image, "ls -p /jibo/lps")
+    paths = []
+    for line in output.splitlines():
+        fields = line.split("/")
+        if len(fields) >= 7 and fields[5].startswith("distortionPrecomputeFile_"):
+            paths.append("/jibo/lps/" + fields[5])
+    return paths
+
+
+def _remove_distortion_caches(candidate):
+    import jibo_calibration as calibration
+    paths = _distortion_caches(candidate)
+    for path in paths:
+        if any(char in path for char in "\n\r\x00"):
+            raise ImageError("Unsupported distortion cache filename.")
+        stat = calibration._image_stat(candidate, path)
+        if stat is None or stat[0] not in ("regular", "symlink"):
+            raise ImageError("A distortion cache is not a regular file or symlink.")
+        quoted = '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        _run_debugfs(candidate, "rm " + quoted, writable=True)
+    if _distortion_caches(candidate):
+        raise ImageError("Distortion caches survived removal from the candidate.")
+    return paths
+
+
 def build_factory_fresh_var(stock, backup, destination):
     """Make stock var fresh for OOBE while retaining this robot's factory files."""
     stock, backup, destination = Path(stock), Path(backup), Path(destination)
     if stock.is_symlink() or backup.is_symlink() or destination.exists() or destination.is_symlink():
         raise ImageError("Factory var inputs must be regular files and the output must be new.")
     raw, name, camera_matches_stock = _factory_inputs(backup, stock)
+    restored = list(FACTORY_CAMERA_PATHS)
+    status = {"left": "restored", "right": "restored", "inter_camera": "restored",
+              "touchscreen": "not preserved (no backup of that partition)",
+              "factory_record": "not preserved (no backup of that partition)"}
     try:
         shutil.copyfile(stock, destination)
         destination.chmod(0o600)
         with tempfile.TemporaryDirectory(prefix="jibo-factory-edit-") as temporary:
             for path in FACTORY_CAMERA_PATHS:
                 _put_factory_file(destination, path, raw[path], temporary, 0o644)
+            for key in ("imu", "audio"):
+                spec, content, item_status, metadata = _calibration_item(backup, key, temporary)
+                status[key] = item_status
+                if content is not None:
+                    _put_calibration_item(destination, spec, content, metadata, temporary)
+                    status[key] = "restored"
+                    restored.append(spec.image_path)
+            removed_caches = _remove_distortion_caches(destination)
             _put_factory_file(destination, FACTORY_IDENTITY_PATH,
                               raw[FACTORY_IDENTITY_PATH], temporary, 0o600)
             _put_factory_file(destination, "/jibo/mode.json", b'{"mode":"oobe"}',
@@ -240,10 +312,51 @@ def build_factory_fresh_var(stock, backup, destination):
         _check_ext4(destination)
         if destination.stat().st_size != stock.stat().st_size:
             raise ImageError("The calibrated var image changed length.")
-        return {"image": str(destination), "calibration_files": list(FACTORY_CAMERA_PATHS),
+        return {"image": str(destination), "calibration_files": restored,
+                "calibration_status": status, "removed_distortion_caches": removed_caches,
                 "identity_restored": True, "mode": "oobe",
                 "camera_matches_stock": camera_matches_stock,
                 "sha256": sha256_file(destination)}
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def build_calibrated_partition(stock, backup, destination, partition):
+    """Preserve a conditional item in a NEW rootfs/skills copy, when backed up.
+
+    The caller must bind the backup to the connected robot before calling. No
+    file is invented when the partition backup or supported item is absent.
+    """
+    keys = {"rootfs": "touchscreen", "skills": "factory_record"}
+    if partition not in keys:
+        raise ImageError("Conditional calibration is supported only for rootfs and skills.")
+    stock, destination = Path(stock), Path(destination)
+    if stock.is_symlink() or not stock.is_file() or destination.exists() or destination.is_symlink():
+        raise ImageError("Calibration inputs must be regular files and the output must be new.")
+    key = keys[partition]
+    status = "not preserved (no backup of that partition)"
+    raw = None
+    if backup is not None:
+        backup = Path(backup)
+        if backup.is_symlink() or not backup.is_file():
+            raise ImageError("The calibration backup must be a regular partition image.")
+    try:
+        with tempfile.TemporaryDirectory(prefix="jibo-partition-calibration-") as temporary:
+            if backup is not None:
+                spec, raw, status, metadata = _calibration_item(backup, key, temporary)
+            if raw is not None:
+                shutil.copyfile(stock, destination)
+                destination.chmod(0o600)
+                _put_calibration_item(destination, spec, raw, metadata, temporary)
+                _check_ext4(destination)
+                if destination.stat().st_size != stock.stat().st_size:
+                    raise ImageError("The calibrated partition image changed length.")
+                status = "restored"
+        selected = destination if raw is not None else stock
+        return {"image": str(selected), "sha256": sha256_file(selected),
+                "calibration_files": [spec.image_path] if raw is not None else [],
+                "calibration_status": {key: status}}
     except BaseException:
         destination.unlink(missing_ok=True)
         raise

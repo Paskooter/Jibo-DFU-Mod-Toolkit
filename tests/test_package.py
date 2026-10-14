@@ -75,6 +75,10 @@ class PackageTests(unittest.TestCase):
             "jibo_dfu.py",
             "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py", "jibo_images.py",
             "jibo_updates.py", "jibo_tui.py", "jibo_gui.py", "jibo_gui_core.py",
+            "jibo_hosted_updates.py", "jibo_flash_policy.py", "jibo_flash_contract.py", "jibo_flash_schema.py",
+            "jibo_calibration_client.py",
+            "assets/flash-images/contract-v1.json", "assets/flash-images/trust.json",
+            "assets/flash-images/flash-release-public.pem",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
             "tools/dfu-util",
             "assets/boot-network-status/startup-view.js",
@@ -102,6 +106,34 @@ class PackageTests(unittest.TestCase):
             for obsolete in ("tools/tegrarcm", "lib/libcryptopp.so", "tools/emmc_server.bin",
                              "tools/dram_probe.bin", "tools/dram_trace.bin"):
                 self.assertNotIn(obsolete, archive.namelist())
+
+    def test_packaged_stdlib_host_openssl_verifier_and_offline_cli(self):
+        from fake_flash_server import FakeFlashServer
+        self.run_package()
+        extracted = self.root / 'extracted'
+        with zipfile.ZipFile(self.output) as archive:
+            archive.extractall(extracted)
+        with FakeFlashServer() as fixture:
+            raw = fixture.envelope({'synthetic': 'packaged proof'})
+            envelope_path = self.root / 'signed.json'
+            envelope_path.write_bytes(raw)
+            public_path = self.root / 'public.pem'
+            public_path.write_bytes(fixture.public_key.read_bytes())
+            command = (
+                'from pathlib import Path; import jibo_flash_contract as c; '
+                'assert c._python_verifier() is None; '
+                'c.trusted_keys=lambda: {"phoenix-flash-2026-10":Path(' + repr(str(public_path)) + ').read_bytes()}; '
+                'assert c.verify_envelope(Path(' + repr(str(envelope_path)) + ').read_bytes())["synthetic"] == "packaged proof"; '
+                'print("packaged OpenSSL Ed25519 verified")')
+            result = subprocess.run([sys.executable, '-S', '-c', command], cwd=extracted,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Ed25519 verified', result.stdout)
+        result = subprocess.run([sys.executable, str(self.output), 'list-hosted-updates',
+                                '--offline', '--directory', str(self.root / 'empty-updates')],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['images'], [])
 
     def test_bootstrap_runs_the_packaged_cli(self):
         self.run_package()

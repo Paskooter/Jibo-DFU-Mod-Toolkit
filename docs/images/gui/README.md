@@ -19,3 +19,12 @@ Capture these along with the four existing screens by adding `--phoenix`:
 ```sh
 xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/docs_screenshots.py --phoenix
 ```
+
+The flash choices have two companion images: `flash-calibration.png` and
+`flash-without-calibration-confirm.png`. The separate capture script leaves
+the published setup-card fixtures unchanged and verifies that declining the
+unsafe confirmation makes no backend call:
+
+```sh
+xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/flash_docs_screenshots.py
+```

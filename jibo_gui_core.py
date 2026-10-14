@@ -35,7 +35,8 @@ import types
 # Every jibo_tui function that opens curses is replaced in the private flow
 # module. tests/test_gui_controller.py checks this list against jibo_tui's
 # source so a new curses prompt cannot silently take over the terminal.
-PROMPT_PRIMITIVES = ("select_option", "select_multiple_options", "text_input", "show_screen")
+PROMPT_PRIMITIVES = ("select_option", "select_multiple_options", "text_input", "show_screen",
+                     "run_with_progress")
 CONFIRM_KEYS = ("cancel", "confirm")
 BUSY_REASON = "Another operation is running. Wait for it to finish."
 PHOENIX_GUIDE_URL = "https://jibo.io/guide"
@@ -100,17 +101,25 @@ class Prompt:
         return "Prompt({!r}, {!r})".format(self.kind, self.title)
 
 
-def install_prompts(flows, ask):
+def install_prompts(flows, ask, run_work=None):
     """Route the private flow module's curses prompts to ``ask(Prompt)``.
 
     Answers are validated against the offered choices, so the view can only
     return what the text menu could have returned. ``confirm_action`` itself is
     left untouched: it builds the same review text and Cancel/Confirm choice,
-    with Cancel preselected, through ``select_option``.
+    with Cancel preselected, through ``select_option``. ``run_work`` replaces
+    the terminal progress screen for network work (Phoenix image list and
+    downloads); it runs on the flow's worker thread, never on Tk's.
     """
     def select_option(title, options, prompt="", detail="", cancel_label="Cancel", initial=None):
         items = flows._normalise_options(options)
         kind = "confirm" if tuple(item.key for item in items) == CONFIRM_KEYS else "select"
+        try:
+            from jibo_calibration_flow import CONSENT_TITLE
+        except ImportError:
+            CONSENT_TITLE = None  # An older offline package still supports ordinary prompts.
+        if title == CONSENT_TITLE and tuple(item.key for item in items) == ("share", "local"):
+            kind = "calibration-consent"
         answer = ask(Prompt(kind, title, detail=detail, prompt=prompt, items=items,
                             initial=initial, cancel_label=cancel_label))
         enabled = {item.key for item in items if item.enabled}
@@ -135,10 +144,19 @@ def install_prompts(flows, ask):
         ask(Prompt("message", title, lines=tuple(flows._screen_lines(lines))))
         return None
 
+    def run_with_progress(title, work, cancel, detail=""):
+        if run_work is not None:
+            return run_work(title, work, cancel, detail)
+        try:
+            return work(lambda _progress: None, cancel), None
+        except Exception as exc:
+            return None, exc
+
     flows.select_option = select_option
     flows.select_multiple_options = select_multiple_options
     flows.text_input = text_input
     flows.show_screen = show_screen
+    flows.run_with_progress = run_with_progress
     # Safety net: any curses prompt added later and not routed above returns
     # None (cancel) instead of taking over the launcher's terminal.
     flows._terminal_available = lambda: False
@@ -246,7 +264,7 @@ class GuiController:
                 self._phoenix_dismissed = isinstance(saved, dict) and saved.get("phoenix_dismissed") is True
             except (OSError, ValueError):
                 pass  # absent/corrupt preferences must not block an offline tool
-        self.flows = install_prompts(flows or load_flows(), self._ask)
+        self.flows = install_prompts(flows or load_flows(), self._ask, self._run_work)
         self._prompter = prompter
         self._runner = runner
         self._lock = threading.RLock()
@@ -258,6 +276,8 @@ class GuiController:
         self._probing = False
         self._closing = False
         self._pending = None
+        self._work_cancel = None   # CancelToken of running network work, else None
+        self._work_token = None
         self._generation = 0
         self._active_label = ""
         self._note = ""
@@ -283,6 +303,55 @@ class GuiController:
     def pending_prompt(self):
         with self._lock:
             return self._pending
+
+    @property
+    def download_active(self):
+        """True while a Phoenix list check or download runs; it never uses USB."""
+        with self._lock:
+            return self._work_cancel is not None
+
+    def cancel_download(self):
+        """Ask running network work to stop; a partial download is kept for resume."""
+        with self._lock:
+            token = self._work_cancel
+            if token is not None:
+                self._note = "Canceling the download..."
+        if token is None:
+            return False
+        token.cancel()
+        self._emit(("state",))
+        return True
+
+    def _run_work(self, title, work, cancel, detail=""):
+        """Run network work on this action thread; marshal progress to the view.
+
+        Progress callbacks arrive on the download thread. They only feed the
+        output collector and queue an event; the Tk thread renders it. Callbacks
+        that arrive after the work ended or the window closed are dropped.
+        """
+        token = object()
+        with self._lock:
+            if self._closing:
+                cancel.cancel()
+            self._work_cancel, self._work_token = cancel, token
+        self.write_output(str(title) + "\n")
+        self._emit(("download", True))
+
+        def report(progress):
+            with self._lock:
+                live = self._work_token is token and not self._closing
+            if live:
+                self.write_output("\r" + self.flows.format_progress(progress))
+
+        try:
+            return work(report, cancel), None
+        except Exception as exc:
+            return None, exc
+        finally:
+            with self._lock:
+                if self._work_token is token:
+                    self._work_cancel = self._work_token = None
+            self._emit(("download", False))
 
     def snapshot(self):
         with self._lock:
@@ -564,21 +633,31 @@ class GuiController:
                     self._pending = None
 
     def shutdown_if_safe(self):
-        """Atomically refuse window closure once a prompt has approved a transfer."""
+        """Atomically refuse window closure once a prompt has approved a transfer.
+
+        Network work (image list or download) never touches USB, so closing
+        cancels it instead of refusing; the partial download stays for resume.
+        """
         with self._lock:
             pending = self._pending
-            if self._busy and (pending is None or pending.answered):
+            work = self._work_cancel
+            if self._busy and work is None and (pending is None or pending.answered):
                 return False
             self._closing = True
+            if work is not None:
+                work.cancel()
             if pending is not None:
                 pending.resolve(None)
             return True
 
     def shutdown(self):
-        """Cancel any open prompt; later prompts cancel immediately."""
+        """Cancel any open prompt or download; later prompts cancel immediately."""
         with self._lock:
             self._closing = True
             pending = self._pending
+            work = self._work_cancel
+        if work is not None:
+            work.cancel()
         if pending is not None:
             pending.resolve(None)
 

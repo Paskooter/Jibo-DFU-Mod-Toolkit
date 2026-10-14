@@ -4,7 +4,8 @@ param(
     [string]$Distro,
     [switch]$UsbOnly,
     [switch]$MonitorUsb,
-    [switch]$Gui
+    [switch]$Gui,
+    [string]$ConsoleHelper
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,7 +74,7 @@ function Write-ManualUsbInstructions {
     else {
         Write-Host '  Run `usbipd list` to find the connected Jibo entry (VID:PID 0955:7740 or 0955:701a) and its BUSID.'
         Write-Host '  In an Administrator PowerShell window, run `usbipd bind --busid <BUSID>` if it is not already shared.'
-        Write-Host ("  In a normal PowerShell window, run `usbipd attach --wsl `"{0}`" --busid <BUSID>`." -f $script:SelectedDistro)
+        Write-Host ('  In a normal PowerShell window, run `usbipd attach --wsl "{0}" --busid <BUSID>`.' -f $script:SelectedDistro)
     }
     Write-Host '  Binding is a one-time Windows administrator action. Reattach after the robot changes USB mode or WSL restarts.'
     Write-Host ''
@@ -182,11 +183,15 @@ function Invoke-UacBind {
         return $true
     }
 
-    Write-Host ("Sharing Jibo on USB port {0}; Windows may ask for administrator approval." -f $BusId) -ForegroundColor Cyan
     try {
         # BusId was validated above to keep it safe as a Start-Process argument.
         $argumentLine = 'bind --busid ' + $BusId
-        $process = Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -Wait -PassThru -WorkingDirectory $env:SystemRoot
+        $bind = {
+            Write-Host ("Sharing Jibo on USB port {0}; Windows may ask for administrator approval." -f $BusId) -ForegroundColor Cyan
+            Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -Wait -PassThru -WorkingDirectory $env:SystemRoot
+        }
+        if ($ConsoleHelper) { $process = Invoke-ToolkitConsolePrompt $bind }
+        else { $process = & $bind }
         if ($process.ExitCode -ne 0) {
             Write-Host ("Elevated usbipd bind failed with exit code {0}." -f $process.ExitCode) -ForegroundColor Yellow
             return $false
@@ -338,6 +343,12 @@ function Select-Distribution {
 }
 
 try {
+    # Only the release EXE's background USB monitor supplies this helper. Restore
+    # its shared console before a later bind requires another UAC approval.
+    if ($ConsoleHelper) {
+        if (-not $MonitorUsb -or -not $UsbOnly) { throw '-ConsoleHelper requires -UsbOnly -MonitorUsb.' }
+        . $ConsoleHelper
+    }
     if ($MonitorUsb -and -not $UsbOnly) {
         throw '-MonitorUsb requires -UsbOnly.'
     }

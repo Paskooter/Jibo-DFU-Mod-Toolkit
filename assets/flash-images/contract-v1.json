@@ -1,0 +1,886 @@
+{
+  "schema": 1,
+  "contract_id": "phoenix-flash-contract-v1",
+  "status": "production trust; toolkit 1.0.0",
+  "origin": "https://jibo.io",
+  "paths": {
+    "index": "/flash/index.json",
+    "manifest": "/flash/manifests/<id>.json",
+    "image": "/flash/images/<id>/<sha256>.tar.bz2"
+  },
+  "schema_ids": {
+    "envelope": 1,
+    "index": 1,
+    "manifest": 1,
+    "metadata": 1
+  },
+  "kinds": {
+    "index": "phoenix-flash-index-v1",
+    "manifest": "phoenix-full-flash-v1",
+    "metadata": "phoenix-flash-metadata-v1"
+  },
+  "profiles": [
+    "jibo-t124-stock-gpt-13-v1"
+  ],
+  "strategies": [
+    "compact-prefix-v1"
+  ],
+  "capabilities": [
+    "hosted-flash-v1"
+  ],
+  "var_policies": [
+    "keep-calibration",
+    "without-calibration"
+  ],
+  "key_id": "phoenix-flash-2026-10",
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABpslGVJQjdmlTvOB+Cxx2ezMBVuqHp6+FNGDNV8wdTg=\n-----END PUBLIC KEY-----\n",
+  "minimum_released_toolkit_version": "1.0.0",
+  "signature": {
+    "algorithm": "Ed25519",
+    "payload_encoding": "base64 exact UTF-8 JSON bytes",
+    "publisher_serialization": "sorted keys, compact separators, ensure_ascii=true, no NaN",
+    "verify_before_payload_parse": true,
+    "reject_duplicate_keys": true,
+    "domain": "Exact payload bytes, no prefix, prehash, or JSON reserialization. Signed kind + strict document schema provide domain separation; envelopes are never interchangeable."
+  },
+  "limits": {
+    "index_envelope_bytes": 262144,
+    "index_payload_bytes": 196608,
+    "manifest_envelope_bytes": 262144,
+    "manifest_payload_bytes": 196608,
+    "metadata_envelope_bytes": 131072,
+    "metadata_payload_bytes": 65536,
+    "archive_bytes": 4294967296,
+    "member_bytes": 8589934592,
+    "unpacked_bytes": 34359738368,
+    "workspace_bytes": 137438953472,
+    "index_cache_seconds": 86400,
+    "index_expiry_seconds": 86400,
+    "index_ttl_seconds": 60,
+    "index_deadline_seconds": 5,
+    "future_clock_skew_seconds": 300
+  },
+  "timestamps": "integer Unix UTC seconds; boolean/float rejected",
+  "definitions": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]{0,95}$",
+      "maxLength": 96
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "archive_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967296
+    },
+    "timestamp": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 253402300799
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$",
+      "maxLength": 64
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+    },
+    "components": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "format": "plain-text"
+        },
+        "services": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "format": "plain-text"
+        },
+        "oobe-config": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "format": "plain-text"
+        },
+        "@be/be": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "format": "plain-text"
+        }
+      },
+      "required": [
+        "os",
+        "services",
+        "oobe-config",
+        "@be/be"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "fields": {
+    "envelope": {
+      "schema": {
+        "const": 1
+      },
+      "key_id": {
+        "const": "phoenix-flash-2026-10"
+      },
+      "payload": {
+        "type": "string",
+        "format": "base64",
+        "maxLength": 262144
+      },
+      "signature": {
+        "type": "string",
+        "format": "ed25519-signature",
+        "minLength": 88,
+        "maxLength": 88
+      }
+    },
+    "index": {
+      "schema": {
+        "const": 1
+      },
+      "kind": {
+        "const": "phoenix-flash-index-v1"
+      },
+      "sequence": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "generated_at": {
+        "$ref": "#/definitions/timestamp"
+      },
+      "expires_at": {
+        "$ref": "#/definitions/timestamp"
+      },
+      "latest_image_id": {
+        "$ref": "#/definitions/id"
+      },
+      "images": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/id"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 96,
+              "format": "plain-text"
+            },
+            "base_release": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "format": "plain-text"
+            },
+            "components": {
+              "$ref": "#/definitions/components"
+            },
+            "url": {
+              "type": "string",
+              "format": "image-url",
+              "maxLength": 256
+            },
+            "size": {
+              "$ref": "#/definitions/archive_size"
+            },
+            "sha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "minimum_toolkit_version": {
+              "$ref": "#/definitions/semver"
+            },
+            "required_capabilities": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "hosted-flash-v1"
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true
+            },
+            "profile": {
+              "enum": [
+                "jibo-t124-stock-gpt-13-v1"
+              ]
+            },
+            "strategy": {
+              "enum": [
+                "compact-prefix-v1"
+              ]
+            },
+            "released_at": {
+              "$ref": "#/definitions/timestamp"
+            },
+            "notes": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "format": "plain-text"
+            },
+            "acceptance_scope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "format": "plain-text"
+            },
+            "manifest_url": {
+              "type": "string",
+              "format": "manifest-url",
+              "maxLength": 256
+            },
+            "manifest_size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            },
+            "manifest_sha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "offered": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "version",
+            "base_release",
+            "components",
+            "url",
+            "size",
+            "sha256",
+            "minimum_toolkit_version",
+            "required_capabilities",
+            "profile",
+            "strategy",
+            "released_at",
+            "notes",
+            "acceptance_scope",
+            "manifest_url",
+            "manifest_size",
+            "manifest_sha256",
+            "offered"
+          ],
+          "additionalProperties": false
+        },
+        "minItems": 1,
+        "maxItems": 128,
+        "uniqueItems": true
+      }
+    },
+    "image": {
+      "id": {
+        "$ref": "#/definitions/id"
+      },
+      "version": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 96,
+        "format": "plain-text"
+      },
+      "base_release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "format": "plain-text"
+      },
+      "components": {
+        "$ref": "#/definitions/components"
+      },
+      "url": {
+        "type": "string",
+        "format": "image-url",
+        "maxLength": 256
+      },
+      "size": {
+        "$ref": "#/definitions/archive_size"
+      },
+      "sha256": {
+        "$ref": "#/definitions/sha256"
+      },
+      "minimum_toolkit_version": {
+        "$ref": "#/definitions/semver"
+      },
+      "required_capabilities": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "hosted-flash-v1"
+          ]
+        },
+        "minItems": 1,
+        "maxItems": 8,
+        "uniqueItems": true
+      },
+      "profile": {
+        "enum": [
+          "jibo-t124-stock-gpt-13-v1"
+        ]
+      },
+      "strategy": {
+        "enum": [
+          "compact-prefix-v1"
+        ]
+      },
+      "released_at": {
+        "$ref": "#/definitions/timestamp"
+      },
+      "notes": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "format": "plain-text"
+      },
+      "acceptance_scope": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "format": "plain-text"
+      },
+      "manifest_url": {
+        "type": "string",
+        "format": "manifest-url",
+        "maxLength": 256
+      },
+      "manifest_size": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 262144
+      },
+      "manifest_sha256": {
+        "$ref": "#/definitions/sha256"
+      },
+      "offered": {
+        "type": "boolean"
+      }
+    },
+    "manifest": {
+      "id": {
+        "$ref": "#/definitions/id"
+      },
+      "version": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 96,
+        "format": "plain-text"
+      },
+      "base_release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "format": "plain-text"
+      },
+      "components": {
+        "$ref": "#/definitions/components"
+      },
+      "url": {
+        "type": "string",
+        "format": "image-url",
+        "maxLength": 256
+      },
+      "size": {
+        "$ref": "#/definitions/archive_size"
+      },
+      "sha256": {
+        "$ref": "#/definitions/sha256"
+      },
+      "minimum_toolkit_version": {
+        "$ref": "#/definitions/semver"
+      },
+      "required_capabilities": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "hosted-flash-v1"
+          ]
+        },
+        "minItems": 1,
+        "maxItems": 8,
+        "uniqueItems": true
+      },
+      "profile": {
+        "enum": [
+          "jibo-t124-stock-gpt-13-v1"
+        ]
+      },
+      "strategy": {
+        "enum": [
+          "compact-prefix-v1"
+        ]
+      },
+      "released_at": {
+        "$ref": "#/definitions/timestamp"
+      },
+      "notes": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "format": "plain-text"
+      },
+      "acceptance_scope": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "format": "plain-text"
+      },
+      "schema": {
+        "const": 1
+      },
+      "kind": {
+        "const": "phoenix-full-flash-v1"
+      },
+      "embedded_metadata_sha256": {
+        "$ref": "#/definitions/sha256"
+      },
+      "members": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "format": "member-name"
+            },
+            "role": {
+              "enum": [
+                "rootfs",
+                "services",
+                "skills",
+                "var"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 512,
+              "maximum": 8589934592
+            },
+            "sha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "geometry": {
+              "type": "object",
+              "properties": {
+                "block_size": {
+                  "enum": [
+                    1024,
+                    2048,
+                    4096
+                  ]
+                },
+                "block_count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                },
+                "features": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "format": "plain-text"
+                  },
+                  "minItems": 0,
+                  "maxItems": 64,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "block_size",
+                "block_count",
+                "features"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "name",
+            "role",
+            "size",
+            "sha256",
+            "geometry"
+          ],
+          "additionalProperties": false
+        },
+        "minItems": 4,
+        "maxItems": 4,
+        "uniqueItems": true
+      },
+      "unpacked_size": {
+        "type": "integer",
+        "minimum": 2048,
+        "maximum": 34359738368
+      },
+      "workspace_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 137438953472
+      },
+      "var_policies": {
+        "type": "array",
+        "const": [
+          "keep-calibration",
+          "without-calibration"
+        ],
+        "items": {
+          "enum": [
+            "keep-calibration",
+            "without-calibration"
+          ]
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "uniqueItems": true
+      },
+      "official_base": {
+        "type": "object",
+        "properties": {
+          "release": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "format": "plain-text"
+          },
+          "sha256": {
+            "$ref": "#/definitions/sha256"
+          },
+          "provenance": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "format": "plain-text"
+          }
+        },
+        "required": [
+          "release",
+          "sha256",
+          "provenance"
+        ],
+        "additionalProperties": false
+      },
+      "sources": {
+        "type": "object",
+        "properties": {
+          "repoint_commit": {
+            "$ref": "#/definitions/commit"
+          },
+          "helper_commit": {
+            "$ref": "#/definitions/commit"
+          },
+          "be_commit": {
+            "$ref": "#/definitions/commit"
+          }
+        },
+        "required": [
+          "repoint_commit",
+          "helper_commit",
+          "be_commit"
+        ],
+        "additionalProperties": false
+      },
+      "recipe": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96,
+            "format": "plain-text"
+          },
+          "toolchain_sha256": {
+            "$ref": "#/definitions/sha256"
+          }
+        },
+        "required": [
+          "revision",
+          "toolchain_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "gate_receipts": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 32,
+        "propertyNames": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9.-]{0,63}$"
+        },
+        "additionalProperties": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    },
+    "metadata": {
+      "schema": {
+        "const": 1
+      },
+      "kind": {
+        "const": "phoenix-flash-metadata-v1"
+      },
+      "id": {
+        "$ref": "#/definitions/id"
+      },
+      "base_release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "format": "plain-text"
+      },
+      "components": {
+        "$ref": "#/definitions/components"
+      },
+      "profile": {
+        "enum": [
+          "jibo-t124-stock-gpt-13-v1"
+        ]
+      },
+      "strategy": {
+        "enum": [
+          "compact-prefix-v1"
+        ]
+      },
+      "members": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "maxLength": 256,
+              "format": "member-name"
+            },
+            "role": {
+              "enum": [
+                "rootfs",
+                "services",
+                "skills",
+                "var"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 512,
+              "maximum": 8589934592
+            },
+            "sha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "geometry": {
+              "type": "object",
+              "properties": {
+                "block_size": {
+                  "enum": [
+                    1024,
+                    2048,
+                    4096
+                  ]
+                },
+                "block_count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                },
+                "features": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "format": "plain-text"
+                  },
+                  "minItems": 0,
+                  "maxItems": 64,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "block_size",
+                "block_count",
+                "features"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "name",
+            "role",
+            "size",
+            "sha256",
+            "geometry"
+          ],
+          "additionalProperties": false
+        },
+        "minItems": 4,
+        "maxItems": 4,
+        "uniqueItems": true
+      },
+      "var_policies": {
+        "type": "array",
+        "const": [
+          "keep-calibration",
+          "without-calibration"
+        ],
+        "items": {
+          "enum": [
+            "keep-calibration",
+            "without-calibration"
+          ]
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "uniqueItems": true
+      },
+      "official_base": {
+        "type": "object",
+        "properties": {
+          "release": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "format": "plain-text"
+          },
+          "sha256": {
+            "$ref": "#/definitions/sha256"
+          },
+          "provenance": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "format": "plain-text"
+          }
+        },
+        "required": [
+          "release",
+          "sha256",
+          "provenance"
+        ],
+        "additionalProperties": false
+      },
+      "sources": {
+        "type": "object",
+        "properties": {
+          "repoint_commit": {
+            "$ref": "#/definitions/commit"
+          },
+          "helper_commit": {
+            "$ref": "#/definitions/commit"
+          },
+          "be_commit": {
+            "$ref": "#/definitions/commit"
+          }
+        },
+        "required": [
+          "repoint_commit",
+          "helper_commit",
+          "be_commit"
+        ],
+        "additionalProperties": false
+      },
+      "recipe": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96,
+            "format": "plain-text"
+          },
+          "toolchain_sha256": {
+            "$ref": "#/definitions/sha256"
+          }
+        },
+        "required": [
+          "revision",
+          "toolchain_sha256"
+        ],
+        "additionalProperties": false
+      },
+      "gate_receipts": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 32,
+        "propertyNames": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9.-]{0,63}$"
+        },
+        "additionalProperties": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    }
+  },
+  "invariants": [
+    "URLs exactly match origin/path/id/hash; no queries, fragments, userinfo, percent escapes or redirects",
+    "Latest identifies exactly one offered row; unique IDs; monotonically increasing sequence",
+    "Index expiry at most 86400 seconds after generated_at; unexpired at validation; no future index beyond 300-second skew",
+    "Manifest common image fields agree with index; manifest_size/hash pin exact envelope bytes",
+    "Four unique normalized regular ext4 members; geometry agrees with size; unpacked_size is their sum",
+    "Fresh var with this robot's calibration by default; unsafe package var requires explicit confirmation",
+    "Embedded metadata never hashes its own container; external manifest records containing archive hash",
+    "Bounded plain text: reject all Unicode controls/format characters and PLACEHOLDER_ pins"
+  ],
+  "server_policy": {
+    "quota_bytes": 25000000000,
+    "reservation_bytes": 1000000000,
+    "minimum_volume_free_bytes": 10000000000,
+    "retirement_grace_seconds": 604800,
+    "daily_egress_budget_bytes": 100000000000,
+    "metadata_requests_per_minute": 12,
+    "image_starts_per_minute": 6,
+    "image_start_burst": 3,
+    "image_connections_per_ip": 2,
+    "image_connections_global": 8,
+    "image_rate_bytes_per_second": 4194304,
+    "image_rate_after_bytes": 8388608,
+    "image_global_starts_per_second": 8,
+    "image_global_start_burst": 8,
+    "egress_poll_seconds": 60,
+    "egress_reload_deadline_seconds": 5
+  },
+  "version_rules": {
+    "schema": "integer 1 only; boolean rejected",
+    "index_manifest": "version is required bounded release label and must agree exactly",
+    "metadata": "version is forbidden; id + components are the embedded identity",
+    "toolkit": "minimum_toolkit_version uses definitions.semver; only an explicitly assigned stable TOOLKIT_VERSION may install"
+  },
+  "archive": {
+    "metadata_location": "phoenix-<id>/phoenix-flash.json",
+    "member_location": "phoenix-<id>/flash_jibo/output/images/<role>.ext4",
+    "member_manifest": [
+      "name",
+      "role",
+      "size",
+      "sha256",
+      "geometry"
+    ],
+    "metadata_hash_field": "embedded_metadata_sha256",
+    "metadata_hash_domain": "exact signed metadata envelope bytes",
+    "allowed_payloads": [
+      "rootfs.ext4",
+      "services.ext4",
+      "skills.ext4",
+      "var.ext4",
+      "phoenix-flash.json"
+    ],
+    "links_hooks_devices_duplicates_extras": "forbidden",
+    "policy_mapping": "wire and UI/API use keep-calibration or without-calibration"
+  }
+}

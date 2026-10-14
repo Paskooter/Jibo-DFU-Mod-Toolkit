@@ -40,6 +40,22 @@ class CachedPackageTests(unittest.TestCase):
             archive.writestr("tools/dfu_stage2.bin", b"stage" + loader_hash)
             archive.writestr("tools/dfu-util", b"dfu-util")
 
+    def test_hosted_inputs_are_included_in_cache_invalidation(self):
+        required = {'jibo_hosted_updates.py', 'jibo_flash_policy.py', 'jibo_flash_contract.py',
+                    'jibo_calibration_client.py',
+                    'assets/flash-images/contract-v1.json', 'assets/flash-images/trust.json',
+                    'assets/flash-images/flash-release-public.pem'}
+        self.assertTrue(required.issubset(check_package.SOURCES))
+        for name in sorted(required):
+            with self.subTest(name=name):
+                self.create_package()
+                original = (self.source / name).read_bytes()
+                (self.source / name).write_bytes(original + b'changed')
+                ready, reason = check_package.check_package(self.package, self.source)
+                self.assertFalse(ready)
+                self.assertIn(name, reason)
+                (self.source / name).write_bytes(original)
+
     def test_valid_package_is_accepted(self):
         self.create_package()
         self.assertEqual(check_package.check_package(self.package, self.source), (True, "ready"))
