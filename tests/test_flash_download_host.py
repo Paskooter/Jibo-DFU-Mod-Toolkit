@@ -60,9 +60,18 @@ def test_pinned_image_origin_downloads_and_revalidates(tmp_path, origin):
 
 def test_download_row_with_unchanged_jibo_manifest_downloads_and_revalidates(tmp_path):
     with pinned_server(ORIGINS[0], manifest_origin=ORIGINS[1]) as (server, row, index):
+        manifest_path = urlsplit(row['manifest_url']).path
+        immutable_manifest = server.files[manifest_path]
+        expected_archive = server.files[urlsplit(row['url']).path]
+        manifest = c.verify_envelope(immutable_manifest, 'manifest')
+        assert manifest['url'].startswith('https://jibo.io/flash/images/')
+        assert hashlib.sha256(immutable_manifest).hexdigest() == row['manifest_sha256']
         completed = Path(h.download_image(row['id'], dest_dir=tmp_path / 'images'))
+        assert completed.read_bytes() == expected_archive
         assert h.verify_local_image(completed)['archive_sha256'] == row['sha256']
+        assert server.files[manifest_path] == immutable_manifest
         assert {headers['Host'] for path, headers in server.requests if path.startswith('/flash/images/')} == {'download.jibo.io'}
+        assert {headers['Host'] for path, headers in server.requests if not path.startswith('/flash/images/')} == {'jibo.io'}
 
 
 BAD_ORIGINS = (
