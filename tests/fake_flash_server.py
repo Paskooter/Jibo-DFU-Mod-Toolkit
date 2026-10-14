@@ -31,6 +31,8 @@ class FakeFlashServer:
         self.header_drips = {}
         self.chunk_sizes = {}
         self.chunked_bodies = {}  # Raw framing for bounded-read probes.
+        self.body_gates = {}  # Per-path Events: send no body until released.
+        self.body_sent = {}  # Per-path Events: signal only after all writes.
         self.stopping = Event()
         self.ignore_range = False
         self.bad_range = False
@@ -121,6 +123,11 @@ class FakeFlashServer:
                 self.send_header('ETag', '"synthetic-v1"')
                 self.end_headers()
                 if not head:
+                    gate = fixture.body_gates.get(self.path)
+                    if gate is not None:
+                        gate.wait()
+                        if fixture.stopping.is_set():
+                            return
                     data = data[:fixture.truncate.get(self.path, len(data))]
                     try:
                         chunk_size = fixture.chunk_sizes.get(self.path, 4096)
@@ -129,6 +136,9 @@ class FakeFlashServer:
                                 return
                             self.wfile.write(data[start:start+chunk_size])
                             self.wfile.flush()
+                        sent = fixture.body_sent.get(self.path)
+                        if sent is not None:
+                            sent.set()
                     except (BrokenPipeError, ConnectionResetError):
                         pass
 
@@ -172,6 +182,8 @@ class FakeFlashServer:
 
     def __exit__(self, *args):
         self.stopping.set()
+        for gate in self.body_gates.values():
+            gate.set()  # Wake gated handlers before server_close joins them.
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
