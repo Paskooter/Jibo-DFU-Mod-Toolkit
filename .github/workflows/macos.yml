@@ -76,6 +76,7 @@ jobs:
           ext4_prefix=$(brew --prefix e2fsprogs)
           openssl_prefix=$(brew --prefix openssl@3)
           export PATH="$openssl_prefix/bin:$ext4_prefix/sbin:$ext4_prefix/bin:$PATH"
+          python3 tests/hosted_deadline_probe.py
           python3 -m unittest discover -s tests -p 'test_hosted_*.py' -v
           python3 -m unittest discover -s tests -p 'test_phoenix_flash*.py' -v
       - name: Test local ext4 update preparation
