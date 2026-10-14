@@ -247,7 +247,7 @@ def _url(url):
     parsed = urllib.parse.urlsplit(url)
     origins = c.CONTRACT['image_origins'] if ORIGIN == c.CONTRACT['origin'] and parsed.path.startswith('/flash/images/') else (ORIGIN,)
     if not any(url.startswith(origin + '/') for origin in origins) or parsed.username or \
-            parsed.password or parsed.query or parsed.fragment or '%' in parsed.path or \
+            parsed.password or '?' in url or '#' in url or '%' in parsed.path or \
             not parsed.path.startswith('/flash/') or any(part in ('..', '.') for part in parsed.path.split('/')) or \
             not re.fullmatch(r'/[a-zA-Z0-9._/-]+', parsed.path) or '//' in parsed.path:
         raise HostedError('signature', 'Hosted URL/redirect must remain on the pinned HTTPS flash origin')

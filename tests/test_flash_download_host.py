@@ -1,5 +1,4 @@
 """Pinned public URL checks over a loopback-only, throwaway-key TLS server."""
-import copy
 from contextlib import contextmanager
 import hashlib
 from pathlib import Path
@@ -59,7 +58,6 @@ def test_pinned_image_origin_downloads_and_revalidates(tmp_path, origin):
         assert hosts[urlsplit(row['url']).path] == urlsplit(origin).netloc
 
 
-
 def test_download_row_with_unchanged_jibo_manifest_downloads_and_revalidates(tmp_path):
     with pinned_server(ORIGINS[0], manifest_origin=ORIGINS[1]) as (server, row, index):
         completed = Path(h.download_image(row['id'], dest_dir=tmp_path / 'images'))
@@ -95,6 +93,12 @@ def test_noncanonical_image_path_refused(suffix):
     with pytest.raises(ValueError):
         __import__('jibo_flash_schema').check_schema(
             url, {'type': 'string', 'format': 'image-url'})
+
+
+@pytest.mark.parametrize('suffix', ('?x=1', '#part', '?', '#'))
+def test_url_guard_refuses_even_empty_query_and_fragment(suffix):
+    with pytest.raises(h.HostedError):
+        h._url(ORIGINS[0] + '/flash/images/test/' + 'a' * 64 + '.tar.bz2' + suffix)
 
 
 @pytest.mark.parametrize('field', ('manifest_url', 'url'))
@@ -137,6 +141,18 @@ def test_image_redirect_stays_in_same_origins_image_path(origin):
         with pytest.raises(h.HostedError):
             h._open(row['url'], 3)
         assert [p for p, _ in server.requests] == [path]
+
+
+@pytest.mark.parametrize('field', ('url', 'sha256', 'id', 'size'))
+def test_unchanged_manifest_cannot_relax_signed_identity(field):
+    with pinned_server(ORIGINS[0], manifest_origin=ORIGINS[1]) as (server, row, index):
+        raw = server.files[urlsplit(row['manifest_url']).path]
+        manifest = c.verify_envelope(raw, 'manifest')
+        altered = dict(row)
+        altered[field] = {'url': row['url'].replace(row['sha256'], '0' * 64),
+                          'sha256': '0' * 64, 'id': 'different', 'size': row['size'] + 1}[field]
+        with pytest.raises(c.ContractError):
+            c.validate_manifest(manifest, altered)
 
 
 def test_contract_has_exactly_two_image_origins():
