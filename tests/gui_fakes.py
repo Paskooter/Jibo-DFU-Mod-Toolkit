@@ -278,6 +278,10 @@ class FakeHosted:
     def hosted_var_policies(self, image):
         return [("keep-calibration", True, ""), ("without-calibration", True, "")]
 
+    def flash_download_session(self, image_id, *, dest_dir=None):
+        import jibo_hosted_updates
+        return jibo_hosted_updates.flash_download_session(image_id, dest_dir=dest_dir)
+
 
 class FakeHostedApi(FakeApi):
     """Device fake with a hosted backend and the public flash_hosted_update seam."""

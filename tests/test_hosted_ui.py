@@ -69,14 +69,14 @@ def test_saved_list_error_uses_code_and_says_list_is_old():
     assert "connection refused" not in status.label
 
 
-def test_downloaded_image_is_deduplicated_from_local_packages_with_provenance():
+def test_previously_downloaded_images_are_hidden_not_promoted_to_saved_choices():
     path = "updates/phoenix-phx-0.tar.bz2"
     saved = HostedImage("phx-0", "0.9.0", sha256="0" * 64, downloaded_path=path)
     packages = [Path(path), Path("updates/official.tar.bz2")]
     items, choices = jibo_tui.hosted_chooser_items(sample_catalog(), (saved,), packages)
-    assert keys(items) == ["hosted:phx-2", "hosted:phx-0", "local:1", "older"]
-    assert "Saved Phoenix image" in items[1].label and "downloaded" in items[1].label
-    assert choices["hosted:phx-0"] == ("hosted", saved)
+    assert keys(items) == ["hosted:phx-2", "local:1", "older"]
+    assert "hosted:phx-0" not in choices
+    assert all("downloaded" not in item.label for item in items)
 
 
 def test_progress_line_has_bytes_percent_rate_and_time_left():
@@ -91,10 +91,10 @@ def test_both_fresh_choices_are_enabled_for_hosted_images():
     assert [(i.key, i.enabled) for i in items] == [("keep-calibration", True), ("without-calibration", True)]
 
 # -- menu ------------------------------------------------------------------------
-def test_download_needs_no_robot_but_install_needs_dfu():
+def test_only_install_is_offered_and_needs_dfu():
     api = FakeHostedApi(state="none")
     items = {item.key: item for item in jibo_tui.TerminalMenu(api).items}
-    assert items["download-phoenix"].enabled
+    assert "download-phoenix" not in items
     assert not items["flash-update"].enabled
     dfu = {item.key: item for item in jibo_tui.TerminalMenu(FakeHostedApi(state="dfu")).items}
     assert dfu["flash-update"].enabled and dfu["flash-update"].label == jibo_tui.UPDATE_ACTION_LABEL
@@ -191,9 +191,9 @@ def test_tui_download_failure_is_reported_without_install():
     hosted = FakeHosted()
     hosted.download_error = HostedError("hash", "sha mismatch")
     api = FakeHostedApi(hosted)
-    result, prompts = run_tui(api, "flash-update", "hosted:phx-2")
+    result, prompts = run_tui(api, "flash-update", "hosted:phx-2", "keep-calibration")
     assert result == {"status": "cancelled", "message": jibo_tui.hosted_error_text("hash")}
-    assert api.writes == [] and len(prompts) == 1
+    assert api.writes == [] and len(prompts) == 2
 
 
 def test_tui_canceled_check_shows_the_last_signed_list():
@@ -241,13 +241,11 @@ def test_failed_update_record_parses_only_the_backend_line():
     assert jibo_tui.failed_update_record(RuntimeError("no record here")) is None
 
 
-def test_tui_download_only_needs_no_robot():
+def test_tui_removed_download_action_is_rejected_without_network():
     api = FakeHostedApi(state="none")
-    result, _ = run_tui(api, "download-phoenix", "hosted:phx-2")
-    assert result["status"] == "downloaded" and api.writes == []
-    assert not any(call[0] == "flash_hosted_update" for call in api.calls)
-    lines = jibo_tui._result_summary("download-phoenix", result)
-    assert lines[0] == "Phoenix 2.0.0 is downloaded and checked."
+    with pytest.raises(ValueError, match="Unknown menu action"):
+        run_tui(api, "download-phoenix", "hosted:phx-2")
+    assert api.writes == [] and api.hosted.calls == []
 
 
 class ProgressScreen:
@@ -348,11 +346,11 @@ def finished(c, timeout=5.0):
 
 
 def test_gui_network_work_runs_off_main_thread_and_progress_is_marshalled():
-    api = FakeHostedApi(state="none")
-    c, _ = gui_controller(api, ["hosted:phx-2"])
-    assert c.start_action("download-phoenix")
+    api = FakeHostedApi()
+    c, _ = gui_controller(api, ["hosted:phx-2", "keep-calibration", "cancel"])
+    assert c.start_action("flash-update")
     result, events = finished(c)
-    assert result.status == "downloaded" and api.writes == []
+    assert result.status == "cancelled" and api.writes == []
     main = threading.main_thread()
     assert api.hosted.threads and all(thread is not main for thread in api.hosted.threads)
     assert ("download", True) in events and ("download", False) in events
@@ -363,7 +361,7 @@ def test_gui_network_work_runs_off_main_thread_and_progress_is_marshalled():
 def test_gui_cancel_download_keeps_partial_writes_nothing_and_drops_late_callbacks():
     hosted = gated()
     api = FakeHostedApi(hosted)
-    c, prompts = gui_controller(api, ["hosted:phx-2"])
+    c, prompts = gui_controller(api, ["hosted:phx-2", "keep-calibration"])
     assert c.start_action("flash-update")
     assert hosted.started.wait(5) and wait_until(lambda: c.download_active)
     assert not c.start_action("flash-update")          # no double start
@@ -373,7 +371,7 @@ def test_gui_cancel_download_keeps_partial_writes_nothing_and_drops_late_callbac
     assert result.status == "cancelled"
     assert result.lines == (jibo_tui.hosted_error_text("canceled"),)
     assert api.writes == [] and not any(call[0] == "flash_hosted_update" for call in api.calls)
-    assert len(prompts) == 1                           # no var choice or review after cancel
+    assert len(prompts) == 2                           # calibration first; no review after cancel
     before = c.output_state()
     hosted.progress(Progress("download", 3000, 4000, 75.0, 1.0, 1.0))   # late callback
     assert c.output_state() == before and not c.download_active
@@ -382,7 +380,7 @@ def test_gui_cancel_download_keeps_partial_writes_nothing_and_drops_late_callbac
 def test_gui_close_during_download_cancels_it_without_refusing():
     hosted = gated()
     api = FakeHostedApi(hosted)
-    c, _ = gui_controller(api, ["hosted:phx-2"])
+    c, _ = gui_controller(api, ["hosted:phx-2", "keep-calibration"])
     assert c.start_action("flash-update")
     assert hosted.started.wait(5) and wait_until(lambda: c.download_active)
     assert c.shutdown_if_safe()
@@ -441,7 +439,7 @@ def hosted_window(tmp_path):
     """Real Tk window over a synthetic hosted backend; message boxes never block."""
     import jibo_gui as gui
     hosted = gated()
-    api = FakeHostedApi(hosted, state="none")
+    api = FakeHostedApi(hosted, state="dfu")
     root = gui.create_root()
     errors = []
     root.report_callback_exception = lambda *exc: errors.append(exc)
@@ -474,11 +472,13 @@ def pump(w, predicate, timeout=5.0):
 
 def start_download(w, hosted):
     assert pump(w, lambda: w.controller.snapshot().checked)
-    w.open_action("download-phoenix")
+    w.open_action("flash-update")
     assert pump(w, lambda: w.prompt is not None)       # shown by the Tk poll, not the worker
     prompt = w.prompt
     assert [item.key for item in prompt.items][0] == "hosted:phx-2"
     w.answer("hosted:phx-2")
+    assert pump(w, lambda: w.prompt is not None and w.prompt.title == "Choose calibration handling")
+    w.answer("keep-calibration")
     assert hosted.started.wait(5)
     assert pump(w, lambda: w._cancel_shown)
 

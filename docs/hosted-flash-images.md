@@ -7,8 +7,8 @@ explains what that does, what it keeps, and what it cannot fix.
 ## What a Phoenix image is
 
 A Phoenix image is a complete set of Jibo's userspace filesystems built on the
-official 13.0.0 release, with Phoenix changes so the robot can reach a Phoenix
-server instead of the retired Jibo cloud. It is not an official Jibo release,
+official 13.0.0 release, with Phoenix changes so the robot connects to Phoenix
+(jibo.io). It is not an official Jibo release,
 and the toolkit says so on the review screen.
 
 Each image is listed in a signed catalog on jibo.io. The toolkit checks the
@@ -21,8 +21,6 @@ image for install. A download that does not match is not used.
   list opens with **Latest Phoenix image — recommended** at the top, then your
   local packages from the `updates` folder in their usual order, then
   **Show older Phoenix images**.
-- **Download a Phoenix image (no robot needed)**: download and check an image
-  now, install it later. Downloading never touches USB.
 
 ![The image list: Latest Phoenix image — recommended at the top, a local package below it, then Show older Phoenix images](images/gui/hosted-chooser.png)
 
@@ -30,11 +28,20 @@ If jibo.io can't be reached, the list says so in one line and your local
 packages still work. If the toolkit has a saved copy of the last list, it shows
 that and says it is the last checked list.
 
-Downloads go to the toolkit's `updates` folder. **Cancel** keeps what was
-already saved; choosing the same image again continues from there. In the
-graphical window, closing during a download asks first, then stops the download
-without touching the robot. While an image downloads, the progress page shows
-how much is done, the speed and the time left.
+Choose the featured Phoenix image, then choose calibration handling. The toolkit
+downloads and checks it for this flash, opens the existing review, writes only
+after you confirm, and reads the written data back. There is no download-only
+action and no return to the menu between these steps. The list plainly says
+**downloads from jibo.io when you flash**; it is not a file already on your computer.
+
+The image, its receipts and extracted/prepared working files are removed when
+the flash attempt ends: after success, a failure following the download, or
+**Cancel** at the review. Your robot's backups, operation records and your own
+packages are never removed. If the download itself is interrupted, its partial
+may stay so choosing the same image again resumes it. Closing during a download
+asks first and stops without writing to the robot. The progress page shows how
+much is done, the speed and the time left. Free-space checks still run before
+download and preparation.
 
 ![A Phoenix image download at 42 percent with its speed, time left and a Cancel download button](images/gui/hosted-progress.png)
 

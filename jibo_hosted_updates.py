@@ -660,3 +660,37 @@ def _download(image_id, dest, progress, cancel):
         receipt_path.unlink(missing_ok=True)
         _progress(progress, 'done', offset, row['size'], 'Verified download complete; flashing still requires a separate review')
         return str(final)
+
+
+@dataclass
+class FlashDownloadSession:
+    directory: Path
+    complete: bool = False
+    interrupted: bool = False
+
+
+@contextmanager
+def flash_download_session(image_id, *, dest_dir=None):
+    """Own only this flash's working files; keep interrupted transfers for resume."""
+    image_id = c.image_id(image_id)
+    root = _directory(Path(dest_dir or Path.cwd() / 'updates') / '.hosted-flash')
+    directory = _safe_path(root / image_id)
+    marker = directory / 'flash-download-owner.json'
+    owner = _json({'schema': 1, 'kind': 'jibo-flash-download', 'id': image_id})
+    with _lock(root / (image_id + '.lock')):
+        if directory.exists():
+            if not directory.is_dir() or not marker.is_file() or _read(marker, 1024) != owner:
+                raise HostedError('disk', 'Flash working folder is not owned by this toolkit; nothing was removed')
+        else:
+            _directory(directory)
+            _atomic(marker, owner)
+        session = FlashDownloadSession(directory)
+        try:
+            yield session
+        finally:
+            if session.complete or not session.interrupted:
+                # This directory never contains robot backups or user packages.
+                _safe_path(directory)
+                if _read(marker, 1024) != owner:
+                    raise HostedError('disk', 'Flash working folder ownership changed; nothing was removed')
+                shutil.rmtree(directory)
