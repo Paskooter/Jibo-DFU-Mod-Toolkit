@@ -19,35 +19,30 @@ class HostedCliTests(HostedFixture):
             result = d.main(argv)
         return result, stdout.getvalue(), stderr.getvalue()
 
-    def test_online_list_and_download_only_have_zero_usb_calls(self):
+    def test_online_list_has_zero_usb_calls(self):
         dest = self.cache.parent / 'updates'
         result, stdout, stderr = self.invoke(['list-hosted-updates', '--directory', str(dest)])
         self.assertEqual(result, 0, stderr)
         data = json.loads(stdout)
         self.assertEqual(data['images'][0]['source'], 'hosted')
         self.assertTrue(data['images'][0]['recommended'])
-        result, stdout, stderr = self.invoke(['download-update', '--image', 'latest', '--directory', str(dest)])
-        self.assertEqual(result, 0, stderr)
-        self.assertTrue(Path(json.loads(stdout)['path']).is_file())
+        self.assertFalse(list(dest.glob('*.tar.bz2')))
 
-    def test_explicit_offline_lists_and_download_verifies_without_network(self):
+    def test_explicit_offline_list_uses_authenticated_cache_without_network(self):
         dest = self.cache.parent / 'updates'
-        path = h.download_image('latest', dest_dir=dest)
+        h.fetch_catalog(cache_dir=dest / '.hosted')
         with patch.object(h, '_open', side_effect=AssertionError('offline made a network request')):
             result, stdout, stderr = self.invoke(['list-hosted-updates', '--offline', '--directory', str(dest)])
             self.assertEqual(result, 0, stderr)
             self.assertTrue(json.loads(stdout)['from_cache'])
-            result, stdout, stderr = self.invoke(['download-update', '--offline', '--image', self.row['id'],
-                                                   '--directory', str(dest)])
-            self.assertEqual(result, 0, stderr)
-            self.assertEqual(json.loads(stdout)['path'], path)
+            self.assertFalse(list(dest.glob('*.tar.bz2')))
 
-    def test_hosted_dry_run_never_downloads_missing_artifact_or_calls_usb(self):
+    def test_removed_hosted_dry_run_is_rejected_before_download_or_usb(self):
         with patch.object(h, 'download_image', side_effect=AssertionError('dry-run auto-downloaded')):
-            result, stdout, stderr = self.invoke(['flash-hosted-update', '--image', self.row['id'],
-                                                '--dry-run', '--directory', str(self.cache.parent / 'updates')])
-        self.assertEqual(result, 1)
-        self.assertIn('download', stderr.lower())
+            with self.assertRaises(SystemExit) as stopped:
+                self.invoke(['flash-hosted-update', '--image', self.row['id'],
+                             '--dry-run', '--directory', str(self.cache.parent / 'updates')])
+        self.assertEqual(stopped.exception.code, 2)
 
     def test_unsafe_policy_needs_typed_confirmation_before_network_and_usb(self):
         with patch.object(h, '_open', side_effect=AssertionError('disabled policy fetched network')):

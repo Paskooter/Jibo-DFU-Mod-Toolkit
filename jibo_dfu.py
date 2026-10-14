@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guided terminal menu for Jibo recovery, var backups, and safe image edits."""
 import argparse
+from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import getpass
@@ -455,29 +456,22 @@ def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
 
     print("Waiting for DFU on USB port " + port + "…", flush=True)
     deadline = time.monotonic() + timeout
-    last_error = None
     while time.monotonic() < deadline:
         current = select_device(devices(), port)
         if current and current["state"] == "dfu":
-            try:
-                names, _ = dfu_alternatives(dfu_util, port)
-            except DfuError as exc:
-                last_error = str(exc)
-            else:
-                if MARKER not in names or "var" not in names:
-                    missing = [name for name in (MARKER, "var") if name not in names]
-                    raise DfuError("DFU appeared, but the RAM loader is missing: " + ", ".join(missing))
-                return {"port": port, "state": "dfu", "already_running": False,
-                        "loader_verified": True, "alternatives": names,
-                        "entry_transport": "ShofEL"}
-        time.sleep(0.25)
-    detail = " Last DFU listing error: " + last_error if last_error else ""
-    raise DfuError("The RAM loader started, but DFU did not become ready on USB port " +
-                   port + ". Check USB forwarding and the robot's connection." + detail)
+            names, _ = _settled_dfu_alternatives(dfu_util, port, deadline=deadline)
+            return {"port": port, "state": "dfu", "already_running": False,
+                    "loader_verified": True, "alternatives": names,
+                    "entry_transport": "ShofEL"}
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise DfuError("The RAM loader started, but DFU did not appear on USB port " +
+                   port + ". Check USB forwarding and the robot's connection.")
 
 
 def dfu_alternatives(executable, port):
-    output = run([executable, "-d", "0955:701a", "--path", port, "-l"])
+    deadline = _DFU_LISTING_DEADLINE.get()
+    options = {} if deadline is None else {"timeout": max(0.001, min(30, deadline - time.monotonic()))}
+    output = run([executable, "-d", "0955:701a", "--path", port, "-l"], **options)
     names = re.findall(r'name="([^"]+)"', output)
     return names, output
 
@@ -520,11 +514,7 @@ def _dfu_context(port, dfu_util, include_output=False):
         raise DfuError("No Jibo RCM/DFU device detected. Connect the robot by USB first.")
     if selected["state"] != "dfu":
         raise DfuError("The robot is in RCM/APX. Enter DFU first, then run this command again.")
-    names, output = dfu_alternatives(dfu_util, selected["port"])
-    if MARKER not in names:
-        raise DfuError("This DFU device does not show the Jibo recovery marker. No partition operation was attempted.")
-    if "var" not in names:
-        raise DfuError("This recovery profile does not expose a var partition.")
+    names, output = _settled_dfu_alternatives(dfu_util, selected["port"])
     reported = None
     for line in output.splitlines():
         if re.search(r'name="var"', line):
@@ -2945,22 +2935,16 @@ def flash_hosted_update(package_path, *, var_policy=flash_policy.KEEP, port=None
         raise hosted.HostedError('incompatible', 'Unsupported calibration choice')
     path = hosted._safe_path(package_path)
     with hosted._lock(path.with_name(path.name + '.lock')):
-        hosted.verify_local_image(path)
+        checked = hosted.verify_local_image(path)
+        review = confirmation
+        if callable(confirmation):
+            def review(plan):
+                details = dict(plan.get('phoenix') or {})
+                details['archive_sha256'] = checked['archive_sha256']
+                return confirmation({**plan, 'phoenix': details})
         return flash_update(path, var_policy, port=port, dfu_util=dfu_util, out=out,
-                            confirmation=confirmation, dry_run=dry_run,
+                            confirmation=review, dry_run=dry_run,
                             verify_readback=True, unsafe_without_calibration=unsafe_without_calibration)
-
-
-def _hosted_local_selection(image_id, directory):
-    if image_id == 'latest':
-        try:
-            image_id = hosted.cached_catalog(cache_dir=Path(directory) / '.hosted').latest_id
-        except hosted.HostedError as exc:
-            raise hosted.HostedError('offline', 'Latest unavailable offline; select an exact completed image id or explicitly download first') from exc
-    matches = [image for image in hosted.local_hosted_images(directory) if image.id == image_id]
-    if len(matches) != 1:
-        raise hosted.HostedError('offline', 'No unique verified local download for that id; use download-update explicitly first')
-    return matches[0].downloaded_path
 
 
 def _hosted_cli_list(directory, offline):
@@ -2971,13 +2955,14 @@ def _hosted_cli_list(directory, offline):
     except hosted.HostedError as exc:
         if not offline or exc.code not in ('offline', 'expired'):
             raise
-        catalog = hosted.Catalog(tuple(hosted.local_hosted_images(directory)), None, '', True,
+        catalog = hosted.Catalog((), None, '', True,
                                  exc.code + ': ' + str(exc))
     rows = []
     for image in catalog.images:
-        rows.append({**asdict(image), 'source': 'hosted', 'recommended': image.is_latest,
-                     'available': image.compatible and (image.offered or image.downloaded_path is not None),
-                     'downloaded': image.downloaded_path is not None, 'path': image.downloaded_path,
+        row = asdict(image)
+        row.pop('downloaded_path', None)
+        rows.append({**row, 'source': 'hosted', 'recommended': image.is_latest,
+                     'available': image.compatible and image.offered,
                      'reason': image.incompatible_reason, 'var_policies': hosted.hosted_var_policies(image)})
     return {'images': rows, 'latest_id': catalog.latest_id, 'from_cache': catalog.from_cache,
             'error': catalog.error}
@@ -3128,11 +3113,11 @@ def main(argv=None):
     list_updates = sub.add_parser("list-updates", help="List official full-flash packages in an updates folder")
     list_updates.add_argument("--directory", type=Path, default=Path.cwd() / "updates")
     for command, help_text in (('list-hosted-updates', 'List signed hosted Phoenix offers (no USB)'),
-                               ('download-update', 'Download/verify a Phoenix image only (no USB)'),
                                ('flash-hosted-update', 'Destructive reviewed Phoenix flash with robot-specific var')):
         hosted_parser = sub.add_parser(command, help=help_text)
         hosted_parser.add_argument('--directory', type=Path, default=Path.cwd() / 'updates')
-        hosted_parser.add_argument('--offline', action='store_true', help='Make no network requests; use authenticated local artifacts/cache')
+        if command == 'list-hosted-updates':
+            hosted_parser.add_argument('--offline', action='store_true', help='Use the last authenticated catalog without network requests')
         if command != 'list-hosted-updates':
             hosted_parser.add_argument('--image', required=True, help='Exact immutable image id or latest (latest requires an unexpired catalog)')
         if command == 'flash-hosted-update':
@@ -3141,7 +3126,6 @@ def main(argv=None):
             var_group.add_argument('--without-calibration', action='store_true', help=flash_policy.WITHOUT_LABEL + '; requires --confirm FLASH UPDATE')
             hosted_parser.add_argument('--confirm', help='Exactly FLASH UPDATE; otherwise a cancel-default review is required')
             hosted_parser.add_argument('--verify-readback', action='store_true', help='Always forced for hosted writes')
-            hosted_parser.add_argument('--dry-run', action='store_true', help='Inspect a verified local artifact/DFU only; never download or write')
             hosted_parser.add_argument('--resume-from', type=Path)
             _add_device_arguments(hosted_parser)
             _add_dfu_argument(hosted_parser)
@@ -3300,24 +3284,23 @@ def main(argv=None):
             password = None
         elif args.command == 'list-hosted-updates':
             result = _hosted_cli_list(args.directory, args.offline)
-        elif args.command == 'download-update':
-            path = (_hosted_local_selection(args.image, args.directory)
-                    if args.offline else hosted.download_image(args.image, dest_dir=args.directory))
-            checked = hosted.verify_local_image(path)
-            result = {'status': 'verified download; no robot action', 'path': path,
-                      'id': checked['image'].id, 'sha256': checked['archive_sha256']}
         elif args.command == 'flash-hosted-update':
-            if args.without_calibration and not args.dry_run and args.confirm != UPDATE_CONFIRMATION:
+            if args.without_calibration and args.confirm != UPDATE_CONFIRMATION:
                 raise DfuError('Without calibration requires --without-calibration and --confirm exactly FLASH UPDATE.')
-            if args.offline or args.dry_run:
-                path = _hosted_local_selection(args.image, args.directory)
-            else:
-                path = hosted.download_image(args.image, dest_dir=args.directory)
-            result = flash_hosted_update(path, port=args.port, dfu_util=args.dfu_util,
-                out=args.operation_dir, confirmation=args.confirm, dry_run=args.dry_run,
-                resume_from=args.resume_from,
-                var_policy=flash_policy.WITHOUT if args.without_calibration else flash_policy.KEEP,
-                unsafe_without_calibration=args.without_calibration)
+            if args.resume_from is not None:
+                raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup.")
+            from jibo_tui import download_for_flash
+            with hosted.flash_download_session(args.image, dest_dir=args.directory) as session:
+                try:
+                    path = download_for_flash(hosted, args.image, dest_dir=session.directory)
+                except hosted.HostedError as exc:
+                    session.interrupted = exc.code in ('canceled', 'offline', 'http', 'rate_limited', 'download-stopped')
+                    raise
+                session.complete = True
+                result = flash_hosted_update(path, port=args.port, dfu_util=args.dfu_util,
+                    out=args.operation_dir, confirmation=args.confirm,
+                    var_policy=flash_policy.WITHOUT if args.without_calibration else flash_policy.KEEP,
+                    unsafe_without_calibration=args.without_calibration)
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
                       for path in _update_candidates(args.directory)]
@@ -3344,6 +3327,43 @@ def main(argv=None):
     except (DfuError, images.ImageError, updates.UpdateError, OSError) as exc:
         print("Error: " + str(exc), file=sys.stderr)
         return 1
+
+
+DFU_SETTLE_SECONDS = 25.0
+_DFU_LISTING_DEADLINE = ContextVar("dfu_listing_deadline", default=None)
+
+
+def _settled_dfu_alternatives(dfu_util, port, deadline=None):
+    """Wait for USB access and the Jibo loader after device re-enumeration."""
+    stop = time.monotonic() + DFU_SETTLE_SECONDS
+    if deadline is not None:
+        stop = min(stop, deadline)
+    names, output, last_error = [], "", None
+    seen = []
+    while time.monotonic() < stop:
+        try:
+            token = _DFU_LISTING_DEADLINE.set(stop)
+            try:
+                names, output = dfu_alternatives(dfu_util, port)
+            finally:
+                _DFU_LISTING_DEADLINE.reset(token)
+            seen = list(dict.fromkeys(seen + names))
+            last_error = None
+            if MARKER in names and "var" in names:
+                return names, output
+        except DfuError as exc:
+            names = []
+            last_error = str(exc)
+        time.sleep(min(0.25, max(0, stop - time.monotonic())))
+    if not names:
+        detail = last_error or _transfer_error_detail(output)
+        raise DfuError("DFU appeared on USB port " + port +
+                       ", but USB access is not ready. Check USB forwarding and permissions." +
+                       (" Last listing: " + detail if detail else ""))
+    missing = [name for name in (MARKER, "var") if name not in names]
+    raise DfuError("DFU on USB port " + port + " is not Jibo's recovery loader "
+                   "or its recovery profile is incomplete; missing: " + ", ".join(missing) +
+                   ". Alternatives seen: " + ", ".join(seen) + ". No partition operation was attempted.")
 
 
 if __name__ == "__main__":

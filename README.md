@@ -199,13 +199,20 @@ for the archived RTM packages and the factory's calibration steps.
 
 ### Phoenix images
 
-When the toolkit includes the hosted-image backend, the update action can also
-download a signed Phoenix image (official 13.0.0 base) from jibo.io and install
-it with the same reviewed flash, keeping this robot's own data. Downloading
-needs no robot. See [Phoenix images from jibo.io](docs/hosted-flash-images.md)
-for what it keeps and what it does not fix.
+With Jibo in DFU, open **Install a Phoenix image or an official update**.
+The latest Phoenix image is featured first in the same list as your local
+packages, clearly labelled **downloads from jibo.io when you flash**. Choose
+calibration handling, then continue through download, checks, the Cancel-default
+review, writing and readback without returning to the menu. The downloaded image
+and its working files are removed when the attempt ends, including a cancelled
+review or a failed write. Robot backups and your own packages are kept. Only an
+interrupted download stays so the same image can resume next time. Connection
+interruptions retry automatically up to six attempts without starting a second
+flash. You can cancel the retry wait; untrusted images are never retried.
+See [Phoenix images from jibo.io](docs/hosted-flash-images.md) for the two
+calibration choices and what an install does not fix.
 
-With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. Both interfaces refresh robot state and available actions automatically when USB changes. In the GUI, use **Refresh USB**, F5 or Ctrl+R; in the TUI, `r` refreshes manually. The current loader uses Meerkat Rev02 RAM slots 2 and 3; only slot 2 has been confirmed on hardware. Select it for a robot whose hardware profile matches. Once DFU is active, both interfaces offer:
+With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The toolkit waits up to 25 seconds for the new DFU connection to become accessible, within the entry timeout, before checking the recovery loader. Both interfaces refresh robot state and available actions automatically when USB changes. In the GUI, use **Refresh USB**, F5 or Ctrl+R; in the TUI, `r` refreshes manually. The current loader uses Meerkat Rev02 RAM slots 2 and 3; only slot 2 has been confirmed on hardware. Select it for a robot whose hardware profile matches. Once DFU is active, both interfaces offer:
 
 | Action | What it does |
 | --- | --- |

@@ -68,6 +68,8 @@ Available operations use `jibo_tui.execute_action()` and the original
 
 - **Enter DFU with ShofEL:** review the Meerkat Rev02 RAM-slot warning and
   explicitly approve starting the RAM loader. This step does not write eMMC.
+  When DFU appears, the toolkit waits for USB access and the recovery loader to
+  settle for up to 25 seconds, never past the entry timeout.
 - **Mode / Wi-Fi:** normal, developer, int-developer and OOBE, protected or
   open networks, repeated hidden password entry, quick file editing where
   supported, and the same explicit slower full-var fallback.
@@ -91,9 +93,16 @@ Available operations use `jibo_tui.execute_action()` and the original
   Wi-Fi, pairing and settings start fresh in OOBE. Without calibration uses
   the package var unchanged; without a valid identity, setup may not work until
   his identity is restored from a backup.
-- **Phoenix images:** the list starts with **Latest Phoenix image — recommended**;
-  **Download a Phoenix image (no robot needed)** downloads without USB. Downloads
-  run on the worker thread with a **Cancel download** button (Esc also cancels).
+- **Phoenix images:** the latest image is featured at the top of the same flash
+  list as local packages, labelled **downloads from jibo.io when you flash**.
+  Choose calibration handling first. Download and checks run on the worker thread
+  with a **Cancel download** button (Esc also cancels), then the review, write and
+  readback follow in one flow. The downloaded image, receipts and working images
+  are removed after success, a failed write or a cancelled review. Robot backups
+  and your own packages stay. Only interrupted downloads are kept for resume.
+  A dropped connection resumes automatically in this flow, up to six attempts,
+  with **Connection dropped, resuming…** shown during the cancelable retry wait.
+  Untrusted image data is never retried.
   Phoenix writes always read back every transferred prefix. Their review states:
   **This image connects Jibo to Phoenix (jibo.io). After flashing he starts at the
   setup screens; finish setup at jibo.io.** Ordinary package reviews omit this line.
