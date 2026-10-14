@@ -47,6 +47,16 @@ download and preparation.
 
 The two pictures above use example image names, sizes and folders.
 
+If the connection drops, the toolkit automatically resumes the same image, up
+to six attempts. It shows **Connection dropped, resuming… (attempt N of 6)**.
+Retry waits are 2, 5, 10, 20 and 30 seconds; a longer valid server Retry-After
+is honored. **Cancel download** stops the retry wait. Signature, checksum,
+signed-size, expired-list and compatibility failures stop immediately, without
+retrying. If every attempt fails, nothing is written to the robot and the next
+try can continue from the checked partial.
+
+![An interrupted download resuming in the same flash flow, with Cancel download still available](images/gui/hosted-resuming.png)
+
 ## Calibration choices
 
 Every package offers exactly two choices:

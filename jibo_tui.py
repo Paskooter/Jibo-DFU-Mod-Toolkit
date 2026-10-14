@@ -13,6 +13,7 @@ import re
 import sys
 import textwrap
 import threading
+import time
 
 import jibo_flash_policy as flash_policy
 import jibo_calibration_client as calibration_service
@@ -240,6 +241,7 @@ _HOSTED_ERROR_TEXT = {
     "http": "jibo.io answered with an error.",
     "disk": "There is not enough free space to save the image.",
     "rate_limited": "jibo.io is busy. Try again in a few minutes.",
+    "download-stopped": "The download stopped. Nothing was written to the robot. Try again to continue where it stopped.",
     "dependency": "This copy of the toolkit can't check Phoenix images.",
     "check-canceled": "The image list check was canceled.",
 }
@@ -287,6 +289,8 @@ def _human_bytes(value):
 
 def format_progress(progress):
     """One plain line with bytes, percent, rate and time left when known."""
+    if getattr(progress, "phase", "") == "resume":
+        return str(progress.message)
     text = _PHASE_TEXT.get(getattr(progress, "phase", ""), "Working")
     percent = getattr(progress, "percent", None)
     if percent is not None:
@@ -522,12 +526,14 @@ def _download_chosen(hosted, image, session):
     """Return ``(path, message)``; resumes a stopped download of the same image."""
     path, error = run_with_progress(
         "Downloading Phoenix " + str(image.version),
-        lambda report, cancel: hosted.download_image(image.id, dest_dir=session.directory,
-                                                     progress=report, cancel=cancel),
+        lambda report, cancel: download_for_flash(hosted, image.id, dest_dir=session.directory,
+                                                progress=report, cancel=cancel),
         hosted.CancelToken(),
         detail="Downloading for this flash. An interrupted download can resume; the image is removed when the flash attempt ends.")
     if error is not None:
-        session.interrupted = _error_code(error) in ("canceled", "offline", "http")
+        session.interrupted = _error_code(error) in ("canceled", "offline", "http", "rate_limited", "download-stopped")
+        if _error_code(error) == "download-stopped":
+            raise error
         return None, hosted_error_text(_error_code(error), str(error))
     session.complete = True
     return path, ""
@@ -1623,3 +1629,108 @@ def run(api_module):
             else:
                 show_screen("Action failed", str(exc))
         app.refresh()
+
+
+HOSTED_DOWNLOAD_ATTEMPTS = 6
+HOSTED_DOWNLOAD_BACKOFF = (2, 5, 10, 20, 30)
+
+
+def _download_error_chain(error):
+    """Transport wrappers can retain HTTP headers on a chained exception."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend((getattr(current, '__cause__', None), getattr(current, '__context__', None)))
+
+
+def _transient_download_error(error):
+    code = _error_code(error)
+    if code in ('offline', 'rate_limited'):
+        return True
+    if code != 'http':
+        return False
+    for current in _download_error_chain(error):
+        status = getattr(current, 'code', None)
+        if isinstance(status, int):
+            return status == 429 or 500 <= status <= 599
+    match = re.fullmatch(r'Hosted HTTP status (\d{3})', str(error))
+    if match:
+        status = int(match.group(1))
+        return status == 429 or 500 <= status <= 599
+    # HTTP also represents signed-size/range/encoding contract failures.
+    # Retry only the downloader's explicitly incomplete transport messages.
+    return str(error) in ('Archive was truncated; partial retained for exact-ID resume',
+                          'Hosted metadata was truncated')
+
+
+def _download_retry_delay(error, attempt):
+    """Never shorten a valid server Retry-After below the selected backoff."""
+    from email.utils import parsedate_to_datetime
+    import math
+    delay = HOSTED_DOWNLOAD_BACKOFF[attempt - 1]
+    for current in _download_error_chain(error):
+        value = getattr(current, 'retry_after', None)
+        headers = getattr(current, 'headers', None)
+        if value is None and headers is not None:
+            value = headers.get('Retry-After')
+        if value is None:
+            continue
+        try:
+            text = str(value).strip()
+            seconds = float(text) if text.isascii() and text.isdecimal() else None
+            if seconds is None:
+                date = parsedate_to_datetime(text)
+                if date.tzinfo is not None:
+                    seconds = max(0.0, date.timestamp() - time.time())
+            if seconds is not None and math.isfinite(seconds) and seconds >= 0:
+                delay = max(delay, seconds)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return delay
+
+
+def _check_download_cancel(cancel, hosted):
+    if cancel is not None and cancel.cancelled:
+        raise hosted.HostedError('canceled', 'Download canceled. Nothing was written to the robot.')
+
+
+def _wait_for_download_retry(seconds, cancel, hosted):
+    deadline = time.monotonic() + seconds
+    while True:
+        _check_download_cancel(cancel, hosted)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
+
+
+def download_for_flash(hosted, image_id, *, dest_dir, progress=None, cancel=None):
+    """Resume transient failures in one flow; never retry untrusted image data."""
+    from types import SimpleNamespace
+    pinned_id = None if image_id == 'latest' else image_id
+    for attempt in range(1, HOSTED_DOWNLOAD_ATTEMPTS + 1):
+        _check_download_cancel(cancel, hosted)
+        try:
+            if pinned_id is None:
+                catalog = hosted.fetch_catalog(cache_dir=Path(dest_dir) / '.hosted', cancel=cancel)
+                pinned_id = catalog.latest_id
+                if not pinned_id:
+                    raise hosted.HostedError('incompatible', 'No latest Phoenix image is offered.')
+            return hosted.download_image(pinned_id, dest_dir=dest_dir, progress=progress, cancel=cancel)
+        except hosted.HostedError as error:
+            _check_download_cancel(cancel, hosted)
+            if not _transient_download_error(error):
+                raise
+            if attempt == HOSTED_DOWNLOAD_ATTEMPTS:
+                raise hosted.HostedError('download-stopped', hosted_error_text('download-stopped')) from error
+            message = 'Connection dropped, resuming… (attempt {} of {})'.format(attempt + 1, HOSTED_DOWNLOAD_ATTEMPTS)
+            if progress is not None:
+                progress(SimpleNamespace(phase='resume', bytes=0, total=None, percent=None,
+                                         rate=None, eta=None, message=message))
+            else:
+                print(message, flush=True)
+            _wait_for_download_retry(_download_retry_delay(error, attempt), cancel, hosted)

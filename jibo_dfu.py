@@ -3289,11 +3289,12 @@ def main(argv=None):
                 raise DfuError('Without calibration requires --without-calibration and --confirm exactly FLASH UPDATE.')
             if args.resume_from is not None:
                 raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup.")
+            from jibo_tui import download_for_flash
             with hosted.flash_download_session(args.image, dest_dir=args.directory) as session:
                 try:
-                    path = hosted.download_image(args.image, dest_dir=session.directory)
+                    path = download_for_flash(hosted, args.image, dest_dir=session.directory)
                 except hosted.HostedError as exc:
-                    session.interrupted = exc.code in ('canceled', 'offline', 'http')
+                    session.interrupted = exc.code in ('canceled', 'offline', 'http', 'rate_limited', 'download-stopped')
                     raise
                 session.complete = True
                 result = flash_hosted_update(path, port=args.port, dfu_util=args.dfu_util,

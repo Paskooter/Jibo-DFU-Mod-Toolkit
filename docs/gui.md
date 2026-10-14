@@ -100,6 +100,9 @@ Available operations use `jibo_tui.execute_action()` and the original
   readback follow in one flow. The downloaded image, receipts and working images
   are removed after success, a failed write or a cancelled review. Robot backups
   and your own packages stay. Only interrupted downloads are kept for resume.
+  A dropped connection resumes automatically in this flow, up to six attempts,
+  with **Connection dropped, resuming…** shown during the cancelable retry wait.
+  Untrusted image data is never retried.
   Phoenix writes always read back every transferred prefix. Their review states:
   **This image connects Jibo to Phoenix (jibo.io). After flashing he starts at the
   setup screens; finish setup at jibo.io.** Ordinary package reviews omit this line.

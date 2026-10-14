@@ -279,8 +279,13 @@ class FakeHosted:
         return [("keep-calibration", True, ""), ("without-calibration", True, "")]
 
     def flash_download_session(self, image_id, *, dest_dir=None):
-        import jibo_hosted_updates
-        return jibo_hosted_updates.flash_download_session(image_id, dest_dir=dest_dir)
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        @contextmanager
+        def session():
+            yield SimpleNamespace(directory=Path(dest_dir) / '.hosted-flash' / image_id,
+                                  complete=False, interrupted=False)
+        return session()
 
 
 class FakeHostedApi(FakeApi):

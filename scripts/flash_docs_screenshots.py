@@ -101,7 +101,7 @@ def capture_hosted(out):
     from dataclasses import replace
     from unittest.mock import patch
     import threading
-    from gui_fakes import FakeHosted, FakeHostedApi, sample_catalog
+    from gui_fakes import FakeHosted, FakeHostedApi, HostedError, Progress, sample_catalog
     import jibo_gui as gui
     import jibo_gui_core as core
 
@@ -110,6 +110,22 @@ def capture_hosted(out):
                                            for image in catalog.images))
     hosted = FakeHosted(catalog=catalog)
     hosted.gate = threading.Event()
+    resume_gate = threading.Event()
+    attempts = []
+    original_download = hosted.download_image
+    def download(image_id, *, dest_dir=None, progress=None, cancel=None):
+        attempts.append(image_id)
+        if len(attempts) == 1:
+            progress(Progress('download', 1000, 4000, 25.0, 500.0, 6.0))
+            hosted.started.set()
+            if not hosted.gate.wait(10):
+                raise TimeoutError('Documentation download was not released')
+            raise HostedError('offline', 'Connection interrupted')
+        return original_download(image_id, dest_dir=dest_dir, progress=progress, cancel=cancel)
+    hosted.download_image = download
+    def retry_wait(seconds, cancel, backend):
+        if not resume_gate.wait(10):
+            raise TimeoutError('Documentation resume was not released')
     api = FakeHostedApi(hosted, packages=['updates/jibo-13.0.0.tar.bz2'])
     api.BACKUP_ROOT = Path('~/Jibo-Backups')
     errors = []
@@ -162,7 +178,8 @@ def capture_hosted(out):
             print(path)
 
         try:
-            with patch.object(controller.flows, 'hosted_folders', return_value=(directory / 'updates', directory / 'cache')):
+            with patch.object(controller.flows, 'hosted_folders', return_value=(directory / 'updates', directory / 'cache')), \
+                    patch.object(controller.flows, '_wait_for_download_retry', side_effect=retry_wait):
                 pump(lambda: not controller.busy)
                 root.focus_force()
                 window.render_state()
@@ -190,6 +207,9 @@ def capture_hosted(out):
                 assert window.progress_cancel.winfo_height() >= window.progress_cancel.winfo_reqheight()
                 capture('hosted-progress')
                 hosted.gate.set()
+                pump(lambda: window._cancel_shown and 'Connection dropped, resuming' in window.progress_status.cget('text'))
+                capture('hosted-resuming')
+                resume_gate.set()
                 pump(lambda: window.prompt is not None and window.prompt.kind == 'confirm')
                 assert window.prompt.initial == 'cancel'
                 assert policy.PHOENIX_LINE in window.prompt.detail
@@ -200,6 +220,7 @@ def capture_hosted(out):
                 print('Interpreter:', sys.executable, 'Tk:', root.tk.call('package', 'provide', 'Tk'))
         finally:
             hosted.gate.set()
+            resume_gate.set()
             controller.shutdown()
             pump(lambda: not controller.busy)
             window.close()
