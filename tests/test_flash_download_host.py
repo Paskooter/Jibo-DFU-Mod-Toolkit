@@ -16,12 +16,13 @@ ORIGINS = ('https://download.jibo.io', 'https://jibo.io')
 
 
 @contextmanager
-def pinned_server(image_origin):
+def pinned_server(image_origin, manifest_origin=None):
     with FakeFlashServer(tls=True, tls_hostname='jibo.io') as server:
         row, index, manifest = server.make_image()
         path = urlsplit(row['url']).path
         manifest_path = urlsplit(row['manifest_url']).path
-        row['url'] = manifest['url'] = image_origin + path
+        row['url'] = image_origin + path
+        manifest['url'] = (manifest_origin or image_origin) + path
         row['manifest_url'] = 'https://jibo.io' + manifest_path
         raw = server.envelope(manifest)
         row['manifest_size'] = len(raw)
@@ -56,6 +57,14 @@ def test_pinned_image_origin_downloads_and_revalidates(tmp_path, origin):
         assert hosts['/flash/index.json'] == 'jibo.io'
         assert hosts[urlsplit(row['manifest_url']).path] == 'jibo.io'
         assert hosts[urlsplit(row['url']).path] == urlsplit(origin).netloc
+
+
+
+def test_download_row_with_unchanged_jibo_manifest_downloads_and_revalidates(tmp_path):
+    with pinned_server(ORIGINS[0], manifest_origin=ORIGINS[1]) as (server, row, index):
+        completed = Path(h.download_image(row['id'], dest_dir=tmp_path / 'images'))
+        assert h.verify_local_image(completed)['archive_sha256'] == row['sha256']
+        assert {headers['Host'] for path, headers in server.requests if path.startswith('/flash/images/')} == {'download.jibo.io'}
 
 
 BAD_ORIGINS = (
