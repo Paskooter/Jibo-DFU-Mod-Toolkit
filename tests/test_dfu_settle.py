@@ -59,6 +59,19 @@ class DfuSettleTests(unittest.TestCase):
         self.assertEqual(len(calls), int(d.DFU_SETTLE_SECONDS / 0.25))
 
 
+    def test_partition_context_waits_for_usb_access_after_transition(self):
+        clock = [0.0]
+        with patch.object(d, 'devices', return_value=[{'port': '1-1', 'state': 'dfu'}]), \
+                patch.object(d, 'dfu_alternatives', side_effect=[([], 'Cannot open DFU device'),
+                    ([d.MARKER, 'var'], 'name="var", serial="example-device"')]) as listing, \
+                patch.object(d.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(d.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result = d._dfu_context('1-1', 'dfu-util')
+        self.assertEqual(result[0], '1-1')
+        self.assertEqual(result[1], [d.MARKER, 'var'])
+        self.assertEqual(listing.call_count, 2)
+        self.assertEqual(clock[0], 0.25)
+
     def test_listing_subprocess_cannot_outlive_remaining_deadline(self):
         clock = [0.0]
         def run(argv, timeout=30):

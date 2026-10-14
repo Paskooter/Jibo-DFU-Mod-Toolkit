@@ -24,6 +24,14 @@ class OwnerFlashChoiceTests(unittest.TestCase):
         self.assertNotIn('downloaded', items[0].label)
         self.assertEqual(items[1].label, 'official.tar.bz2')
 
+    def test_cli_list_does_not_advertise_saved_downloads(self):
+        with patch.object(h, 'fetch_catalog', return_value=sample_catalog()):
+            result = d._hosted_cli_list('packages', False)
+        for row in result['images']:
+            self.assertNotIn('downloaded', row)
+            self.assertNotIn('path', row)
+            self.assertNotIn('downloaded_path', row)
+
     def test_cli_has_no_download_or_offline_flash_path(self):
         for argv in (['download-update', '--image', 'latest'],
                      ['flash-hosted-update', '--image', 'latest', '--offline'],
@@ -89,7 +97,6 @@ class OwnerFlashFlowTests(HostedFixture):
             else:
                 result = tui._run_hosted_update(api, h, '1-1')
                 self.assertEqual(result['status'], 'cancelled' if outcome == 'cancel' else 'verified')
-        self.assertEqual(events[:3], ['calibration', 'download', 'verify'])
         self.assertEqual(own.read_bytes(), b'user package')
         self.assertEqual(backup.read_bytes(), b'robot backup')
         self.assertEqual(record.read_text(), 'operation record')
@@ -98,6 +105,7 @@ class OwnerFlashFlowTests(HostedFixture):
             self.assertFalse(h._provenance(path).exists())
         self.assertFalse(list(dest.rglob('*.ext4')))
         self.assertFalse(list(dest.rglob('*.provenance.json')))
+        self.assertEqual(events[:3], ['calibration', 'download', 'verify'])
         return events
 
     def test_completed_download_deleted_after_success(self):
@@ -165,6 +173,13 @@ class OwnerFlashFlowTests(HostedFixture):
                                     '--directory', str(dest)]), 0)
         self.assertEqual(len(paths), 1)
         self.assertFalse(paths[0].parent.exists())
+
+    def test_interrupt_without_partial_removes_metadata_copies(self):
+        dest = self.cache.parent / 'packages'
+        with h.flash_download_session(self.row['id'], dest_dir=dest) as session:
+            (session.directory / 'metadata.json').write_text('{}')
+            session.interrupted = True
+        self.assertFalse(session.directory.exists())
 
     def test_unowned_working_folder_is_never_deleted(self):
         dest = self.cache.parent / 'packages'

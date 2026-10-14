@@ -688,7 +688,10 @@ def flash_download_session(image_id, *, dest_dir=None):
         try:
             yield session
         finally:
-            if session.complete or not session.interrupted:
+            resumable = (session.interrupted and not session.complete and
+                         any(not path.is_symlink() and path.is_file()
+                             for path in directory.glob('phoenix-*.tar.bz2.part')))
+            if not resumable:
                 # This directory never contains robot backups or user packages.
                 _safe_path(directory)
                 if _read(marker, 1024) != owner:

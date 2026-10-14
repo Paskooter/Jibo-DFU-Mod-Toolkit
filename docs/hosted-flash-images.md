@@ -43,7 +43,7 @@ asks first and stops without writing to the robot. The progress page shows how
 much is done, the speed and the time left. Free-space checks still run before
 download and preparation.
 
-![A Phoenix image download at 42 percent with its speed, time left and a Cancel download button](images/gui/hosted-progress.png)
+![A Phoenix image download for flashing at 25 percent with its speed, time left and a Cancel download button](images/gui/hosted-progress.png)
 
 The two pictures above use example image names, sizes and folders.
 

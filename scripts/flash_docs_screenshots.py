@@ -101,7 +101,7 @@ def capture_hosted(out):
     from dataclasses import replace
     from unittest.mock import patch
     import threading
-    from gui_fakes import FakeHosted, FakeHostedApi, HostedError, Progress, sample_catalog
+    from gui_fakes import FakeHosted, FakeHostedApi, sample_catalog
     import jibo_gui as gui
     import jibo_gui_core as core
 
@@ -184,7 +184,10 @@ def capture_hosted(out):
                 pump(lambda: window.prompt is not None and window.prompt.title == 'Choose calibration handling')
                 assert not hosted.started.is_set()
                 window.answer('keep-calibration')
-                pump(lambda: controller.download_active and hosted.started.is_set())
+                pump(lambda: controller.download_active and hosted.started.is_set() and
+                     window._cancel_shown and 'Downloading 25%' in window.progress_status.cget('text'))
+                assert window.progress_cancel.winfo_viewable()
+                assert window.progress_cancel.winfo_height() >= window.progress_cancel.winfo_reqheight()
                 capture('hosted-progress')
                 hosted.gate.set()
                 pump(lambda: window.prompt is not None and window.prompt.kind == 'confirm')

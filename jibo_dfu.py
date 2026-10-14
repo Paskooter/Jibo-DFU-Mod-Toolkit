@@ -2955,13 +2955,14 @@ def _hosted_cli_list(directory, offline):
     except hosted.HostedError as exc:
         if not offline or exc.code not in ('offline', 'expired'):
             raise
-        catalog = hosted.Catalog(tuple(hosted.local_hosted_images(directory)), None, '', True,
+        catalog = hosted.Catalog((), None, '', True,
                                  exc.code + ': ' + str(exc))
     rows = []
     for image in catalog.images:
-        rows.append({**asdict(image), 'source': 'hosted', 'recommended': image.is_latest,
-                     'available': image.compatible and (image.offered or image.downloaded_path is not None),
-                     'downloaded': image.downloaded_path is not None, 'path': image.downloaded_path,
+        row = asdict(image)
+        row.pop('downloaded_path', None)
+        rows.append({**row, 'source': 'hosted', 'recommended': image.is_latest,
+                     'available': image.compatible and image.offered,
                      'reason': image.incompatible_reason, 'var_policies': hosted.hosted_var_policies(image)})
     return {'images': rows, 'latest_id': catalog.latest_id, 'from_cache': catalog.from_cache,
             'error': catalog.error}
