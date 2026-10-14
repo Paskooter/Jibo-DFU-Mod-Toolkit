@@ -20,8 +20,6 @@ jobs:
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
-    env:
-      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v5
       - name: Install native dependencies
@@ -30,6 +28,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/portability-venv"
           "$RUNNER_TEMP/portability-venv/bin/python" -m pip install pytest pillow
           printf '%s\n' "$RUNNER_TEMP/portability-venv/bin" >> "$GITHUB_PATH"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Check native launcher and USB enumeration
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
