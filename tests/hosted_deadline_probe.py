@@ -37,6 +37,15 @@ def probe(tls, kind):
         return call
 
     with FakeFlashServer(tls=tls) as server, ExitStack() as stack:
+        real_wait = server.stopping.wait
+        def wait(delay=None):
+            before = time.monotonic()
+            value = real_wait(delay)
+            if delay:
+                note('server.wait', requested=delay,
+                     elapsed=round(time.monotonic() - before, 6), stopped=value)
+            return value
+        stack.enter_context(patch.object(server.stopping, 'wait', wait))
         stack.enter_context(patch.object(h, 'ORIGIN', server.origin))
         if tls:
             stack.enter_context(patch('ssl._create_default_https_context',
@@ -98,6 +107,18 @@ def probe(tls, kind):
 if __name__ == '__main__':
     print(json.dumps({'python': sys.version, 'platform': platform.platform(),
                       'openssl': ssl.OPENSSL_VERSION}), flush=True)
+    from threading import Event
+    for delay in (0.02, 0.16, 0.6):
+        for method in ('event', 'sleep'):
+            values = []
+            for _ in range(10):
+                started = time.monotonic()
+                if method == 'event':
+                    Event().wait(delay)
+                else:
+                    time.sleep(delay)
+                values.append(round(time.monotonic() - started, 6))
+            print(json.dumps({'wait_probe': method, 'requested': delay, 'observed': values}), flush=True)
     for _ in range(5):
         for tls in (False, True):
             for kind in ('redirect', 'stream'):
