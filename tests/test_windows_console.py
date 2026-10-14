@@ -26,6 +26,12 @@ def windows_launcher(tmp_path, monkeypatch, args):
     return module
 
 
+def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
+    source = (ROOT / 'scripts/release/test-bootstrap.ps1').read_text()
+    assert source.count('public class ToolkitConsoleNative') == 2
+    assert source.count('public static int MessageBox') == 2
+
+
 @pytest.mark.parametrize('case', [
     'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',

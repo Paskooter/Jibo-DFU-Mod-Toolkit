@@ -44,6 +44,8 @@ try {
     $child = Join-Path $fixture 'refusal.ps1'
     $childText = @'
 param($Bootstrap, $Payload, $Case)
+# Native dialogs are an external boundary; console.ps1 is exercised separately.
+Add-Type -TypeDefinition 'using System; public class ToolkitConsoleNative { public static IntPtr GetConsoleWindow() { return IntPtr.Zero; } public static bool ShowWindow(IntPtr h, int c) { return false; } public static bool IsWindowVisible(IntPtr h) { return true; } public static bool IsIconic(IntPtr h) { return false; } public static int DwmGetWindowAttribute(IntPtr h, int a, out int v, int s) { v=0; return 0; } public static int MessageBox(IntPtr h, string t, string c, uint f) { return 1; } }'
 $global:BootstrapTestCase = $Case
 $global:BootstrapTestSentinel = Join-Path $Payload 'unexpected-admin'
 function wsl.exe {
@@ -207,6 +209,8 @@ try {
     $child = Join-Path $fixture 'flow.ps1'
     $childText = @'
 param($Bootstrap, $Payload, $Case)
+# Native dialogs are an external boundary; console.ps1 is exercised separately.
+Add-Type -TypeDefinition 'using System; public class ToolkitConsoleNative { public static IntPtr GetConsoleWindow() { return IntPtr.Zero; } public static bool ShowWindow(IntPtr h, int c) { return false; } public static bool IsWindowVisible(IntPtr h) { return true; } public static bool IsIconic(IntPtr h) { return false; } public static int DwmGetWindowAttribute(IntPtr h, int a, out int v, int s) { v=0; return 0; } public static int MessageBox(IntPtr h, string t, string c, uint f) { return 1; } }'
 # Windows PowerShell 5.1 exports Get-FileHash as a FUNCTION. Load Utility
 # before defining mocks: its lazy import (first ConvertTo-Json trace) would
 # otherwise replace the mock with the real hash function. PS7 uses a cmdlet.
