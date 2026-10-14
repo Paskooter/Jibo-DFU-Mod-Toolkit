@@ -23,7 +23,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import time
-from threading import Timer
+from threading import Event, Timer
 from fake_flash_server import FakeFlashServer
 import jibo_hosted_updates as h
 
@@ -173,25 +173,39 @@ class DeadlineTests(HostedFixture):
         first, second, third = ('/flash/first.json', '/flash/second.json', '/flash/third.json')
         self.server.redirects[first] = self.server.origin + second
         self.server.redirects[second] = self.server.origin + third
-        self.server.header_delays[first] = 0.16
-        self.server.header_delays[second] = 0.16
+        # Each hop fits separately; their sum exceeds the shared budget.
+        # Leave scheduling headroom rather than racing 160 ms fixture waits
+        # against a 250 ms opening deadline on every platform.
+        timeout = 2.0
+        self.server.header_delays[first] = timeout * 0.6
+        self.server.header_delays[second] = timeout * 0.6
         self.server.files[third] = b'abc'
         started = time.monotonic()
         with self.assertRaises(h.HostedError) as caught:
-            h._fetch(self.server.origin + first, 10, 0.25, None)
+            h._fetch(self.server.origin + first, 10, timeout, None)
         self.assertEqual(caught.exception.code, 'offline')
-        self.assertLess(time.monotonic() - started, 0.4)
+        self.assertLess(time.monotonic() - started, timeout * 1.4)
         self.assertEqual([path for path, _ in self.server.requests], [first, second])
 
     def test_archive_stream_body_is_not_capped_by_opening_deadline(self):
         path = '/flash/deadline.json'
         self.server.files[path] = b'abc'
         self.server.chunk_sizes[path] = 1
-        self.server.delays[path] = 0.16
+        release, sent = Event(), Event()
+        self.server.body_gates[path] = release
+        self.server.body_sent[path] = sent
+        timeout = 2.0
         started = time.monotonic()
-        with h._open(self.server.origin + path, 0.25) as response:
+        with h._open(self.server.origin + path, timeout) as response:
+            # No body can be buffered during opening. Release it only after
+            # the opening budget has definitely expired, then wait for the
+            # writes before reading: this tests a total cap, not idle jitter.
+            self.assertFalse(sent.is_set())
+            time.sleep(timeout + 0.05)
+            release.set()
+            self.assertTrue(sent.wait(timeout), 'Fixture did not send the released body')
             self.assertEqual(response.read(3), b'abc')
-        self.assertGreater(time.monotonic() - started, 0.4)
+        self.assertGreater(time.monotonic() - started, timeout)
 
     def test_slow_headers_obey_overall_receive_deadline(self):
         path = '/flash/deadline.json'

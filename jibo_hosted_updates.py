@@ -543,6 +543,10 @@ def _local(path):
     return row, manifest, metadata
 
 
+_CHECKPOINT_BYTES = 8 * 1024 * 1024
+_CHECKPOINT_SECONDS = 2.0
+
+
 def _download(image_id, dest, progress, cancel):
     _cancel(cancel)
     _progress(progress, 'index', 0, None, 'Authenticating hosted catalog')
@@ -615,11 +619,16 @@ def _download(image_id, dest, progress, cancel):
                 with os.fdopen(os.open(partial, flags, 0o600), 'wb') as output:
                     if not stat.S_ISREG(os.fstat(output.fileno()).st_mode):
                         raise HostedError('disk', 'Partial output must be a regular file')
+                    checkpoint_bytes = offset
+                    checkpoint_time = time.monotonic()
                     def checkpoint():
+                        nonlocal checkpoint_bytes, checkpoint_time
                         output.flush()
                         os.fsync(output.fileno())
                         _atomic(receipt_path, _json({**pin, 'bytes': offset,
                             'partial_sha256': digest.hexdigest(), 'etag': etag}))
+                        checkpoint_bytes = offset
+                        checkpoint_time = time.monotonic()
                     checkpoint()
                     try:
                         while True:
@@ -632,11 +641,15 @@ def _download(image_id, dest, progress, cancel):
                             output.write(chunk)
                             digest.update(chunk)
                             offset += len(chunk)
-                            checkpoint()
+                            if offset - checkpoint_bytes >= _CHECKPOINT_BYTES or \
+                                    time.monotonic() - checkpoint_time >= _CHECKPOINT_SECONDS:
+                                checkpoint()
                             _progress(progress, 'download', offset, row['size'], 'Downloading authenticated Phoenix archive', started)
                     except (TimeoutError, http.client.HTTPException, OSError) as exc:
-                        checkpoint()
                         raise HostedError('offline', 'Archive transport interrupted; verified partial retained') from exc
+                    finally:
+                        # EOF, cancellation and exceptions all publish the last durable batch.
+                        checkpoint()
         _cancel(cancel)
         _progress(progress, 'verify', offset, row['size'], 'Verifying complete archive and signed member hashes')
         if offset != row['size']:
