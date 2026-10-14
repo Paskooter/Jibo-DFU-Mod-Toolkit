@@ -1,6 +1,6 @@
 # Phoenix images from jibo.io
 
-The toolkit can download a Phoenix image from jibo.io and install it with the
+The toolkit can download a Phoenix image from jibo.io or download.jibo.io and install it with the
 same reviewed full-flash steps it uses for official update packages. This page
 explains what that does, what it keeps, and what it cannot fix.
 

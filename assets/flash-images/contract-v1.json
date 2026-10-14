@@ -3,6 +3,7 @@
   "contract_id": "phoenix-flash-contract-v1",
   "status": "production trust; toolkit 1.0.0",
   "origin": "https://jibo.io",
+  "image_origins": ["https://download.jibo.io", "https://jibo.io"],
   "paths": {
     "index": "/flash/index.json",
     "manifest": "/flash/manifests/<id>.json",

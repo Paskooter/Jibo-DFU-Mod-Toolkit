@@ -33,17 +33,24 @@ formats them for display only. Index expiry is at most 86,400 seconds after
 creation; future skew is at most 300 seconds. Sequence is monotonic, positive and
 bounded. There are at most 128 rows; `latest_image_id` names one offered row.
 
-Routes remain pinned to `https://jibo.io`:
+Metadata routes remain pinned to `https://jibo.io`:
 
 - `/flash/index.json`
 - `/flash/manifests/<id>.json`
-- `/flash/images/<id>/<archive-sha256>.tar.bz2`
+
+Image URLs use exactly one of `https://download.jibo.io` or `https://jibo.io`,
+followed by `/flash/images/<id>/<archive-sha256>.tar.bz2`. The signed index selects
+the exact transport URL. Redirects stay on that request's origin and, for images,
+inside its image route; a cross-origin target is refused before it is opened.
 
 The row pins the **manifest envelope** byte length and SHA-256. The manifest pins
 the entire archive byte length and SHA-256, and pins the **metadata envelope**
 bytes with `embedded_metadata_sha256` (not `metadata_sha256`). Every shared
 index-row/manifest field must agree, including release label, component tuple,
-minimum toolkit version/capabilities, profile/strategy, URLs and release notes.
+minimum toolkit version/capabilities, profile/strategy and release notes. The
+image URL origin alone may differ: an immutable manifest can retain jibo.io while
+the newer signed index selects download.jibo.io. Both URLs must still match the
+same exact signed image ID and archive SHA-256 on one of the two pinned origins.
 Every shared metadata/manifest field must agree except the intentionally distinct
 `kind`. No unsigned display or provenance field can replace these bindings.
 

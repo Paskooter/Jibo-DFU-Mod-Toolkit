@@ -71,6 +71,11 @@ jobs:
           node tests/startup-view.test.js assets/boot-network-status/startup-view-x11-early.js
           node tests/startup-view-dom.test.js
           node tests/startup-view.test.js assets/boot-network-status/startup-view-dom.js '^(default source|source |UTF8)'
+      - name: Test pinned direct-download image hosts offline
+        run: |
+          openssl_prefix=$(brew --prefix openssl@3)
+          export PATH="$openssl_prefix/bin:$PATH"
+          python3 -m pytest -q -p no:cacheprovider tests/test_flash_download_host.py
       - name: Test authenticated hosted downloads and Phoenix var safety offline
         run: |
           ext4_prefix=$(brew --prefix e2fsprogs)

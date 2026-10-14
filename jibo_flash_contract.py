@@ -301,7 +301,14 @@ def validate_metadata(row):
 def validate_manifest(row, selection, *, origin=None):
     schema(row, 'manifest', origin=origin)
     total = validate_members(row)
-    for field in set(CONTRACT['fields']['manifest']) & set(CONTRACT['fields']['image']):
+    # The signed index selects transport; immutable manifests may retain the old
+    # pinned host. Neither document may change the image's exact id/hash path.
+    image_origin = CONTRACT['origin'] if origin is None else origin
+    origins = CONTRACT['image_origins'] if image_origin == CONTRACT['origin'] else (image_origin,)
+    urls = {pinned + '/flash/images/' + row['id'] + '/' + row['sha256'] + '.tar.bz2' for pinned in origins}
+    if row['url'] not in urls or selection.get('url') not in urls:
+        fail('Manifest/catalog URL disagrees with signed image id/hash')
+    for field in (set(CONTRACT['fields']['manifest']) & set(CONTRACT['fields']['image'])) - {'url'}:
         if row[field] != selection.get(field):
             fail('Manifest disagrees with catalog: ' + field)
     if row['unpacked_size'] != total:
