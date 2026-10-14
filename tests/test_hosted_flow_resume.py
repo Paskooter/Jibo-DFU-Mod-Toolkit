@@ -33,7 +33,10 @@ class HostedFlowResumeTests(HostedFixture):
                     self.progress.append(event)
                     report(event)
                 return work(progress, token)
-            return original_run(title, wrapped, cancel, detail)
+            result = original_run(title, wrapped, cancel, detail)
+            if isinstance(result[1], AssertionError):
+                raise result[1]
+            return result
         def delayed(seconds, cancel, hosted):
             self.waits.append(seconds)
             if wait:
@@ -71,6 +74,92 @@ class HostedFlowResumeTests(HostedFixture):
         self.assertEqual(headers[1]['Range'], 'bytes=9000-')
         self.assertEqual(headers[2]['Range'], 'bytes=18000-')
         self.assertEqual(self.waits, [2, 5])
+        self.assertFalse(list(self.dest.rglob('*.tar.bz2')))
+
+    def test_automatic_resume_uses_terminal_durable_offset_after_uncheckpointed_chunk(self):
+        import hashlib
+        import json
+        import os
+
+        threshold = 65536
+        truncated = threshold + 12345
+        expected = self.server.files[self.archive]
+        self.assertGreater(len(expected), truncated)
+        checkpoints, tail_receipts, resumed, flashed = [], [], [], []
+        durable = [0]
+        real_fsync, real_atomic = os.fsync, h._atomic
+        real_flash = self.api.flash_hosted_update
+
+        def fsync(fd):
+            result = real_fsync(fd)
+            partials = list(self.dest.rglob('*.part'))
+            if partials:
+                info, partial_info = os.fstat(fd), partials[0].stat()
+                if (info.st_dev, info.st_ino) == (partial_info.st_dev, partial_info.st_ino):
+                    durable[0] = info.st_size
+            return result
+
+        def atomic(path, raw):
+            if path.name.endswith('.part.json'):
+                receipt = json.loads(raw)
+                self.assertEqual(receipt['bytes'], durable[0],
+                                 'Receipt must follow the data fsync, never lead it')
+                checkpoints.append(receipt['bytes'])
+            return real_atomic(path, raw)
+
+        def behavior(attempt, kwargs):
+            if attempt == 1:
+                self.server.truncate[self.archive] = truncated
+                report = kwargs['progress']
+                def progress(event):
+                    if event.phase == 'download' and event.bytes == truncated:
+                        # The last short chunk is not a byte/time checkpoint.
+                        receipt = json.loads(next(self.dest.rglob('*.part.json')).read_bytes())
+                        tail_receipts.append(receipt['bytes'])
+                        self.assertEqual(receipt['bytes'], threshold)
+                        self.assertEqual(durable[0], threshold)
+                    report(event)
+                kwargs['progress'] = progress
+            else:
+                self.server.truncate.clear()
+
+        def wait(seconds, cancel, hosted):
+            partial = next(self.dest.rglob('*.part'))
+            receipt = json.loads(partial.with_name(partial.name + '.json').read_bytes())
+            raw = partial.read_bytes()
+            self.assertEqual(receipt['bytes'], truncated)
+            self.assertEqual(durable[0], truncated)
+            self.assertEqual(raw, expected[:truncated])
+            self.assertEqual(receipt['partial_sha256'], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(checkpoints, [0, threshold, truncated])
+            resumed.append(receipt['bytes'])
+
+        def flash(path, **kwargs):
+            raw = Path(path).read_bytes()
+            self.assertEqual(raw, expected, 'Resumed archive must not skip or duplicate bytes')
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), self.row['sha256'])
+            self.assertEqual(h.verify_local_image(path)['image'].id, self.row['id'])
+            flashed.append(path)
+            return real_flash(path, **kwargs)
+
+        with patch.object(h, '_CHECKPOINT_BYTES', threshold), \
+                patch.object(h, '_CHECKPOINT_SECONDS', float('inf')), \
+                patch.object(h.os, 'fsync', side_effect=fsync), \
+                patch.object(h, '_atomic', side_effect=atomic), \
+                patch.object(self.api, 'flash_hosted_update', side_effect=flash):
+            result = self.flow(behavior, wait)
+        self.assertEqual(result['status'], 'verified', (result, self.progress))
+        self.assertEqual(tail_receipts, [threshold])
+        self.assertEqual(resumed, [truncated])
+        self.assertEqual(self.calls, [self.row['id']] * 2)
+        headers = [headers for path, headers in self.server.requests if path == self.archive]
+        self.assertEqual(len(headers), 2)
+        self.assertNotIn('Range', headers[0])
+        self.assertEqual(headers[1]['Range'], f'bytes={truncated}-')
+        self.assertEqual(headers[1]['If-Range'], '"synthetic-v1"')
+        self.assertEqual(len(flashed), 1)
+        self.assertEqual(self.api.writes, ['flash_hosted_update'])
+        self.assertFalse(list(self.dest.rglob('*.part*')))
         self.assertFalse(list(self.dest.rglob('*.tar.bz2')))
 
     def test_always_truncated_stops_after_bound_and_keeps_partial_without_flash(self):
