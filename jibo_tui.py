@@ -229,7 +229,8 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
 UPDATE_ACTION_LABEL = "Install a Phoenix image or an official update"
 HOSTED_MODULE = "jibo_hosted_updates"
 CHOOSER_TIMEOUT = 5.0
-LATEST_LABEL = "Latest Phoenix image \u2014 recommended"
+RECOMMENDED_SUFFIX = "\u2014 recommended"
+RECOMMENDED_DETAIL = "Gets the image from jibo.io, checks it, then asks before writing."
 KEEP_DATA_LABEL = flash_policy.KEEP_LABEL
 _HOSTED_ERROR_TEXT = {
     "offline": "Can't reach jibo.io right now.",
@@ -315,9 +316,10 @@ def format_progress(progress):
     return text + (" \u2014 " + ", ".join(details) if details else "")
 
 
-def _image_label(image, prefix=""):
-    label = (prefix + ": " if prefix else "") + "Phoenix " + str(image.version)
-    label += " — downloads from jibo.io when you flash"
+def _image_label(image, recommended=False):
+    label = "Phoenix " + str(image.version)
+    if recommended:
+        label += " " + RECOMMENDED_SUFFIX
     return label
 
 
@@ -346,11 +348,11 @@ def hosted_chooser_items(catalog=None, local_hosted=(), packages=(), show_older=
     problem = error_code or (getattr(catalog, "error", None) if catalog is not None else None)
     # Preserve transport/local diagnostics so screenshots identify the cause.
     if latest is not None and latest.offered:
-        label = _image_label(latest, LATEST_LABEL)
+        label = _image_label(latest, recommended=True)
         if saved_list:
             label += " (saved list)"
         enabled = bool(latest.compatible)
-        reason = "" if enabled else (hosted_error_text("incompatible") +
+        reason = RECOMMENDED_DETAIL if enabled else (hosted_error_text("incompatible") +
                                      (" " + latest.incompatible_reason
                                       if latest.incompatible_reason else ""))
         items.append(MenuItem("hosted:" + latest.id, label, enabled, reason, tone="recommended"))
@@ -489,6 +491,11 @@ def _load_chooser(hosted):
         code = "check-canceled" if _error_code(error) == "canceled" else _error_code(error)
         if code in ("http", "rate_limited", "disk"):
             code += ": " + str(error)
+        # The user-facing sentence stays generic; the full diagnostic (exception
+        # class, message, code, URL/status when present) always goes to the
+        # operation log so "Show operation log" has more than the bare text.
+        print("Phoenix image list check failed: {}: {}".format(
+            type(error).__name__, error), flush=True)
         if code == "check-canceled":
             # Canceling the check may still show the last signed list (no network).
             try:

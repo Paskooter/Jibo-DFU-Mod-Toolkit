@@ -1,7 +1,8 @@
 # Phoenix images from jibo.io
 
-The toolkit can download a Phoenix image from jibo.io or download.jibo.io and install it with the
-same reviewed full-flash steps it uses for official update packages. This page
+The first item in the flash list is a Phoenix image: choosing it gets the image
+from jibo.io, checks it, reviews it with you, flashes it and removes the
+working copy afterward -- one flow, with no separate download step. This page
 explains what that does, what it keeps, and what it cannot fix.
 
 ## What a Phoenix image is
@@ -20,21 +21,21 @@ image for install. A download that does not match is not used.
 Phoenix image lists and downloads use per-user toolkit storage, not the folder you started from: `${XDG_DATA_HOME:-~/.local/share}/jibo-dfu/updates` on Linux/WSL, and `~/Library/Application Support/jibo-dfu/updates` on macOS. Official packages and previously completed Phoenix downloads in `./updates` remain discoverable. The one-step Phoenix install removes its owned download after the flash attempt; robot backups are never part of that cleanup. Folder failures name the affected folder; HTTP failures include the status and a Cloudflare note when detected.
 
 - **Install a Phoenix image or an official update** (robot in DFU): the image
-  list opens with **Latest Phoenix image — recommended** at the top, then your
+  list opens with the Phoenix image marked **— recommended** at the top, then your
   local packages from the launch folder's `updates` folder in their usual order, then
   **Show older Phoenix images**.
 
-![The image list: Latest Phoenix image — recommended at the top, a local package below it, then Show older Phoenix images](images/gui/hosted-chooser.png)
+![The image list: the Phoenix image marked recommended at the top, a local package below it, then Show older Phoenix images](images/gui/hosted-chooser.png)
 
 If jibo.io can't be reached, the list says so in one line and your local
 packages still work. If the toolkit has a saved copy of the last list, it shows
 that and says it is the last checked list.
 
 Choose the featured Phoenix image, then choose calibration handling. The toolkit
-downloads and checks it for this flash, opens the existing review, writes only
+gets the image from jibo.io, checks it, opens the existing review, writes only
 after you confirm, and reads the written data back. There is no download-only
-action and no return to the menu between these steps. The list plainly says
-**downloads from jibo.io when you flash**; it is not a file already on your computer.
+action and no return to the menu between these steps; it is not a file already
+on your computer.
 
 The image, its receipts and extracted/prepared working files are removed when
 the flash attempt ends: after success, a failure following the download, or

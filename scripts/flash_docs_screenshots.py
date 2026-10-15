@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 
 from scripts.docs_screenshots import DocsApi, clean_png
 import jibo_flash_policy as policy
+import jibo_tui
 
 
 def main():
@@ -189,7 +190,8 @@ def capture_hosted(out):
                 pump(lambda: window.prompt is not None)
                 assert window.prompt.items[0].key == 'hosted:phx-2'
                 assert window.prompt.items[0].tone == 'recommended'
-                assert 'downloads from jibo.io when you flash' in window.prompt.items[0].label
+                assert window.prompt.items[0].label.startswith('Phoenix 2.0.0')
+                assert window.prompt.items[0].reason == jibo_tui.RECOMMENDED_DETAIL
                 assert window.prompt.items[1].key == 'local:0'
                 for size in ('920x640', '1080x720'):
                     root.geometry(size)

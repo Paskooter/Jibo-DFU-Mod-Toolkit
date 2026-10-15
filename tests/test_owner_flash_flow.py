@@ -19,10 +19,25 @@ class OwnerFlashChoiceTests(unittest.TestCase):
     def test_featured_first_choice_names_source_not_raw_base_or_retained_download(self):
         items, _ = tui.hosted_chooser_items(sample_catalog(), (), [Path('official.tar.bz2')])
         self.assertEqual(items[0].tone, 'recommended')
-        self.assertIn('downloads from jibo.io when you flash', items[0].label)
+        self.assertIn('Phoenix', items[0].label)
         self.assertNotIn('lastdance', items[0].label)
         self.assertNotIn('downloaded', items[0].label)
         self.assertEqual(items[1].label, 'official.tar.bz2')
+
+    def test_owner_decision_2026_10_14_no_separate_download_wording_anywhere(self):
+        """TOOLKIT-FIX2 bug 3: owner reported "an option to download the Phoenix
+        image" that he does not want. Owner's decision (2026-10-14): Phoenix is
+        the first item of the flash list; choosing it downloads, verifies,
+        reviews, flashes and deletes in ONE flow; no wording offers or
+        describes downloading as its own step anywhere."""
+        items, _ = tui.hosted_chooser_items(sample_catalog(), (), [Path('official.tar.bz2')])
+        label = items[0].label
+        # The label itself must not read as "download" being a distinct action.
+        self.assertNotIn('download', label.lower())
+        self.assertEqual(items[0].reason,
+                         'Gets the image from jibo.io, checks it, then asks before writing.')
+        # No separate download-only CLI/TUI/GUI action exists anywhere.
+        self.assertNotIn('download-phoenix', [i.key for i in tui.TerminalMenu(FakeHostedApi()).items])
 
     def test_cli_list_does_not_advertise_saved_downloads(self):
         with patch.object(h, 'fetch_catalog', return_value=sample_catalog()):

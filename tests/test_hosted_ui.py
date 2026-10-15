@@ -27,7 +27,8 @@ def test_latest_first_recommended_older_collapsed_and_local_order_kept():
     packages = [Path("updates/b-official.tar.bz2"), Path("updates/a-official.tar.bz2")]
     items, choices = jibo_tui.hosted_chooser_items(sample_catalog(), (), packages)
     assert keys(items) == ["hosted:phx-2", "local:0", "local:1", "older"]
-    assert items[0].tone == "recommended" and items[0].label.startswith(jibo_tui.LATEST_LABEL)
+    assert items[0].tone == "recommended" and items[0].label.startswith("Phoenix 2.0.0")
+    assert items[0].label.endswith(jibo_tui.RECOMMENDED_SUFFIX)
     assert [items[1].label, items[2].label] == ["b-official.tar.bz2", "a-official.tar.bz2"]
     assert items[3].label == "Show older Phoenix images (1)" and "hosted:phx-1" not in choices
     expanded, choices = jibo_tui.hosted_chooser_items(sample_catalog(), (), packages, show_older=True)

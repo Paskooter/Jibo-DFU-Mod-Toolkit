@@ -93,12 +93,13 @@ Available operations use `jibo_tui.execute_action()` and the original
   Wi-Fi, pairing and settings start fresh in OOBE. Without calibration uses
   the package var unchanged; without a valid identity, setup may not work until
   his identity is restored from a backup.
-- **Phoenix images:** the latest image is featured at the top of the same flash
-  list as local packages, labelled **downloads from jibo.io when you flash**.
-  Choose calibration handling first. Download and checks run on the worker thread
-  with a **Cancel download** button (Esc also cancels), then the review, write and
-  readback follow in one flow. The downloaded image, receipts and working images
-  are removed after success, a failed write or a cancelled review. Robot backups
+- **Phoenix images:** the Phoenix image is featured at the top of the same flash
+  list as local packages, marked **— recommended**. Choose it and calibration
+  handling first; the toolkit gets the image from jibo.io, checks it, reviews,
+  writes and reads it back in one flow, with a **Cancel download** button
+  (Esc also cancels) while it is fetched on the worker thread. The fetched
+  image, its receipts and working files are removed after success, a failed
+  write or a cancelled review. Robot backups
   and your own packages stay. Only interrupted downloads are kept for resume.
   A dropped connection resumes automatically in this flow, up to six attempts,
   with **Connection dropped, resuming…** shown during the cancelable retry wait.

@@ -202,10 +202,11 @@ for the archived RTM packages and the factory's calibration steps.
 ### Phoenix images
 
 With Jibo in DFU, open **Install a Phoenix image or an official update**.
-The latest Phoenix image is featured first in the same list as your local
-packages, clearly labelled **downloads from jibo.io when you flash**. Choose
-calibration handling, then continue through download, checks, the Cancel-default
-review, writing and readback without returning to the menu. The downloaded image
+The Phoenix image is featured first in the same list as your local
+packages, marked **— recommended**. Choosing it gets the image from jibo.io,
+checks it, then continues through calibration handling, the Cancel-default
+review, writing and readback without returning to the menu -- one flow with no
+separate download step. The fetched image
 and its working files are removed when the attempt ends, including a cancelled
 review or a failed write. Robot backups and your own packages are kept. Only an
 interrupted download stays so the same image can resume next time. Connection
