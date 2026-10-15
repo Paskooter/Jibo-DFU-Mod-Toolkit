@@ -161,6 +161,42 @@ class GuiErrorTests(HostedFixture):
 
 
 class LocalErrorTests(unittest.TestCase):
+    def test_flash_session_lock_permission_error_names_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / '.hosted-flash'
+            root.mkdir()
+            root.chmod(0o555)
+            try:
+                with self.assertRaises(h.HostedError) as caught:
+                    with h.flash_download_session('synthetic', dest_dir=directory):
+                        self.fail('unwritable session was entered')
+                self.assertEqual(caught.exception.code, 'disk')
+                self.assertIn(str(root), str(caught.exception))
+            finally:
+                root.chmod(0o755)
+
+    def test_flash_session_marker_write_error_is_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(h.os, 'fsync', side_effect=PermissionError('synthetic marker write refused')):
+                with self.assertRaises(h.HostedError) as caught:
+                    with h.flash_download_session('synthetic', dest_dir=directory):
+                        self.fail('unsaved session marker was accepted')
+            self.assertEqual(caught.exception.code, 'disk')
+            self.assertIn(str(Path(directory)), str(caught.exception))
+
+    def test_exhausted_http_retries_keep_status_and_cloudflare_note(self):
+        import urllib.error
+        def failed(*args, **kwargs):
+            raise h.HostedError('http', 'HTTP 503. Cloudflare blocked this request.') from urllib.error.HTTPError(
+                h.INDEX_URL, 503, 'unavailable', {}, None)
+        fake = SimpleNamespace(HostedError=h.HostedError, download_image=failed)
+        with patch.object(tui, '_wait_for_download_retry'):
+            with self.assertRaises(h.HostedError) as caught:
+                tui.download_for_flash(fake, 'synthetic', dest_dir=Path('/unused'))
+        self.assertEqual(caught.exception.code, 'download-stopped')
+        self.assertIn('HTTP 503', str(caught.exception))
+        self.assertIn('Cloudflare blocked this request', str(caught.exception))
+
     def test_unwritable_cache_never_blames_jibo_io_and_names_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             start = Path(directory)

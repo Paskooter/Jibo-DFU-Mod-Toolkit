@@ -252,8 +252,13 @@ def _atomic(path, raw):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+    except OSError as exc:
+        raise _disk_error(path.parent, exc) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            raise _disk_error(path.parent, exc) from exc
 
 
 @contextmanager
@@ -263,12 +268,20 @@ def _lock(path):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
         raise HostedError('disk', f'Folder: {path.parent}. Hosted target is locked by another operation; stale locks require review') from exc
+    except OSError as exc:
+        raise _disk_error(path.parent, exc) from exc
     try:
-        os.write(fd, str(os.getpid()).encode('ascii'))
+        try:
+            os.write(fd, str(os.getpid()).encode('ascii'))
+        except OSError as exc:
+            raise _disk_error(path.parent, exc) from exc
         yield
     finally:
         os.close(fd)
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise _disk_error(path.parent, exc) from exc
 
 
 def _url(url):

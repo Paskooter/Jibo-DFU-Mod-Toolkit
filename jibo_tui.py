@@ -1736,7 +1736,10 @@ def download_for_flash(hosted, image_id, *, dest_dir, progress=None, cancel=None
             if not _transient_download_error(error):
                 raise
             if attempt == HOSTED_DOWNLOAD_ATTEMPTS:
-                raise hosted.HostedError('download-stopped', hosted_error_text('download-stopped')) from error
+                message = hosted_error_text('download-stopped')
+                if _error_code(error) in ('http', 'rate_limited'):
+                    message += ' ' + hosted_error_text(_error_code(error), str(error))
+                raise hosted.HostedError('download-stopped', message) from error
             message = 'Connection dropped, resuming… (attempt {} of {})'.format(attempt + 1, HOSTED_DOWNLOAD_ATTEMPTS)
             if progress is not None:
                 progress(SimpleNamespace(phase='resume', bytes=0, total=None, percent=None,
