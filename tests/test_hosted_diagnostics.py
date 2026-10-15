@@ -227,3 +227,83 @@ class LocalErrorTests(unittest.TestCase):
         code = tui._error_code(error)
         self.assertEqual(code, 'local')
         self.assertIn('on this computer', tui.hosted_error_text(code))
+
+    def test_hosted_error_can_never_carry_a_blank_message(self):
+        """TOOLKIT-FIX2 bug 2: a HostedError('http', '') must not be constructible.
+
+        The owner saw EXACTLY "No Phoenix images or local packages are
+        available. jibo.io answered with an error." with no trailing detail.
+        root-check-403c4b1-messages.py proved the bare text only appears for
+        HostedError('http', ''). Guarantee by construction that str(error) is
+        never empty for any code, so the chooser's enrichment
+        (jibo_tui._load_chooser: `code += ": " + str(error)`) always has a
+        non-empty detail to append.
+        """
+        for code in ('http', 'rate_limited', 'disk', 'offline', 'signature'):
+            with self.subTest(code=code):
+                err = h.HostedError(code, '')
+                self.assertTrue(str(err), 'HostedError(%r, "") produced an empty message' % code)
+
+    def test_blank_http_error_never_shows_the_bare_owner_message(self):
+        """End-to-end: inject the exact blank-message HostedError the owner's
+        screenshot implied, through the real chooser path, and confirm the
+        bare 'jibo.io answered with an error.' text (no trailing detail) never
+        reaches the user."""
+        class Hosted:
+            HostedError = h.HostedError
+            CancelToken = h.CancelToken
+
+            @staticmethod
+            def fetch_catalog(**kw):
+                raise h.HostedError('http', '')
+
+            @staticmethod
+            def cached_catalog(**kw):
+                raise h.HostedError('offline', 'none')
+
+            @staticmethod
+            def local_hosted_images(d):
+                return []
+
+        with patch.object(tui, '_terminal_available', return_value=False):
+            choice, message = tui._choose_image(SimpleNamespace(_update_candidates=lambda _: []),
+                                                Hosted, 'Choose an image to install', True)
+        self.assertIsNone(choice)
+        bare = 'No Phoenix images or local packages are available. jibo.io answered with an error.'
+        self.assertNotEqual(message.strip(), bare,
+                            'The bare owner-reported message reached the user with no detail')
+        self.assertIn('jibo.io answered with an error.', message)
+        # Something specific must follow the generic sentence.
+        self.assertTrue(message.strip() != 'jibo.io answered with an error.'
+                        and len(message) > len(bare) - 10)
+
+    def test_load_chooser_writes_full_diagnostic_to_operation_log(self):
+        """The GUI "Show operation log" must contain the full diagnostic
+        (exception class, message, code) even when the user-facing sentence
+        is generic, so an owner who clicks it gets more than the bare text."""
+        import io
+        from contextlib import redirect_stdout
+
+        class Hosted:
+            HostedError = h.HostedError
+            CancelToken = h.CancelToken
+
+            @staticmethod
+            def fetch_catalog(**kw):
+                raise ConnectionResetError('synthetic reset by peer')
+
+            @staticmethod
+            def cached_catalog(**kw):
+                raise h.HostedError('offline', 'none')
+
+            @staticmethod
+            def local_hosted_images(d):
+                return []
+
+        with patch.object(tui, '_terminal_available', return_value=False):
+            captured = io.StringIO()
+            with redirect_stdout(captured):
+                tui._load_chooser(Hosted)
+        log = captured.getvalue()
+        self.assertIn('ConnectionResetError', log)
+        self.assertIn('synthetic reset by peer', log)

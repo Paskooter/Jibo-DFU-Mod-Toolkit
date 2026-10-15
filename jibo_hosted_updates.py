@@ -67,7 +67,12 @@ class HostedError(Exception):
 
     def __init__(self, code, message):
         self.code = code
-        super().__init__(message)
+        # Every hosted error shown to a user must carry a non-empty, specific
+        # detail. A blank message (``str(exc)`` empty, a raise with a blank
+        # detail, a wrapper that drops it) collapses the chooser's generic
+        # sentence ("jibo.io answered with an error.") down to that sentence
+        # alone with no trailing detail -- exactly what the owner reported.
+        super().__init__(message or 'Hosted operation failed with code {!r} and no further detail'.format(code))
 
 
 def fetch_catalog(*, cache_dir=None, timeout=15.0, cancel=None) -> Catalog:
