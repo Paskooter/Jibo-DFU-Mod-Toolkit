@@ -24,6 +24,8 @@ restore it; Terminal errors also show a separate dialog. Run
 `Jibo-DFU-Windows-x64.exe -ShowConsole` to keep it visible for troubleshooting;
 this can be combined with `-Distro NAME`. Source launchers keep their terminal.
 
+Phoenix image lists and downloads use per-user toolkit storage, not the folder you started from: `${XDG_DATA_HOME:-~/.local/share}/jibo-dfu/updates` on Linux/WSL, and `~/Library/Application Support/jibo-dfu/updates` on macOS. Official packages and previously completed Phoenix downloads in `./updates` remain discoverable. The one-step Phoenix install removes its owned download after the flash attempt; robot backups are never part of that cleanup. Folder failures name the affected folder; HTTP failures include the status and a Cloudflare note when detected.
+
 **Remove the toolkit's private Linux:** run `wsl --unregister Jibo-DFU-Toolkit` in PowerShell. This deletes **all files inside that Linux**, including any backups saved there; copy files you need to Windows first. It does not remove your other WSL distributions. Advanced users can explicitly choose another compatible distro with `Jibo-DFU-Windows-x64.exe -Distro NAME`; automatic selection never offers tool distributions.
 
 If Linux reports a FUSE error, run `./Jibo-DFU-Linux-x86_64.AppImage --appimage-extract-and-run` from a terminal. Verify downloads against the release's `SHA256SUMS`; license notices and complete corresponding sources accompany each binary and the release. **Administrator setup approval is not permission to write a robot**: the GUI keeps every existing review and confirmation. See [release and troubleshooting notes](docs/release.md).

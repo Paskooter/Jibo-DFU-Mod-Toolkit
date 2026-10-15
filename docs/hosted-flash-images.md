@@ -17,9 +17,11 @@ image for install. A download that does not match is not used.
 
 ## Where to find it
 
+Phoenix image lists and downloads use per-user toolkit storage, not the folder you started from: `${XDG_DATA_HOME:-~/.local/share}/jibo-dfu/updates` on Linux/WSL, and `~/Library/Application Support/jibo-dfu/updates` on macOS. Official packages and previously completed Phoenix downloads in `./updates` remain discoverable. The one-step Phoenix install removes its owned download after the flash attempt; robot backups are never part of that cleanup. Folder failures name the affected folder; HTTP failures include the status and a Cloudflare note when detected.
+
 - **Install a Phoenix image or an official update** (robot in DFU): the image
   list opens with **Latest Phoenix image — recommended** at the top, then your
-  local packages from the `updates` folder in their usual order, then
+  local packages from the launch folder's `updates` folder in their usual order, then
   **Show older Phoenix images**.
 
 ![The image list: Latest Phoenix image — recommended at the top, a local package below it, then Show older Phoenix images](images/gui/hosted-chooser.png)

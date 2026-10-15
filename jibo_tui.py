@@ -270,8 +270,9 @@ def hosted_module(api=None):
 
 
 def hosted_folders():
-    """``(updates, cache)``: the toolkit's working folder, never a pyz temp root."""
-    updates = Path.cwd() / "updates"
+    """``(updates, cache)`` in persistent toolkit-owned per-user storage."""
+    from jibo_hosted_updates import default_updates_dir
+    updates = default_updates_dir()
     return updates, updates / ".hosted"
 
 
@@ -496,6 +497,9 @@ def _load_chooser(hosted):
                 catalog = None
     try:
         local = tuple(hosted.local_hosted_images(updates_dir))
+        legacy = Path.cwd() / "updates"
+        if legacy != updates_dir:
+            local += tuple(hosted.local_hosted_images(legacy))
     except Exception:
         local = ()
     return catalog, local, code
@@ -506,7 +510,7 @@ def _choose_image(api, hosted, title, include_local):
     packages = ()
     if include_local:
         try:
-            packages = tuple(api._update_candidates(updates_dir))
+            packages = tuple(api._update_candidates(Path.cwd() / "updates"))
         except Exception:
             packages = ()
     catalog, local, code = _load_chooser(hosted)

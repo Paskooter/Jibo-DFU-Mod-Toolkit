@@ -3115,7 +3115,7 @@ def main(argv=None):
     for command, help_text in (('list-hosted-updates', 'List signed hosted Phoenix offers (no USB)'),
                                ('flash-hosted-update', 'Destructive reviewed Phoenix flash with robot-specific var')):
         hosted_parser = sub.add_parser(command, help=help_text)
-        hosted_parser.add_argument('--directory', type=Path, default=Path.cwd() / 'updates')
+        hosted_parser.add_argument('--directory', type=Path, default=hosted.default_updates_dir())
         if command == 'list-hosted-updates':
             hosted_parser.add_argument('--offline', action='store_true', help='Use the last authenticated catalog without network requests')
         if command != 'list-hosted-updates':

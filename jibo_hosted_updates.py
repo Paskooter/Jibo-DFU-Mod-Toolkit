@@ -118,11 +118,15 @@ def cached_catalog(*, cache_dir=None, error=None) -> Catalog:
 def download_image(image_id, *, dest_dir=None, progress=None, cancel=None) -> str:
     """Resolve, download/resume and authenticate an archive; never touch USB."""
     try:
-        dest = _directory(dest_dir or Path.cwd() / 'updates')
+        dest = _directory(dest_dir or default_updates_dir())
         return _download(image_id, dest, progress, cancel)
     except (HostedError, c.ContractError, OSError, ValueError) as exc:
-        error = exc if isinstance(exc, HostedError) else HostedError(
-            exc.code if isinstance(exc, c.ContractError) else 'disk', str(exc))
+        if isinstance(exc, HostedError):
+            error = exc
+        elif isinstance(exc, c.ContractError):
+            error = HostedError(exc.code, str(exc))
+        else:
+            error = _disk_error(dest_dir or default_updates_dir(), exc)
         _progress(progress, 'canceled' if error.code == 'canceled' else 'error', 0, None, str(error))
         raise error from exc
 
@@ -133,7 +137,11 @@ def local_hosted_images(dest_dir=None) -> list:
     Expired indexes cannot assert latest; immutable signed completed artifacts
     remain usable. Invalid/missing receipts are omitted, never promoted.
     """
-    dest = _safe_path(dest_dir or Path.cwd() / 'updates')
+    if dest_dir is None:
+        paths = dict.fromkeys((default_updates_dir(), Path.cwd() / 'updates'))
+        found = {image.downloaded_path: image for folder in paths for image in local_hosted_images(folder)}
+        return list(found.values())
+    dest = _safe_path(dest_dir)
     if not dest.is_dir():
         return []
     result = []
@@ -173,6 +181,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -184,8 +193,18 @@ def _json(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode('ascii')
 
 
+def default_updates_dir():
+    """Persistent per-user image data, independent of the launch directory."""
+    if sys.platform == 'darwin':
+        base = Path.home() / 'Library' / 'Application Support'
+    else:
+        configured = os.environ.get('XDG_DATA_HOME', '')
+        base = Path(configured) if configured and Path(configured).is_absolute() else Path.home() / '.local' / 'share'
+    return base / 'jibo-dfu' / 'updates'
+
+
 def _default_cache():
-    return Path.cwd() / 'updates' / '.hosted'
+    return default_updates_dir() / '.hosted'
 
 
 def _cancel(token):
@@ -196,7 +215,7 @@ def _cancel(token):
 def _safe_path(path):
     path = Path(path).expanduser().absolute()
     if any(parent.is_symlink() for parent in (path, *path.parents)):
-        raise HostedError('disk', 'Hosted paths cannot contain symbolic links')
+        raise HostedError('disk', f'Folder: {path}. Hosted paths cannot contain symbolic links')
     return path
 
 
@@ -220,7 +239,7 @@ def _read(path, maximum):
     with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)), 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
-            raise HostedError('disk', 'Unsafe or oversized hosted receipt')
+            raise HostedError('disk', f'Folder: {path.parent}. Unsafe or oversized hosted receipt')
         return stream.read(maximum + 1)
 
 
@@ -243,7 +262,7 @@ def _lock(path):
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
-        raise HostedError('disk', 'Hosted target is locked by another operation; stale locks require review') from exc
+        raise HostedError('disk', f'Folder: {path.parent}. Hosted target is locked by another operation; stale locks require review') from exc
     try:
         os.write(fd, str(os.getpid()).encode('ascii'))
         yield
@@ -340,6 +359,19 @@ def _deadline_opener(deadline):
     return urllib.request.build_opener(_Redirect(), HTTPHandler(), HTTPSHandler())
 
 
+def _http_detail(response, deadline):
+    status = response.code
+    blocked = response.headers.get('cf-mitigated', '').lower() == 'challenge'
+    if not blocked:
+        try:
+            body = _metadata_read(response.fp, 8192, deadline).lower()
+            blocked = any(marker in body for marker in (b'cf-error-details', b'cf-chl-',
+                b'attention required! | cloudflare', b'cloudflare ray id'))
+        except (HostedError, OSError, http.client.HTTPException):
+            pass  # Diagnostic inspection must never replace the known HTTP status.
+    return f'HTTP {status}.' + (' Cloudflare blocked this request.' if blocked else '')
+
+
 def _open(url, timeout, headers=None, cancel=None):
     _url(url)
     request = urllib.request.Request(url, headers={
@@ -367,11 +399,12 @@ def _open(url, timeout, headers=None, cancel=None):
             return response
         except urllib.error.HTTPError as exc:
             delay = _retry_delay(exc.headers.get('Retry-After'), attempt)
+            detail = _http_detail(exc, deadline)
             exc.close()
             code = 'rate_limited' if exc.code == 429 else 'http'
             if exc.code not in (429, 503) or attempt + 1 == _HTTP_ATTEMPTS or \
                     delay > _RETRY_WAIT_MAX or delay >= deadline - time.monotonic():
-                raise HostedError(code, 'Hosted HTTP status ' + str(exc.code)) from exc
+                raise HostedError(code, detail) from exc
             _retry_wait(delay, cancel)
         except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError) as exc:
             raise HostedError('offline', 'Hosted transport unavailable or stalled') from exc
@@ -534,7 +567,7 @@ def _provenance(path):
 def _local(path):
     path = _safe_path(path)
     if not path.is_file() or path.stat().st_size > c.ARCHIVE_MAX:
-        raise HostedError('disk', 'Completed hosted archive missing or unsafe')
+        raise HostedError('disk', f'Folder: {path.parent}. Completed hosted archive missing or unsafe')
     receipt_max = 2 * c.ENVELOPE_MAX + c.INDEX_MAX
     receipt = c.strict_json(_read(_provenance(path), receipt_max), receipt_max)
     if not isinstance(receipt, dict) or receipt.get('schema') != 1:
@@ -598,7 +631,7 @@ def _download(image_id, dest, progress, cancel):
             state = c.strict_json(_read(receipt_path, 8192), 8192)
             if any(state.get(key) != value for key, value in pin.items()) or \
                     not partial.is_file() or partial.stat().st_size > row['size']:
-                raise HostedError('disk', 'Partial receipt disagrees with immutable selected image')
+                raise HostedError('disk', f'Folder: {dest}. Partial receipt disagrees with immutable selected image')
             offset = partial.stat().st_size
             with partial.open('rb') as stream:
                 while chunk := stream.read(1024 * 1024):
@@ -608,7 +641,7 @@ def _download(image_id, dest, progress, cancel):
                 raise HostedError('hash', 'Existing partial bytes do not match their durable receipt')
         required = row['size'] - offset + c.workspace_bytes(manifest)
         if shutil.disk_usage(dest).free < required:
-            raise HostedError('disk', f'Hosted download/preparation requires {required} free bytes on destination volume')
+            raise HostedError('disk', f'Folder: {dest}. Hosted download/preparation requires {required} free bytes on destination volume')
         if offset < row['size']:
             headers = {'Range': f'bytes={offset}-'} if offset else {}
             if offset and state.get('etag'):
@@ -634,7 +667,7 @@ def _download(image_id, dest, progress, cancel):
                 flags |= os.O_APPEND if offset else os.O_TRUNC
                 with os.fdopen(os.open(partial, flags, 0o600), 'wb') as output:
                     if not stat.S_ISREG(os.fstat(output.fileno()).st_mode):
-                        raise HostedError('disk', 'Partial output must be a regular file')
+                        raise HostedError('disk', f'Folder: {dest}. Partial output must be a regular file')
                     checkpoint_bytes = offset
                     checkpoint_time = time.monotonic()
                     def checkpoint():
@@ -702,14 +735,14 @@ class FlashDownloadSession:
 def flash_download_session(image_id, *, dest_dir=None):
     """Own only this flash's working files; keep interrupted transfers for resume."""
     image_id = c.image_id(image_id)
-    root = _directory(Path(dest_dir or Path.cwd() / 'updates') / '.hosted-flash')
+    root = _directory(Path(dest_dir or default_updates_dir()) / '.hosted-flash')
     directory = _safe_path(root / image_id)
     marker = directory / 'flash-download-owner.json'
     owner = _json({'schema': 1, 'kind': 'jibo-flash-download', 'id': image_id})
     with _lock(root / (image_id + '.lock')):
         if directory.exists():
             if not directory.is_dir() or not marker.is_file() or _read(marker, 1024) != owner:
-                raise HostedError('disk', 'Flash working folder is not owned by this toolkit; nothing was removed')
+                raise HostedError('disk', f'Folder: {directory}. Flash working folder is not owned by this toolkit; nothing was removed')
         else:
             _directory(directory)
             _atomic(marker, owner)
@@ -724,5 +757,5 @@ def flash_download_session(image_id, *, dest_dir=None):
                 # This directory never contains robot backups or user packages.
                 _safe_path(directory)
                 if _read(marker, 1024) != owner:
-                    raise HostedError('disk', 'Flash working folder ownership changed; nothing was removed')
+                    raise HostedError('disk', f'Folder: {directory}. Flash working folder ownership changed; nothing was removed')
                 shutil.rmtree(directory)
