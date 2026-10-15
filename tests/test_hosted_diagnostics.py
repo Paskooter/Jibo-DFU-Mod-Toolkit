@@ -13,6 +13,38 @@ import sys
 
 
 class DataFolderTests(HostedFixture):
+    def test_output_write_error_is_disk_not_transport(self):
+        real_fdopen = os.fdopen
+        class Unwritable:
+            def __init__(self, stream):
+                self.stream = stream
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.stream.close()
+            def write(self, data):
+                raise PermissionError('synthetic destination became unwritable')
+        real_open = os.open
+        partial_fds = set()
+        def open_file(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if str(path).endswith('.part'):
+                partial_fds.add(fd)
+            return fd
+        def fdopen(fd, mode, *args, **kwargs):
+            stream = real_fdopen(fd, mode, *args, **kwargs)
+            if fd in partial_fds:
+                partial_fds.remove(fd)
+                return Unwritable(stream)
+            return stream
+        with patch.object(h.os, 'fdopen', side_effect=fdopen), patch.object(h.os, 'open', side_effect=open_file):
+            with self.assertRaises(h.HostedError) as caught:
+                h.download_image(self.row['id'], dest_dir=self.cache.parent / 'download')
+        self.assertEqual(caught.exception.code, 'disk')
+        self.assertIn(str(self.cache.parent / 'download'), str(caught.exception))
+
     def test_readonly_start_lists_signed_images_and_preserves_local_packages(self):
         start = self.cache.parent / 'start'
         start.mkdir()
@@ -74,6 +106,8 @@ class HttpDetailTests(HostedFixture):
         for status, headers, body, cloudflare in (
                 (403, {}, b'', False), (503, {}, b'', False),
                 (403, {'cf-mitigated': 'challenge'}, b'', True),
+                (200, {'cf-mitigated': 'challenge'}, b'', True),
+                (200, {}, b'<html><title>Attention Required! | Cloudflare</title></html>', True),
                 (503, {}, b'<html><title>Attention Required! | Cloudflare</title></html>', True),
                 (403, {'Server': 'cloudflare'}, b'ordinary origin error', False)):
             with self.subTest(status=status, headers=headers, cloudflare=cloudflare):
@@ -97,6 +131,28 @@ class HttpDetailTests(HostedFixture):
         catalog = h.fetch_catalog(cache_dir=self.cache)
         items, _ = tui.hosted_chooser_items(catalog)
         self.assertIn('HTTP 403', items[1].label)
+
+
+class GuiErrorTests(HostedFixture):
+    def test_gui_worker_retains_http_status_and_local_folder_details(self):
+        import jibo_gui_core as core
+        from gui_fakes import FakeHostedApi
+        api = FakeHostedApi()
+        api.hosted = h
+        api.packages = []
+        for code, detail in [('http', 'HTTP 403. Cloudflare blocked this request.'),
+                             ('disk', 'Folder: /example/readonly/updates. Permission denied')]:
+            with self.subTest(code=code):
+                controller = core.GuiController(api, prompter=lambda _: None, runner=core.sync_runner)
+                try:
+                    controller.request_refresh()
+                    with patch.object(h, 'fetch_catalog', side_effect=h.HostedError(code, detail)):
+                        self.assertTrue(controller.start_action('flash-update'))
+                    outcomes = [event[1] for event in controller.drain() if event[0] == 'finished']
+                    self.assertIn(detail, '\n'.join(outcomes[-1].lines))
+                    self.assertFalse(api.writes)
+                finally:
+                    controller.shutdown()
 
 
 class LocalErrorTests(unittest.TestCase):

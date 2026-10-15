@@ -359,14 +359,18 @@ def _deadline_opener(deadline):
     return urllib.request.build_opener(_Redirect(), HTTPHandler(), HTTPSHandler())
 
 
+def _cloudflare_page(body):
+    body = body.lower()
+    return any(marker in body for marker in (b'cf-error-details', b'cf-chl-',
+        b'attention required! | cloudflare', b'cloudflare ray id'))
+
+
 def _http_detail(response, deadline):
     status = response.code
     blocked = response.headers.get('cf-mitigated', '').lower() == 'challenge'
     if not blocked:
         try:
-            body = _metadata_read(response.fp, 8192, deadline).lower()
-            blocked = any(marker in body for marker in (b'cf-error-details', b'cf-chl-',
-                b'attention required! | cloudflare', b'cloudflare ray id'))
+            blocked = _cloudflare_page(_metadata_read(response.fp, 8192, deadline))
         except (HostedError, OSError, http.client.HTTPException):
             pass  # Diagnostic inspection must never replace the known HTTP status.
     return f'HTTP {status}.' + (' Cloudflare blocked this request.' if blocked else '')
@@ -385,6 +389,10 @@ def _open(url, timeout, headers=None, cancel=None):
             raise HostedError('offline', 'Hosted request deadline exceeded')
         try:
             response = _deadline_opener(deadline).open(request, timeout=remaining)
+            if response.headers.get('cf-mitigated', '').lower() == 'challenge':
+                status = response.status
+                response.close()
+                raise HostedError('http', f'HTTP {status}. Cloudflare blocked this request.')
             if response.headers.get('Content-Encoding', 'identity') != 'identity':
                 response.close()
                 raise HostedError('http', 'Unexpected HTTP content encoding')
@@ -470,7 +478,10 @@ def _fetch(url, maximum, timeout, cancel, expected=None):
             chunks.append(chunk)
         if expected is not None and size != expected or length is not None and size != int(length):
             raise HostedError('http', 'Hosted metadata was truncated')
-        return b''.join(chunks)
+        raw = b''.join(chunks)
+        if raw.lstrip().startswith(b'<') and _cloudflare_page(raw[:8192]):
+            raise HostedError('http', f'HTTP {response.status}. Cloudflare blocked this request.')
+        return raw
 
 
 def _index(raw, cache, *, freshness=True):
@@ -682,7 +693,10 @@ def _download(image_id, dest, progress, cancel):
                     try:
                         while True:
                             _cancel(cancel)
-                            chunk = response.read(min(65536, row['size'] + 1 - offset))
+                            try:
+                                chunk = response.read(min(65536, row['size'] + 1 - offset))
+                            except (TimeoutError, http.client.HTTPException, OSError) as exc:
+                                raise HostedError('offline', 'Archive transport interrupted; verified partial retained') from exc
                             if not chunk:
                                 break
                             if offset + len(chunk) > row['size']:
@@ -694,8 +708,6 @@ def _download(image_id, dest, progress, cancel):
                                     time.monotonic() - checkpoint_time >= _CHECKPOINT_SECONDS:
                                 checkpoint()
                             _progress(progress, 'download', offset, row['size'], 'Downloading authenticated Phoenix archive', started)
-                    except (TimeoutError, http.client.HTTPException, OSError) as exc:
-                        raise HostedError('offline', 'Archive transport interrupted; verified partial retained') from exc
                     finally:
                         # EOF, cancellation and exceptions all publish the last durable batch.
                         checkpoint()
