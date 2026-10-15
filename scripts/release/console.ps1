@@ -92,6 +92,22 @@ function Start-ToolkitProcess([string]$FilePath, [string]$ArgumentList) {
         return $process
     } catch { $process.Dispose(); throw }
 }
+function ConvertTo-ToolkitNativeLines([string]$Text) {
+    # Match the classic "& $FilePath @ArgumentList 2>&1" capture shape: one
+    # array item per line, not the whole multi-line blob as a single string.
+    # NULs are stripped (wsl.exe writes UTF-16LE when redirected;
+    # StandardOutputEncoding=UTF8 turns each ASCII byte into a byte+NUL pair,
+    # which run.ps1's per-item NUL strip already handles -- but only once each
+    # *item* really is one line). A trailing newline must not create a
+    # phantom empty trailing item; a genuinely empty interior line is kept.
+    if (-not $Text) { return @() }
+    $clean = $Text -replace "`0", ''
+    $lines = [string[]]($clean -split "`r`n|`r|`n")
+    if ($lines.Count -gt 0 -and $lines[-1] -eq '') {
+        $lines = $lines[0..($lines.Count - 2)]
+    }
+    return @($lines)
+}
 function Invoke-ToolkitNative([string]$File, [string[]]$Arguments) {
     # Never let PowerShell's native invocation allocate a console in a GUI launch.
     # Read both pipes concurrently so a verbose helper cannot deadlock on stderr.
@@ -123,7 +139,13 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments) {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        return [pscustomobject]@{Output=@($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()); ExitCode=$process.ExitCode; StartError=$null}
+        # Match the classic "& $FilePath @ArgumentList 2>&1" capture shape: one
+        # array item per OUTPUT LINE, not the entire stdout/stderr text as a
+        # single string. Every run.ps1/bootstrap.ps1 consumer (Get-Wsl2Distributions'
+        # per-item row regex, usbipd state JSON reassembly, wslpath) depends on this.
+        $lines = @(ConvertTo-ToolkitNativeLines $stdout.GetAwaiter().GetResult()) +
+                 @(ConvertTo-ToolkitNativeLines $stderr.GetAwaiter().GetResult())
+        return [pscustomobject]@{Output=$lines; ExitCode=$process.ExitCode; StartError=$null}
     } catch {
         return [pscustomobject]@{Output=@(); ExitCode=1; StartError=$_.Exception.Message}
     } finally { $process.Dispose() }

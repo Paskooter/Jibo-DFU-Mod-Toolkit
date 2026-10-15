@@ -35,11 +35,94 @@ exit 7
     Write-Output "PASS console: $Case"
     exit 0
 }
+if ($Case -eq 'native-distro-select') {
+    # Root cause (TOOLKIT-FIX2 bug 1): run.ps1's Get-Wsl2Distributions regex
+    # matches its row pattern per ITEM. The real windowless Invoke-ToolkitNative
+    # must still hand it one array entry per output line -- not the whole
+    # multi-line stdout blob as a single string -- or Select-Distribution finds
+    # 0 distros and throws, which bootstrap.ps1 reports as "USB handoff failed
+    # or administrator approval was declined." Exercise run.ps1's REAL
+    # Get-Wsl2Distributions/Select-Distribution through the REAL
+    # Invoke-ToolkitNative against a fake wsl.exe that writes a realistic
+    # multi-line `wsl --list --verbose` table UTF-16LE-encoded (what wsl.exe
+    # does when its output is redirected). Also prove multi-line usbipd `state`
+    # JSON still parses through the same capture.
+    $root = Split-Path (Split-Path (Split-Path $BootstrapPath))
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-native-distro-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    try {
+        $fake = Join-Path $tmp 'wsl.exe'
+        if ($env:OS -eq 'Windows_NT') {
+            # A real Windows fake must behave like wsl.exe: UTF-16LE on stdout
+            # when redirected. Emit via .NET so encoding is exact, not shell-dependent.
+            $source = @'
+using System;
+using System.Text;
+public class FakeWsl {
+    public static void Main(string[] args) {
+        var stdout = Console.OpenStandardOutput();
+        if (args.Length > 0 && Array.IndexOf(args, "--list") >= 0) {
+            string table = "  NAME              STATE           VERSION\r\n* Ubuntu-22.04      Running         2\r\n  Jibo-DFU-Toolkit  Stopped         2\r\n";
+            byte[] data = Encoding.Unicode.GetBytes(table);
+            stdout.Write(data, 0, data.Length);
+        } else if (args.Length > 0 && Array.IndexOf(args, "state") >= 0) {
+            string json = "{\"Devices\":[{\"BusId\":\"1-2\",\"InstanceId\":\"USB\\\\\\\\VID_0955\\u0026PID_7740\",\"Description\":\"Jibo\",\"ClientIPAddress\":null,\"PersistedGuid\":null}]}\r\n";
+            byte[] data = Encoding.UTF8.GetBytes(json);
+            stdout.Write(data, 0, data.Length);
+        }
+        Environment.Exit(0);
+    }
+}
+'@
+            $fakeExe = Join-Path $tmp 'wsl.exe'
+            Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $fakeExe -OutputType ConsoleApplication
+            $fake = $fakeExe
+        } else {
+            # Local Linux verification: produce the same UTF-16LE table bytes.
+            $tableBytes = [Text.Encoding]::Unicode.GetBytes("  NAME              STATE           VERSION`r`n* Ubuntu-22.04      Running         2`r`n  Jibo-DFU-Toolkit  Stopped         2`r`n")
+            $jsonBytes = [Text.Encoding]::UTF8.GetBytes('{"Devices":[{"BusId":"1-2","InstanceId":"USB\\VID_0955&PID_7740","Description":"Jibo","ClientIPAddress":null,"PersistedGuid":null}]}')
+            $tableB64 = [Convert]::ToBase64String($tableBytes)
+            $jsonB64 = [Convert]::ToBase64String($jsonBytes)
+            $shim = @"
+#!/bin/sh
+case "`$*" in
+  *--list*) printf '%s' '$tableB64' | base64 -d ;;
+  *state*) printf '%s' '$jsonB64' | base64 -d ;;
+  *) echo "fake wsl: `$*" ;;
+esac
+"@
+            [IO.File]::WriteAllText($fake, $shim)
+            chmod +x $fake
+        }
+        $usbPath = Join-Path $root 'run.ps1'
+        $tokens = $null; $usbErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($usbPath, [ref]$tokens, [ref]$usbErrors)
+        if ($usbErrors.Count) { throw ($usbErrors | Out-String) }
+        foreach ($function in $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true)) {
+            Invoke-Expression $function.Extent.Text
+        }
+        . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+        $ConsoleHelper = 'truthy'   # Only selects the Invoke-ToolkitNative capture path in Invoke-CapturedNativeCommand.
+        $script:WslPath = $fake
+        $script:UsbipdPath = $fake
+        $distros = Get-Wsl2Distributions
+        if ($distros.Count -ne 2) { throw "Expected 2 parsed WSL distro rows, got $($distros.Count)" }
+        $selected = Select-Distribution -Distributions $distros -Requested 'Jibo-DFU-Toolkit'
+        if ($selected -ne 'Jibo-DFU-Toolkit') { throw "Select-Distribution returned '$selected', expected 'Jibo-DFU-Toolkit'" }
+        $state = Get-UsbipdState
+        if (-not $state -or -not $state.Devices -or $state.Devices.Count -ne 1) { throw 'usbipd state JSON did not parse through the real native capture' }
+        if ($state.Devices[0].BusId -ne '1-2') { throw 'usbipd state device BusId was not preserved' }
+    } finally {
+        Remove-Item -Recurse -Force $tmp
+    }
+    Write-Output "PASS console: $Case"
+    exit 0
+}
 if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('native-status','native-command','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
+    foreach ($scenario in @('native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
