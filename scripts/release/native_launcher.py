@@ -86,9 +86,13 @@ def gui_smoke(runtime):
     window = jibo_gui.ToolkitWindow(root, controller)
     for _ in range(20):
         root.update()
+    revision = json.loads((runtime / 'release-manifest.json').read_text())['revision']
+    expected_title = 'Jibo DFU Toolkit (build ' + revision[:7] + ')'
+    if root.title() != expected_title:
+        raise RuntimeError('GUI build banner mismatch: ' + root.title())
     if not root.winfo_viewable() or errors:
         raise RuntimeError('First window did not render: ' + str(errors))
-    print(json.dumps({'first_window': True, 'width': root.winfo_width(), 'height': root.winfo_height(),
+    print(json.dumps({'first_window': True, 'title': root.title(), 'width': root.winfo_width(), 'height': root.winfo_height(),
                       'tk': root.tk.call('info', 'patchlevel'), 'usb_access': False}))
     window.close()
     controller.shutdown()

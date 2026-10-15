@@ -16,6 +16,17 @@ from test_windows_console import windows_launcher
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_frozen_gui_title_identifies_build_without_a_console(tmp_path, monkeypatch):
+    import jibo_gui as gui
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir()
+    (runtime / 'release-manifest.json').write_text(json.dumps({'revision': 'b' * 40}))
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
+    assert gui.release_title() == 'Jibo DFU Toolkit (build bbbbbbb)'
+    import inspect
+    assert 'root.title(release_title())' in inspect.getsource(gui.ToolkitWindow.__init__)
+
+
 def test_default_bootstrap_is_created_without_a_console(tmp_path, monkeypatch):
     module = windows_launcher(tmp_path, monkeypatch, [])
     calls = []

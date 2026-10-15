@@ -8,8 +8,10 @@ function. This module imports tkinter at the top on purpose: the launcher
 imports it lazily and reports a missing Tk with a pointer to the text menu.
 """
 
+import json
 import os
 from pathlib import Path
+import sys
 import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -61,6 +63,20 @@ _TONES = {
     "success": ("success_soft", "success_text"),
     "neutral": ("neutral_soft", "muted"),
 }
+
+
+def release_title():
+    """Keep a release build identifiable when it has no command window."""
+    folders = (Path(__file__).resolve().parent,
+               Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'runtime')
+    for folder in folders:
+        try:
+            revision = json.loads((folder / 'release-manifest.json').read_text())['revision']
+            if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{40}', revision):
+                return 'Jibo DFU Toolkit (build ' + revision[:7] + ')'
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return 'Jibo DFU Mod Toolkit'
 
 
 def display_label(label):
@@ -481,7 +497,7 @@ class ToolkitWindow:
         self._rendered_items = None
         self._scroll_areas = []
         self._confirm_job = None
-        root.title("Jibo DFU Mod Toolkit")
+        root.title(release_title())
         root.configure(bg=P["bg"])
         root.geometry("1080x720")
         root.minsize(920, 640)
