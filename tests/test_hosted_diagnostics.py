@@ -12,6 +12,20 @@ import os
 import sys
 
 
+def _per_user_updates(root):
+    """Per-user toolkit updates folder for ``root``, as this platform resolves it.
+
+    Linux/WSL follows an absolute XDG_DATA_HOME; macOS deliberately ignores XDG and
+    resolves ~/Library/Application Support through Path.home() (covered separately by
+    test_macos_uses_application_support). Tests sandbox BOTH mechanisms at ``root`` so
+    the redirect really lands on every platform instead of silently testing the
+    runner's real user folder.
+    """
+    if sys.platform == 'darwin':
+        return root / 'Library' / 'Application Support' / 'jibo-dfu' / 'updates'
+    return root / 'jibo-dfu' / 'updates'
+
+
 class DataFolderTests(HostedFixture):
     def test_output_write_error_is_disk_not_transport(self):
         real_fdopen = os.fdopen
@@ -59,9 +73,10 @@ class DataFolderTests(HostedFixture):
         legacy.chmod(0o555)
         try:
             with patch.dict(os.environ, {'XDG_DATA_HOME': str(owned)}), \
+                    patch.object(Path, 'home', return_value=owned), \
                     patch.object(tui, '_terminal_available', return_value=False):
                 updates, cache = tui.hosted_folders()
-                self.assertEqual(updates, owned / 'jibo-dfu' / 'updates')
+                self.assertEqual(updates, _per_user_updates(owned))
                 catalog = h.fetch_catalog(timeout=2)
                 self.assertEqual(catalog.latest_id, self.row['id'])
                 seen = []
@@ -89,7 +104,8 @@ class DataFolderTests(HostedFixture):
         prior = Path.cwd()
         os.chdir(start)
         try:
-            with patch.dict(os.environ, {'XDG_DATA_HOME': str(self.cache.parent / 'new-data')}):
+            with patch.dict(os.environ, {'XDG_DATA_HOME': str(self.cache.parent / 'new-data')}), \
+                    patch.object(Path, 'home', return_value=self.cache.parent / 'new-home'):
                 self.assertIn(path, [image.downloaded_path for image in h.local_hosted_images()])
         finally:
             os.chdir(prior)
