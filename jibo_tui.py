@@ -239,7 +239,8 @@ _HOSTED_ERROR_TEXT = {
     "incompatible": "This image does not fit this toolkit or robot.",
     "canceled": "Download canceled. Start it again to pick up where it stopped.",
     "http": "jibo.io answered with an error.",
-    "disk": "There is not enough free space to save the image.",
+    "disk": "The toolkit could not use its image folder. Check access and free space.",
+    "local": "Something went wrong on this computer while checking for Phoenix images.",
     "rate_limited": "jibo.io is busy. Try again in a few minutes.",
     "download-stopped": "The download stopped. Nothing was written to the robot. Try again to continue where it stopped.",
     "dependency": "This copy of the toolkit can't check Phoenix images.",
@@ -275,7 +276,11 @@ def hosted_folders():
 
 
 def hosted_error_text(code, fallback=""):
-    return _HOSTED_ERROR_TEXT.get(code) or fallback or "Phoenix images are unavailable right now."
+    code, _, detail = str(code or "").partition(": ")
+    text = _HOSTED_ERROR_TEXT.get(code) or "Phoenix images are unavailable right now."
+    if code in ("http", "rate_limited", "disk") and (detail or fallback):
+        text += " " + (detail or fallback)
+    return text
 
 
 def _human_bytes(value):
@@ -338,8 +343,7 @@ def hosted_chooser_items(catalog=None, local_hosted=(), packages=(), show_older=
     latest = next((image for image in images if image.id == latest_id and image.is_latest), None)
     saved_list = bool(getattr(catalog, "from_cache", False))
     problem = error_code or (getattr(catalog, "error", None) if catalog is not None else None)
-    # A saved list carries "code: detail"; only the code picks the plain text.
-    problem = str(problem).split(":", 1)[0].strip() if problem else None
+    # Preserve transport/local diagnostics so screenshots identify the cause.
     if latest is not None and latest.offered:
         label = _image_label(latest, LATEST_LABEL)
         if saved_list:
@@ -416,7 +420,7 @@ def looks_like_phoenix_package(path):
 
 
 def _error_code(error):
-    return getattr(error, "code", None) or "http"
+    return getattr(error, "code", None) or "local"
 
 
 def _progress_session(screen, title, detail, events, cancel, thread):
@@ -482,6 +486,8 @@ def _load_chooser(hosted):
     if error is not None:
         catalog = None
         code = "check-canceled" if _error_code(error) == "canceled" else _error_code(error)
+        if code in ("http", "rate_limited", "disk"):
+            code += ": " + str(error)
         if code == "check-canceled":
             # Canceling the check may still show the last signed list (no network).
             try:

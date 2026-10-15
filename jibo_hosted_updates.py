@@ -76,9 +76,10 @@ def fetch_catalog(*, cache_dir=None, timeout=15.0, cancel=None) -> Catalog:
     Invalid authentication/freshness never falls back to a previously valid list.
     HostedError is intentionally raised for callers to keep local choices usable.
     """
-    cache = _directory(cache_dir or _default_cache())
+    cache = Path(cache_dir or _default_cache())
     _cancel(cancel)
     try:
+        cache = _directory(cache)
         with _lock(cache / 'index.lock'):
             raw = _fetch(INDEX_URL, c.INDEX_MAX, timeout, cancel)
             payload = _index(raw, cache)
@@ -95,20 +96,23 @@ def fetch_catalog(*, cache_dir=None, timeout=15.0, cancel=None) -> Catalog:
     except c.ContractError as exc:
         raise HostedError(exc.code, str(exc)) from exc
     except OSError as exc:
-        raise HostedError('disk', 'Could not persist hosted catalog cache') from exc
+        raise _disk_error(cache, exc) from exc
 
 
 def cached_catalog(*, cache_dir=None, error=None) -> Catalog:
     """Additive explicit offline API; performs zero network or USB calls."""
-    cache = _directory(cache_dir or _default_cache())
+    cache = Path(cache_dir or _default_cache())
     try:
+        cache = _directory(cache)
         raw = _read(cache / 'index.json', c.INDEX_MAX)
         payload = _index(raw, cache)
         return _catalog(payload, True, error, cache.parent)
     except c.ContractError as exc:
         raise HostedError(exc.code, str(exc)) from exc
     except OSError as exc:
-        raise HostedError('offline', 'No usable authenticated offline catalog') from exc
+        if isinstance(exc, FileNotFoundError):
+            raise HostedError('offline', 'No usable authenticated offline catalog') from exc
+        raise _disk_error(cache, exc) from exc
 
 
 def download_image(image_id, *, dest_dir=None, progress=None, cancel=None) -> str:
@@ -196,11 +200,18 @@ def _safe_path(path):
     return path
 
 
+def _disk_error(path, error):
+    return HostedError('disk', f'Folder: {Path(path).expanduser().absolute()}. {error}')
+
+
 def _directory(path):
     path = _safe_path(path)
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not path.is_dir():
-        raise HostedError('disk', 'Hosted destination is not a directory')
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not path.is_dir():
+            raise OSError('Hosted destination is not a directory')
+    except OSError as exc:
+        raise _disk_error(path, exc) from exc
     return path
 
 
