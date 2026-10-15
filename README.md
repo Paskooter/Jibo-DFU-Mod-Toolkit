@@ -17,12 +17,12 @@ Get the single file for your computer from [GitHub Releases](https://github.com/
 
 Linux and Mac downloads include Python/Tk and all toolkit tools: no clone, compiler, Git, Homebrew or internet needed for first launch. Windows includes the prebuilt Linux payload. It reuses its own **Jibo-DFU-Toolkit** Linux, or a standard **Ubuntu 22.04+** WSL 2 distribution with a normal user and WSLg. It never automatically uses Linux belonging to NVIDIA Workbench, Docker, Podman, Rancher or another tool. If no Ubuntu matches, it asks once to download a verified official Ubuntu image (about 345 MB) and create its own private Linux; no Linux username or password is needed. Internet and a reboot may be needed to install missing Windows/WSL prerequisites. Existing source launchers remain available below. Downloading firmware updates still needs internet. The downloadable Mac apps require macOS 15 or later; Apple silicon USB operation remains experimental.
 
-**Windows command window:** setup and approval prompts stay visible. Once the GUI
-window is on screen, the EXE hides the command window under Windows Console Host
-or minimizes it under Windows Terminal (which may minimize other tabs too). Errors
-restore it; Terminal errors also show a separate dialog. Run
-`Jibo-DFU-Windows-x64.exe -ShowConsole` to keep it visible for troubleshooting;
-this can be combined with `-Distro NAME`. Source launchers keep their terminal.
+**Windows command window:** the EXE is a Windows GUI application: no command
+window or Terminal tab is created, even at startup. Setup questions and failures
+use native dialogs; a small “Setting up Jibo DFU Toolkit…” window stays responsive
+until the GUI appears. Windows may still request UAC approval. Run
+`Jibo-DFU-Windows-x64.exe -ShowConsole` only when troubleshooting; this can be
+combined with `-Distro NAME`. Source launchers keep their terminal.
 
 Phoenix image lists and downloads use per-user toolkit storage, not the folder you started from: `${XDG_DATA_HOME:-~/.local/share}/jibo-dfu/updates` on Linux/WSL, and `~/Library/Application Support/jibo-dfu/updates` on macOS. Official packages and previously completed Phoenix downloads in `./updates` remain discoverable. The one-step Phoenix install removes its owned download after the flash attempt; robot backups are never part of that cleanup. Folder failures name the affected folder; HTTP failures include the status and a Cloudflare note when detected.
 

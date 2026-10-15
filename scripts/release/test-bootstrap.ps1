@@ -1,6 +1,9 @@
 # Parse and exercise the bootstrap without real WSL, USB, installs or UAC.
 param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'))
 $ErrorActionPreference = 'Stop'
+$bootstrapText = [IO.File]::ReadAllText($BootstrapPath)
+if ($bootstrapText -match 'Read-Host') { throw 'Windowless bootstrap must never wait for console input' }
+if ($bootstrapText -notmatch '-Verb RunAs -WindowStyle Hidden') { throw 'Elevated setup must be hidden' }
 $hostBinary = (Get-Process -Id $PID).Path
 $path = $BootstrapPath
 $tokens = $null
@@ -9,6 +12,9 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$to
 if ($errors.Count) { throw ($errors | Out-String) }
 $functions = $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $true)
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
+. (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+function Invoke-ToolkitNative { param($File, [string[]]$Arguments); $output = @(& wsl.exe @Arguments); return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null} }
+function Show-ToolkitQuestion { param($Question); return $script:answer -eq 'yes' }
 $script:answer = 'n'
 function Read-Host { param($Prompt); return $script:answer }
 if (Confirm-Setup 'Test') { throw 'Decline was not respected' }
@@ -39,6 +45,16 @@ if ($usbErrors.Count) { throw ($usbErrors | Out-String) }
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-bootstrap-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory $fixture | Out-Null
 try {
+    Copy-Item $BootstrapPath (Join-Path $fixture 'bootstrap.ps1')
+    $path = Join-Path $fixture 'bootstrap.ps1'
+    $mockHelper = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) + @'
+
+function Invoke-ToolkitNative { param($File, [string[]]$Arguments); $output = @(& wsl.exe @Arguments); return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null} }
+function Show-ToolkitQuestion { param($Question); return $false }
+function Start-ToolkitSetup {}
+function Stop-ToolkitSetup {}
+'@
+    [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     [IO.File]::WriteAllText((Join-Path $fixture 'payload.tar.gz'), 'not read on refusal')
     [IO.File]::WriteAllText((Join-Path $fixture 'run.ps1'), 'not run on refusal')
     $child = Join-Path $fixture 'refusal.ps1'
@@ -155,11 +171,14 @@ foreach ($name in @('Ubuntu with spaces', 'a"b', "a`tb", '', ('x' * 257))) {
 }
 # Windows privileges: root inside the user's own distro needs neither UAC nor a Linux
 # password; the GUI uses an explicit non-root user.
+function Start-ToolkitSetup {}
+function Stop-ToolkitSetup {}
+function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
 $script:calls = @()
 function Native { param([string[]]$Arguments); $script:calls += ,$Arguments; return '' }
 function Invoke-ApprovedAdmin { param($File, $Arguments); $script:calls += ,@('UAC', $File, $Arguments) }
 function Start-Process {
-    param($FilePath, $ArgumentList, [switch]$NoNewWindow, [switch]$PassThru)
+    param($FilePath, $ArgumentList, [switch]$NoNewWindow, [switch]$PassThru, $WindowStyle)
     $script:calls += ,@('WATCH', $FilePath, $ArgumentList)
     return [pscustomobject]@{ HasExited=$false; Id=4242 }
 }
@@ -187,7 +206,7 @@ if (-not $failed -or $script:calls.Count) { throw 'Invalid distribution name rea
 $script:calls = @()
 function Native { param([string[]]$Arguments); return $Arguments[-1] }
 function Start-Process {
-    param($FilePath, $ArgumentList, [switch]$NoNewWindow, [switch]$PassThru)
+    param($FilePath, $ArgumentList, [switch]$NoNewWindow, [switch]$PassThru, $WindowStyle)
     $script:calls += ,@($FilePath, $ArgumentList)
     $process = [pscustomobject]@{ExitCode=41}
     $process | Add-Member ScriptMethod WaitForExit { param($Timeout); return $true }
@@ -202,6 +221,21 @@ $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-bootstrap-flow-' + [guid]:
 New-Item -ItemType Directory $fixture | Out-Null
 $passed = 0; $failedCases = @()
 try {
+    Copy-Item $BootstrapPath (Join-Path $fixture 'bootstrap.ps1')
+    $path = Join-Path $fixture 'bootstrap.ps1'
+    $mockHelper = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) + @'
+
+function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
+function Invoke-ToolkitNative {
+    param($File, [string[]]$Arguments)
+    $output = if ($File -eq 'powershell.exe') { @(& powershell.exe @Arguments) } else { @(& wsl.exe @Arguments) }
+    return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null}
+}
+function Show-ToolkitQuestion { param($Question); return ((Read-Host $Question) -match '^(?i:y|yes)$') }
+function Start-ToolkitSetup {}
+function Stop-ToolkitSetup {}
+'@
+    [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh')) {
         [IO.File]::WriteAllText((Join-Path $fixture $file), 'synthetic; never executed')
     }
@@ -271,7 +305,7 @@ function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing); Re
 function Get-Item { param($LiteralPath); return [pscustomobject]@{Length=$(if ($global:UacCase -eq 'size-mismatch') { 12 } else { 360684292 })} }
 function Get-FileHash { param($LiteralPath, $Algorithm); Record 'hash' @($Algorithm); return [pscustomobject]@{Hash=$(if ($global:UacCase -eq 'hash-mismatch') { '0' * 64 } else { '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f' })} }
 function Start-Process {
-    param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow)
+    param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $WindowStyle)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
     $isGui = $ArgumentList -match '^--distribution ([A-Za-z0-9._-]+) --user ([^\s"]+) --exec "bash" "([^"]+/wsl-user-launch.sh)" "([^"]+/jibo-dfu)" "([^"]+)" "([^"]+)"$'
     if ($isGui) { Record 'wsl' @('--distribution', $Matches[1], '--user', $Matches[2], '--exec', 'bash', $Matches[3], $Matches[4], $Matches[5], $Matches[6]) }

@@ -24,8 +24,6 @@ class FakeFlashServer:
         self.redirects = {}
         self.statuses = {}
         self.responses = {}  # Per-path scripted (status, Retry-After) errors.
-        self.error_bodies = {}
-        self.extra_headers = {}
         self.truncate = {}
         self.delay = 0
         self.delays = {}
@@ -95,13 +93,7 @@ class FakeFlashServer:
                     self.send_response(status)
                     if retry_after is not None:
                         self.send_header('Retry-After', retry_after)
-                    for key, value in fixture.extra_headers.get(self.path, {}).items():
-                        self.send_header(key, value)
-                    body = fixture.error_bodies.get(self.path, b'')
-                    self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
-                    if not head:
-                        self.wfile.write(body)
                     return
                 data = fixture.files.get(self.path)
                 if data is None:

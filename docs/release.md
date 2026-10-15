@@ -4,7 +4,7 @@
 
 `.github/workflows/release.yml` builds four unsigned files:
 
-- `Jibo-DFU-Windows-x64.exe`: one-file console bootstrapper with the complete
+- `Jibo-DFU-Windows-x64.exe`: one-file GUI-subsystem bootstrapper with the complete
   prebuilt Linux payload. Windows x64 only; the GUI remains in WSLg. Automatic selection uses only a healthy
   `Jibo-DFU-Toolkit` or standard Ubuntu 22.04+ WSL 2 distribution; otherwise the
   launcher asks to create its own private Linux, without account/password prompts.
@@ -105,42 +105,41 @@ approval/UAC; importing/provisioning private Linux itself needs neither UAC nor 
 Linux password. Source `run.ps1`/`run-gui.cmd` still use `run.sh` and its existing
 Linux sudo behavior; these instructions concern the EXE.
 
-Every EXE invocation starts with `Jibo DFU Toolkit (build <revision>)`, so the
-first line identifies the download being tested.
+The GUI banner and captured EXE diagnostics identify the download as
+`Jibo DFU Toolkit (build <revision>)`.
 
 ### Command window visibility
 
-Setup, download progress, consent questions and administrator approval stay
-visible. The command window moves out of the way only after the GUI confirms that
-its main window is on screen. A slow or failed GUI launch never triggers hiding.
+The Windows EXE uses the GUI subsystem (PE Subsystem 2). It does not allocate a
+console or Terminal tab on its normal path. PowerShell, WSL and USB helpers start
+windowless, including elevated helpers; Windows UAC approval remains visible.
+Setup consent uses Yes/No dialogs defaulting to No. Failures use a native error
+dialog, never an invisible input prompt. A responsive “Setting up Jibo DFU Toolkit…”
+status window runs on its own UI thread during downloads, import and payload setup;
+it closes when the actual Tk main window reports readiness, or an error replaces it.
 
-- **Windows Console Host:** the command window is hidden. If hiding is unavailable,
-  the launcher tries minimizing instead.
-- **Windows Terminal:** the launcher minimizes rather than hides the window.
-  Terminal's console handle is a proxy, not its displayed window; full hiding is
-  not reliable. Minimizing may affect other tabs in that Terminal window too.
-  Use `-ShowConsole` when launching from a shared terminal window.
-
-For troubleshooting, run:
+For troubleshooting only, run:
 
 ```powershell
 .\Jibo-DFU-Windows-x64.exe -ShowConsole
 .\Jibo-DFU-Windows-x64.exe -Distro Ubuntu-22.04 -ShowConsole
 ```
 
-A failed GUI/WSL launch or stopped USB watcher restores the command window before
-printing the error and asking **Press Enter to close**. Terminal failures also
-show a separate error dialog, since restoring a proxy cannot guarantee that the
-correct tab is visible. Later USB administrator prompts restore the window too;
-readiness cannot hide it while approval is pending. If USB support fails while
-the GUI is running, the launcher shows the error but lets you close the GUI when
-safe rather than terminating a possible transfer. A normal GUI close removes the
-session/readiness markers and stops both USB helpers. GUI exit codes are retained.
+This explicitly attaches/allocates a console; no hide or minimize workaround is used.
+For captured diagnostics from the GUI-subsystem EXE, use an explicit output file:
 
-See Microsoft's [console handle documentation](https://learn.microsoft.com/en-us/windows/console/getconsolewindow)
-and [Terminal show/hide discussion](https://github.com/microsoft/terminal/issues/15311)
-for the host limitation. This behavior has automated mocked-Win32 and mapped-Tk
-coverage; interactive host behavior still needs the real-Windows checks below.
+```powershell
+Start-Process .\Jibo-DFU-Windows-x64.exe -ArgumentList '--version --output version.txt' -Wait
+Start-Process .\Jibo-DFU-Windows-x64.exe -ArgumentList '--self-check --output self-check.txt' -Wait
+Get-Content version.txt, self-check.txt
+```
+
+The output starts with `Jibo DFU Toolkit (build <revision>)`. CI checks both receipts
+and the built EXE's PE subsystem. A stopped USB watcher still shows a failure dialog
+and lets you close the GUI when safe, rather than terminating a possible transfer.
+Normal close removes session/readiness markers and stops both USB helpers; GUI exit
+codes are retained. Native Windows status-window and console-free process probes run
+in CI; real WSL/UAC/desktop integration still needs the owner retest.
 
 To remove the private Linux, run `wsl --unregister Jibo-DFU-Toolkit` in PowerShell.
 **This deletes its entire Linux filesystem**, including backups saved inside it.
@@ -201,9 +200,9 @@ Before publishing, test these **on real hosts**:
 - Windows fresh setup: approved/declined WSL installation, reboot/resume, private Linux
   import/default-user verification, usbipd installer and UAC cancellation; existing distro
   selection; WSLg window; APX → DFU and unplug/replug reattachment. With both Console
-  Host and Windows Terminal set as the default terminal, confirm the banner appears
-  first, setup stays visible, and the command window hides (Console Host) or minimizes
-  (Terminal) only after the GUI opens. Check `-ShowConsole`, a failed GUI launch,
+  Host and Windows Terminal set as the default terminal, confirm no command window
+  or Terminal tab appears at any point (including startup), and no minimized command
+  window remains on the taskbar. Check setup dialogs/status, `-ShowConsole`, a failed GUI launch,
   a stopped USB helper, and another bind/UAC prompt after the GUI opens. Confirm
   visible errors and a clean close with no remaining helpers.
 - Linux desktop: polkit prompt/cancellation, terminal sudo fallback, FUSE and

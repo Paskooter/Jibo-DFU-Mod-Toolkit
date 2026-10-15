@@ -90,7 +90,7 @@ def test_windows_bootstrap_reuses_existing_usb_monitor_without_cloning():
     path = ROOT / 'scripts/release/bootstrap.ps1'
     assert path.is_file(), 'missing Windows bootstrap'
     text = path.read_text()
-    for required in ('run.ps1', '-UsbOnly -MonitorUsb', 'RunAs', 'Read-Host',
+    for required in ('run.ps1', '-UsbOnly -MonitorUsb', 'RunAs', 'Show-ToolkitQuestion',
                      '--version', '/mnt/wslg', 'payload.tar.gz'):
         assert required in text
     assert 'git clone' not in text
@@ -328,7 +328,8 @@ def test_windows_build_embeds_only_windows_privilege_helpers(tmp_path, monkeypat
     monkeypatch.setattr(module, 'ROOT', tmp_path)
     monkeypatch.setattr(module, 'download', lambda *args: None)
     calls = []
-    monkeypatch.setattr(module, 'run', lambda *args, **kwargs: calls.append(args))
+    from release_fakes import windows_build_run
+    monkeypatch.setattr(module, 'run', windows_build_run(calls, tmp_path))
     module.windows(tmp_path)
     build_args = list(map(str, calls[0]))
     embedded = [build_args[i + 1] for i, arg in enumerate(build_args) if arg == '--add-data']

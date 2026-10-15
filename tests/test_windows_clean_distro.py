@@ -37,7 +37,7 @@ def test_first_line_identifies_build_before_actions(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
     monkeypatch.setattr(sys, 'argv', ['toolkit'] + args)
     calls = []
-    def call(values):
+    def call(values, **kwargs):
         assert capsys.readouterr().out.splitlines()[0] == 'Jibo DFU Toolkit (build aaaaaaa)'
         calls.append(values)
         return 41

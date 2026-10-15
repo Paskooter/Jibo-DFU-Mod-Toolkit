@@ -102,6 +102,11 @@ class DataFolderTests(HostedFixture):
 
 
 class HttpDetailTests(HostedFixture):
+    def setUp(self):
+        super().setUp()
+        from diagnostic_flash_server import install_error_response_pages
+        install_error_response_pages(self.server)
+
     def test_http_status_and_cloudflare_diagnostics_reach_chooser(self):
         for status, headers, body, cloudflare in (
                 (403, {}, b'', False), (503, {}, b'', False),

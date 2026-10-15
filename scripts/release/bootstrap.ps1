@@ -4,19 +4,16 @@ $ErrorActionPreference = 'Stop'
 $launcherExitCode = 1
 
 function Confirm-Setup([string]$Question) {
-    return ((Read-Host "$Question [y/N]") -match '^(?i:y|yes)$')
+    return (Show-ToolkitQuestion $Question)
 }
 function Invoke-ApprovedAdmin([string]$File, [string]$Arguments) {
-    $p = Start-Process -FilePath $File -ArgumentList $Arguments -Verb RunAs -Wait -PassThru
+    $p = Start-Process -FilePath $File -ArgumentList $Arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     if ($p.ExitCode -ne 0) { throw "Setup exited with code $($p.ExitCode). Restart this app after any requested reboot." }
 }
 function Native([string[]]$Arguments) {
-    $old = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { $lines = @(& wsl.exe @Arguments 2>&1); $code = $LASTEXITCODE }
-    finally { $ErrorActionPreference = $old }
-    if ($code -ne 0) { throw "WSL failed: $($lines -join ' ')" }
-    return (($lines | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
+    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments
+    if ($result.ExitCode -ne 0) { throw "WSL failed: $($result.StartError) $($result.Output -join ' ')" }
+    return (($result.Output | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
 }
 function ConvertTo-NativeArgumentLine([string[]]$Arguments) {
     # Start-Process joins arrays on Windows. Quote for the native argv parser,
@@ -49,7 +46,7 @@ function Start-WslUsbAccess([string]$Name, [string]$User, [string]$Uid, [string]
     Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'touch', '--', $Session) | Out-Null
     $wsl = "$env:SystemRoot\System32\wsl.exe"
     $line = Get-WslRootArgumentLine -Name $Name -Command @('bash', $Helper, $Uid, $Gid, $Session)
-    $process = Start-Process -FilePath $wsl -ArgumentList $line -NoNewWindow -PassThru
+    $process = Start-ToolkitProcess -FilePath $wsl -ArgumentList $line
     # Cache the handle before waiting: Windows PowerShell can otherwise report
     # a null ExitCode for -NoNewWindow processes (PowerShell/PowerShell #5421).
     $null = $process.Handle
@@ -102,19 +99,18 @@ function Install-PrivateDistribution([string]$Root) {
     }
 }
 function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session, $Permissions, $Monitor, [switch]$ShowConsole) {
-    # Keep prompts and native output on the existing console, but wait without
-    # blocking readiness or USB-support checks. No timing heuristic hides it.
+    # Supervise readiness and USB support without ever allocating a console.
     if (-not (Test-WslDistributionName $Name) -or $User -notmatch '^[^\s"]+$') { throw 'Invalid WSL GUI identity.' }
     $run = Join-Path ([IO.Path]::GetTempPath()) ('jibo-dfu-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $run | Out-Null
-    $hidden = $false
+    $setupStopped = $false
     $supportFailed = $false
     try {
         $readyFile = Join-Path $run 'ready'
         $linuxReady = Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'wslpath', '-u', '--', $readyFile)
         $command = ConvertTo-NativeArgumentLine @('bash', "$Target/wsl-user-launch.sh", "$Target/jibo-dfu", $Session, $linuxReady)
         $line = '--distribution {0} --user {1} --exec {2}' -f $Name, $User, $command
-        $gui = Start-Process -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList $line -NoNewWindow -PassThru
+        $gui = Start-ToolkitProcess -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList $line
         $null = $gui.Handle # Retain ExitCode when using WaitForExit instead of -Wait.
         while (-not $gui.WaitForExit(100)) {
             if (-not $supportFailed -and (($Permissions -and $Permissions.HasExited) -or ($Monitor -and $Monitor.HasExited))) {
@@ -124,9 +120,9 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
                 $supportFailed = $true
                 Show-ToolkitFailure 'USB support stopped unexpectedly. Close the GUI when safe, then reopen the toolkit.'
             }
-            if (-not $hidden -and -not $supportFailed -and -not $ShowConsole -and (Test-Path -LiteralPath $readyFile)) {
-                try { Set-ToolkitConsole; $hidden = $true }
-                catch { Write-Warning 'Could not hide the command window; leaving it visible.'; $hidden = $true }
+            if (-not $setupStopped -and (Test-Path -LiteralPath $readyFile)) {
+                Stop-ToolkitSetup
+                $setupStopped = $true
             }
         }
         # A helper can fail in the same polling interval as a normal GUI close.
@@ -198,6 +194,7 @@ try {
     $usbScript = Join-Path $PayloadRoot 'run.ps1'
     if (-not (Test-Path $archive) -or -not (Test-Path $usbScript)) { throw 'Embedded payload is incomplete.' }
     if ($SelfCheck) { Write-Output 'Bootstrap scripts and Linux payload are present; WSL setup not attempted.'; exit 0 }
+    Start-ToolkitSetup
     Write-Host 'Jibo DFU Toolkit: Windows uses WSL 2 + WSLg and usbipd-win. Setup requires internet only if these are missing.'
     $ready = $false
     try { $version = Native -Arguments @('--version'); $ready = ($version -match 'WSLg') } catch { $ready = $false }
@@ -254,13 +251,14 @@ try {
     $monitor = $null
     try {
         # Existing validated bind/attach/reattach logic retains usbipd's UAC prompt.
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $usbScript -UsbOnly -Distro $Distro
-        if ($LASTEXITCODE -ne 0) { throw 'USB handoff failed or administrator approval was declined. No GUI was started.' }
+        $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
+        $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper)
+        if ($usbResult.ExitCode -ne 0) { throw 'USB handoff failed or administrator approval was declined. No GUI was started.' }
         $permissions = Start-WslUsbAccess -Name $Distro -User $linuxUser -Uid $linuxUid -Gid $linuxGid -Helper "$target/wsl-usb-permissions.sh" -Session $session
         if ($permissions.WaitForExit(200)) { throw 'The WSL USB permission watcher failed to start.' }
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
-        $monitorArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}"' -f $usbScript, $Distro, $consoleHelper
-        $monitor = Start-Process powershell.exe -ArgumentList $monitorArgs -NoNewWindow -PassThru
+        $monitorArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}"' -f $usbScript, $Distro, $consoleHelper
+        $monitor = Start-ToolkitProcess -FilePath powershell.exe -ArgumentList $monitorArgs
         $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole
         if ($code -ne 0) { $launcherExitCode = $code }
     } finally {
@@ -279,6 +277,7 @@ try {
 } catch {
     if (Get-Command Show-ToolkitFailure -ErrorAction SilentlyContinue) { Show-ToolkitFailure $_.Exception.Message }
     else { Write-Host "Launcher: $($_.Exception.Message)" -ForegroundColor Red }
-    Read-Host 'Press Enter to close' | Out-Null
     exit $launcherExitCode
+} finally {
+    Stop-ToolkitSetup
 }

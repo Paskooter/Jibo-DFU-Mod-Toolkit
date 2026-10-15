@@ -33,7 +33,7 @@ def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
 
 
 @pytest.mark.parametrize('case', [
-    'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
+    'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',
     'gui-start-failed', 'cleanup-failed', 'monitor-prompt', 'terminal-failed', 'hide-fallback',
     'watcher-exit-race', 'monitor-exit-race', 'gui-handle', 'watcher-handle', 'gui-code-unavailable',
@@ -58,7 +58,7 @@ def test_show_console_switch_is_forwarded_after_the_banner(tmp_path, monkeypatch
     module = windows_launcher(tmp_path, monkeypatch, args)
     calls = []
 
-    def call(argv):
+    def call(argv, **kwargs):
         assert capsys.readouterr().out.splitlines()[0] == 'Jibo DFU Toolkit (build aaaaaaa)'
         calls.append(argv)
         return 41
@@ -78,7 +78,8 @@ def test_console_controller_is_embedded_in_windows_release(tmp_path, monkeypatch
     monkeypatch.setattr(module, 'ROOT', tmp_path)
     monkeypatch.setattr(module, 'download', lambda *args: None)
     calls = []
-    monkeypatch.setattr(module, 'run', lambda *args: calls.append(args))
+    from release_fakes import windows_build_run
+    monkeypatch.setattr(module, 'run', windows_build_run(calls, tmp_path))
     module.windows(tmp_path)
     assert str(tmp_path / 'scripts/release/console.ps1') + ';.' in calls[0]
 
@@ -93,19 +94,17 @@ def test_exe_failure_keeps_diagnostics_visible_until_acknowledged(tmp_path, monk
     module = windows_launcher(tmp_path, monkeypatch, ['--bogus'] if failure == 'arguments' else [])
     if failure == 'checksum':
         (tmp_path / 'payload/payload.sha256').write_text('0' * 64)
-    prompts = []
+    dialogs = []
 
-    def acknowledge(prompt):
-        text = capsys.readouterr().out
-        assert text.splitlines()[0] == 'Jibo DFU Toolkit (build aaaaaaa)'
-        assert 'Launcher:' in text
-        prompts.append(prompt)
-        return ''
+    def acknowledge(message):
+        assert capsys.readouterr().out.splitlines()[0] == 'Jibo DFU Toolkit (build aaaaaaa)'
+        dialogs.append(message)
 
-    monkeypatch.setattr('builtins.input', acknowledge)
-    assert hasattr(module, 'run'), 'EXE failures need a visible acknowledgement path'
+    monkeypatch.setattr(module, 'show_error', acknowledge)
+    monkeypatch.setattr('builtins.input', lambda _: pytest.fail('invisible console wait'))
     assert module.run() == 1
-    assert prompts == ['Press Enter to close']
+    assert len(dialogs) == 1
+    assert ('checksum' if failure == 'checksum' else 'Usage:') in dialogs[0]
 
 
 def test_self_check_requires_the_console_controller(tmp_path, monkeypatch):
@@ -144,70 +143,12 @@ def test_show_console_does_not_weaken_argument_validation(tmp_path, monkeypatch,
 
 
 def test_ready_signal_cannot_hide_console_during_a_prompt(tmp_path):
-    import shutil
-    import time
-
-    pwsh = os.environ.get('PWSH') or shutil.which('pwsh') or shutil.which('powershell.exe')
-    if not pwsh:
-        pytest.skip('requires PowerShell')
-    helper = ROOT / 'scripts/release/console.ps1'
-    assert helper.is_file(), 'missing console prompt synchronization'
-    child = tmp_path / 'console-lock.ps1'
-    child.write_text(r'''
-param($Helper, $Trace, $Hold, $Release, $Mode)
-$ErrorActionPreference = 'Stop'
-$env:DFU_CONSOLE_TEST_TRACE = $Trace
-Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-public class ToolkitConsoleNative {
-    public static IntPtr GetConsoleWindow() { return new IntPtr(42); }
-    public static int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size) { value=0; return 0; }
-    public static bool IsWindowVisible(IntPtr hwnd) { return false; }
-    public static bool ShowWindow(IntPtr hwnd, int command) { File.AppendAllText(Environment.GetEnvironmentVariable("DFU_CONSOLE_TEST_TRACE"), command + "\n"); return false; }
-}
-'@
-. $Helper
-if ($Mode -eq 'prompt') {
-    Invoke-ToolkitConsolePrompt {
-        [IO.File]::WriteAllText($Hold, 'prompt open')
-        while (-not (Test-Path $Release)) { Start-Sleep -Milliseconds 20 }
-    }
-} else {
-    [IO.File]::WriteAllText(($Hold + '.attempt'), 'hide requested')
-    Set-ToolkitConsole
-    [IO.File]::WriteAllText(($Hold + '.done'), 'hide completed')
-}
-''')
-    trace, hold, release = [tmp_path / name for name in ('trace', 'hold', 'release')]
-    children = []
-
-    def wait_for(path):
-        deadline = time.monotonic() + 10
-        while not path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert path.exists(), 'child synchronization did not run: ' + path.name
-
-    try:
-        for mode, marker in [('prompt', hold), ('hide', Path(str(hold) + '.attempt'))]:
-            children.append(subprocess.Popen([pwsh, '-NoProfile', '-File', str(child), str(helper),
-                                              str(trace), str(hold), str(release), mode],
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
-            wait_for(marker)
-        time.sleep(0.1)
-        assert not Path(str(hold) + '.done').exists(), 'readiness hid an active prompt'
-        assert trace.read_text().splitlines() == ['9']
-        release.write_text('approved')
-        for process in children:
-            out, err = process.communicate(timeout=10)
-            assert process.returncode == 0, out + err
-        assert trace.read_text().splitlines() == ['9', '0']
-    finally:
-        release.touch()
-        for process in children:
-            if process.poll() is None:
-                process.terminate()
-                process.communicate(timeout=10)
+    helper = (ROOT / 'scripts/release/console.ps1').read_text()
+    bootstrap = (ROOT / 'scripts/release/bootstrap.ps1').read_text()
+    assert 'ShowWindow' not in helper
+    assert 'Set-ToolkitConsole' not in bootstrap
+    assert 'Stop-ToolkitSetup' in bootstrap
+    assert 'Invoke-ToolkitConsolePrompt' not in (ROOT / 'run.ps1').read_text()
 
 
 @pytest.mark.parametrize('code', [0, 41])

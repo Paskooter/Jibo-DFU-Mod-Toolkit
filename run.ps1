@@ -24,6 +24,8 @@ function Invoke-CapturedNativeCommand {
         [string[]]$ArgumentList = @()
     )
 
+    if ($ConsoleHelper) { return (Invoke-ToolkitNative -File $FilePath -Arguments $ArgumentList) }
+
     # Windows PowerShell 5.1 can promote native stderr to a terminating
     # NativeCommandError when the caller uses Stop. Keep stderr captured as
     # text so nonzero exit codes can be handled as normal launcher failures.
@@ -188,10 +190,9 @@ function Invoke-UacBind {
         $argumentLine = 'bind --busid ' + $BusId
         $bind = {
             Write-Host ("Sharing Jibo on USB port {0}; Windows may ask for administrator approval." -f $BusId) -ForegroundColor Cyan
-            Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -Wait -PassThru -WorkingDirectory $env:SystemRoot
+            Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru -WorkingDirectory $env:SystemRoot
         }
-        if ($ConsoleHelper) { $process = Invoke-ToolkitConsolePrompt $bind }
-        else { $process = & $bind }
+        $process = & $bind
         if ($process.ExitCode -ne 0) {
             Write-Host ("Elevated usbipd bind failed with exit code {0}." -f $process.ExitCode) -ForegroundColor Yellow
             return $false
@@ -343,10 +344,9 @@ function Select-Distribution {
 }
 
 try {
-    # Only the release EXE's background USB monitor supplies this helper. Restore
-    # its shared console before a later bind requires another UAC approval.
+    # The release EXE uses windowless native capture in both USB-only paths.
     if ($ConsoleHelper) {
-        if (-not $MonitorUsb -or -not $UsbOnly) { throw '-ConsoleHelper requires -UsbOnly -MonitorUsb.' }
+        if (-not $UsbOnly -or -not $Distro) { throw '-ConsoleHelper requires -UsbOnly and an explicit -Distro.' }
         . $ConsoleHelper
     }
     if ($MonitorUsb -and -not $UsbOnly) {

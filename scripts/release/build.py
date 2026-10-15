@@ -398,6 +398,15 @@ def native(architecture):
     print('Release files:', [(p.name, p.stat().st_size) for p in out.iterdir()])
 
 
+def verify_windows_executable(path):
+    import struct
+    raw = Path(path).read_bytes()
+    pe = struct.unpack_from("<I", raw, 0x3c)[0]
+    if raw[:2] != b"MZ" or raw[pe:pe+4] != b"PE\0\0" or struct.unpack_from("<H", raw, pe + 24 + 68)[0] != 2:
+        raise RuntimeError("Windows EXE must use WINDOWS_GUI subsystem (2)")
+    print("Verified Windows PE Subsystem == 2 (WINDOWS_GUI)", flush=True)
+
+
 def windows(payload):
     out = ROOT / 'release-out'
     out.mkdir(exist_ok=True)
@@ -408,7 +417,7 @@ def windows(payload):
     version = '.'.join(map(str, sys.version_info[:3]))
     download('https://raw.githubusercontent.com/python/cpython/v' + version + '/LICENSE', windows_license)
     args = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
-            '--name', 'Jibo-DFU-Windows-x64', '--distpath', out]
+            '--noconsole', '--name', 'Jibo-DFU-Windows-x64', '--distpath', out]
     for file in ('payload.tar.gz', 'payload.sha256', 'revision.txt', 'Windows-Python-LICENSE.txt'):
         args += ['--add-data', str(payload / file) + ';.']
     for file in ('scripts/release/bootstrap.ps1', 'scripts/release/console.ps1', 'scripts/release/wsl-usb-permissions.sh',
@@ -416,8 +425,18 @@ def windows(payload):
                  'THIRD-PARTY-NOTICES.md'):
         args += ['--add-data', str(ROOT / file) + ';.']
     run(*args, ROOT / 'scripts/release/windows_launcher.py')
-    run(out / 'Jibo-DFU-Windows-x64.exe', '--version')
-    run(out / 'Jibo-DFU-Windows-x64.exe', '--self-check')
+    binary = out / 'Jibo-DFU-Windows-x64.exe'
+    verify_windows_executable(binary)
+    for mode in ('--version', '--self-check'):
+        receipt = out / ('windows-' + mode[2:] + '.txt')
+        run(binary, mode, '--output', receipt)
+        text = receipt.read_text(encoding='utf-8')
+        print(text, flush=True)
+        revision = (payload / 'revision.txt').read_text().strip()
+        if not text.startswith('Jibo DFU Toolkit (build ' + revision[:7] + ')'):
+            raise RuntimeError('Windows diagnostic banner missing: ' + mode)
+        if mode == '--self-check' and json.loads(text.splitlines()[-1])['revision'] != revision:
+            raise RuntimeError('Windows self-check revision mismatch')
 
 
 if __name__ == '__main__':

@@ -1,11 +1,45 @@
 # Synthetic console/WSL lifecycle; never invokes Win32, WSL, installers or USB.
 param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'), [string]$Case = 'classic')
 $ErrorActionPreference = 'Stop'
+if ($Case -eq 'native-status') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    if ($env:OS -eq 'Windows_NT') {
+        Start-ToolkitSetup
+        try {
+            $field = [ToolkitSetupStatus].GetField('window', [Reflection.BindingFlags]'Static,NonPublic')
+            $window = $field.GetValue($null)
+            if (-not $window.Visible -or $window.ControlBox -or $window.Text -ne 'Jibo DFU Toolkit') { throw 'Native setup window was not visibly mapped' }
+        } finally { Stop-ToolkitSetup }
+        if (-not $window.IsDisposed) { throw 'Native setup window survived shutdown' }
+    } else {
+        $source = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1'))
+        if ($source -notmatch 'Application.Run\(window\)' -or $source -notmatch 'ApartmentState.STA') { throw 'Setup window needs its own STA message pump' }
+    }
+    Write-Output "PASS console: $Case"
+    exit 0
+}
+if ($Case -eq 'native-command') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $hostBinary = (Get-Process -Id $PID).Path
+    $code = @'
+if ($env:OS -eq 'Windows_NT') {
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Probe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
+    if ([Probe]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 91 }
+}
+[Console]::Out.Write(('o' * 200000))
+[Console]::Error.Write(('e' * 200000))
+exit 7
+'@
+    $result = Invoke-ToolkitNative -File $hostBinary -Arguments @('-NoProfile', '-NonInteractive', '-Command', $code)
+    if ($result.ExitCode -ne 7 -or $result.Output[0].Length -ne 200000 -or $result.Output[1].Length -ne 200000) { throw "Windowless native capture failed: $($result.ExitCode) $($result.StartError)" }
+    Write-Output "PASS console: $Case"
+    exit 0
+}
 if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
+    foreach ($scenario in @('native-status','native-command','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
@@ -40,7 +74,7 @@ public class ToolkitConsoleNative {
         return false;
     }
     public static int MessageBox(IntPtr hwnd, string text, string title, uint flags) {
-        File.AppendAllText(Environment.GetEnvironmentVariable("DFU_CONSOLE_TEST_TRACE"), "{\"Kind\":\"dialog\",\"Values\":[]}\n"); return 1;
+        File.AppendAllText(Environment.GetEnvironmentVariable("DFU_CONSOLE_TEST_TRACE"), "{\"Kind\":\"dialog\",\"Values\":[" + flags + "]}\n"); return 7;
     }
 }
 '@
@@ -51,11 +85,10 @@ public class ToolkitConsoleNative {
         . $helper
         [ToolkitConsoleNative]::Pseudo = $Case -eq 'terminal'
         [ToolkitConsoleNative]::IgnoreHide = $Case -eq 'hide-fallback'
-        Set-ToolkitConsole
-        Set-ToolkitConsole -Visible
-        $commands = @(Get-Content $trace | ForEach-Object { ($_ | ConvertFrom-Json).Values[0] })
-        $expected = if ($Case -eq 'terminal') { @(6,9) } elseif ($Case -eq 'hide-fallback') { @(0,6,9) } else { @(0,9) }
-        if (($commands -join ',') -ne ($expected -join ',')) { throw ('Wrong host operations: ' + ($commands -join ',')) }
+        if (Show-ToolkitQuestion 'Setup?') { throw 'Dialog default must be No' }
+        Show-ToolkitFailure 'Synthetic failure'
+        $events = @(Get-Content $trace | ForEach-Object { $_ | ConvertFrom-Json })
+        if ($events.Count -ne 2 -or $events[0].Values[0] -ne 0x00010124 -or $events[1].Values[0] -ne 0x00010010) { throw 'Wrong question/error dialog flags or unexpected console operations' }
         Write-Output "PASS console: $Case"
         exit 0
     }
@@ -76,13 +109,14 @@ public class ToolkitConsoleNative {
         $ConsoleHelper = Join-Path (Split-Path $BootstrapPath) 'console.ps1'
         function Test-IsAdministrator { return $false }
         function Start-Process {
-            param($FilePath,$ArgumentList,$Verb,[switch]$Wait,[switch]$PassThru,$WorkingDirectory)
+            param($FilePath,$ArgumentList,$Verb,[switch]$Wait,[switch]$PassThru,$WorkingDirectory,$WindowStyle)
+            if ($WindowStyle -ne 'Hidden') { throw 'Elevated USB helper is visible' }
             Record 'admin' @($Verb)
             return [pscustomobject]@{ExitCode=0}
         }
         if (-not (Invoke-UacBind '1-2')) { throw 'USB bind failed' }
         $events = @(Get-Content $trace | ForEach-Object { $_ | ConvertFrom-Json })
-        if ($events.Count -ne 2 -or $events[0].Kind -ne 'console' -or $events[0].Values[0] -ne 9 -or $events[1].Kind -ne 'admin') { throw 'UAC handoff preceded command-window restoration' }
+        if ($events.Count -ne 1 -or $events[0].Kind -ne 'admin') { throw 'UAC handoff must not restore or create a console' }
         Write-Output "PASS console: $Case"
         exit 0
     }
@@ -114,7 +148,8 @@ public class ToolkitConsoleNative {
     function Read-Host { param($Prompt); Record 'prompt' @($Prompt); return 'n' }
     function Stop-Process { param($Id); Record 'stop' @($Id) }
     function Start-Process {
-        param($FilePath,$ArgumentList,$Verb,[switch]$Wait,[switch]$PassThru,[switch]$NoNewWindow)
+        param($FilePath,$ArgumentList,$Verb,[switch]$Wait,[switch]$PassThru,[switch]$NoNewWindow,$WindowStyle)
+        if ($WindowStyle -ne 'Hidden') { throw 'A background child was not hidden' }
         Record 'start' @($FilePath,$ArgumentList,$Verb)
         if ($ArgumentList -match 'wsl-user-launch.sh') {
             if ($global:ConsoleFixtureCase -eq 'gui-start-failed') { throw 'synthetic GUI start failure' }
@@ -161,7 +196,21 @@ public class ToolkitConsoleNative {
         return $process
     }
     foreach ($name in @('payload.tar.gz','run.ps1','wsl-usb-permissions.sh','wsl-user-launch.sh','wsl-provision.sh')) { [IO.File]::WriteAllText((Join-Path $fixture $name), 'fixture') }
-    Copy-Item (Join-Path (Split-Path $BootstrapPath) 'console.ps1') $fixture -ErrorAction SilentlyContinue
+    $mockHelper = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) + @'
+
+function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
+function Invoke-ToolkitNative {
+    param($File, [string[]]$Arguments)
+    $output = if ($File -eq 'powershell.exe') { @(& powershell.exe @Arguments) } else { @(& wsl.exe @Arguments) }
+    return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null}
+}
+function Show-ToolkitQuestion { param($Question); Record 'question' @($Question); return $false }
+function Start-ToolkitSetup { Record 'setup-start' @() }
+function Stop-ToolkitSetup { Record 'setup-stop' @() }
+'@
+    [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
+    Copy-Item $BootstrapPath (Join-Path $fixture 'bootstrap.ps1')
+    $BootstrapPath = Join-Path $fixture 'bootstrap.ps1'
     [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
     $parameters = @{PayloadRoot=$fixture}
     if ($Case -eq 'show-console') { $parameters.ShowConsole=$true }
@@ -173,20 +222,22 @@ public class ToolkitConsoleNative {
     $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' })
     $success = $Case -in @('gui-success','show-console','watcher-handle')
     if ($code -ne $(if ($success) { 0 } elseif ($Case -in @('gui-failed','never-ready','terminal-failed','gui-handle')) { 41 } else { 1 })) { throw "Wrong exit code: $code" }
-    if ($Case -in @('never-ready','show-console','setup-decline','gui-start-failed')) {
-        if ($hide.Count) { throw 'Console hidden without GUI readiness or despite ShowConsole' }
-    } else {
-        if ($hide.Count -ne 1) { throw 'Ready GUI did not hide console exactly once' }
-        if ([array]::IndexOf($events,$hide[0]) -le [array]::IndexOf($events, @($events | Where-Object Kind -eq 'ready')[0])) { throw 'Console hidden before mapped-window signal' }
+    if ($hide.Count -or $show.Count -or $prompts.Count) { throw 'Windowless launcher touched a console or waited for console input' }
+    $started = @($events | Where-Object Kind -eq 'setup-start')
+    $stopped = @($events | Where-Object Kind -eq 'setup-stop')
+    if ($started.Count -ne 1 -or -not $stopped.Count) { throw 'Setup status window was not supervised' }
+    if ($success -and $Case -ne 'watcher-handle') {
+        $ready = @($events | Where-Object Kind -eq 'ready')
+        if ($ready.Count -ne 1 -or [array]::IndexOf($events,$stopped[0]) -le [array]::IndexOf($events,$ready[0])) { throw 'Setup window closed before the mapped GUI signal' }
     }
     if (-not $success) {
         $errors = @($events | Where-Object Kind -eq 'error')
-        if (-not $show.Count -or -not $prompts.Count -or -not $errors.Count) { throw 'Failure did not restore console and pause' }
+        $dialogs = @($events | Where-Object Kind -eq 'dialog')
+        if (-not $errors.Count -or -not $dialogs.Count) { throw 'Failure did not show a native error dialog' }
         foreach ($errorEvent in $errors) {
             $index = [array]::IndexOf($events,$errorEvent)
-            if ($index -lt 1 -or $events[$index-1].Kind -ne 'console' -or $events[$index-1].Values[0] -ne 9) { throw 'Error was printed before console restoration' }
+            if ($index -lt 1 -or $events[$index-1].Kind -ne 'setup-stop') { throw 'Error did not replace the setup status window' }
         }
-        if ([array]::IndexOf($events,$show[-1]) -ge [array]::IndexOf($events,$prompts[-1])) { throw 'Failure prompt preceded console restoration' }
     }
     if ($Case -eq 'terminal-failed' -and @($events | Where-Object Kind -eq 'dialog').Count -ne 1) { throw 'Terminal failure needs a visible dialog fallback' }
     if ($Case -notin @('setup-decline','gui-start-failed')) {
