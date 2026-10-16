@@ -1,0 +1,43 @@
+name: Setup window previews
+
+# Renders the Windows setup window and its support dialog to PNG with the real
+# Windows WinForms runtime, for design review. Manual only: it never builds,
+# tags, releases or publishes anything, and never runs setup, WSL or USB.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-previews-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  previews:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Render 100%, 150% and 200% previews (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/render-setup-previews.ps1 -OutDir setup-previews/standard
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Render with Windows high contrast switched on
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/render-setup-previews.ps1 -OutDir setup-previews/high-contrast -HighContrast -SkipLive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-previews-${{ github.sha }}
+          path: setup-previews/
+          if-no-files-found: error
+          retention-days: 14

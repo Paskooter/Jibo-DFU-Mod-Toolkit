@@ -138,3 +138,28 @@ def test_setup_scripts_stay_ascii_for_windows_powershell():
     for name in ('console.ps1', 'bootstrap.ps1'):
         data = (ROOT / 'scripts/release' / name).read_bytes()
         assert all(byte < 128 for byte in data), name
+
+
+def test_setup_preview_workflow_is_manual_and_publishes_nothing():
+    text = (ROOT / '.github/workflows/setup-previews.yml').read_text()
+    trigger = text.split('\non:', 1)[1].split('\npermissions:', 1)[0]
+    assert trigger.strip() == 'workflow_dispatch:'
+    assert 'contents: read' in text and 'write' not in text
+    assert 'runs-on: windows-2022' in text
+    assert 'scripts/release/render-setup-previews.ps1' in text and 'shell: powershell' in text
+    assert 'actions/upload-artifact@v4' in text
+    for forbidden in ('build.py', 'pyinstaller', 'gh release', 'git tag', 'git push', 'softprops', '--draft', 'secrets.'):
+        assert forbidden not in text.lower(), forbidden
+
+
+def test_preview_renderer_uses_the_shipped_setup_window_source():
+    script = (ROOT / 'scripts/release/render-setup-previews.ps1').read_text()
+    assert ". (Join-Path $PSScriptRoot 'console.ps1')" in script
+    assert '$script:ToolkitSetupUiSource + $script:ToolkitQuestionModelSource + $script:ToolkitPreviewSource' in script
+    # Synthetic data only, and never setup, WSL, installers or USB.
+    for forbidden in ('wsl.exe', 'usbipd.exe', 'winget', 'Invoke-ToolkitNative', 'Invoke-ToolkitElevated', 'Start-Process',
+                      'bootstrap.ps1', 'Set-Clipboard', 'Show-ToolkitQuestion', 'Set-ToolkitUserWait'):
+        assert forbidden not in script, forbidden
+    assert all(byte < 128 for byte in (ROOT / 'scripts/release/render-setup-previews.ps1').read_bytes())
+    # The release EXE does not carry the preview tool.
+    assert 'render-setup-previews' not in (ROOT / 'scripts/release/build.py').read_text()

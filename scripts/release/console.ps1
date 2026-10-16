@@ -526,6 +526,11 @@ public static class ToolkitTheme {
     public static int ForcedDpi;          // Previews only: render at 144/192 DPI. 0 = real monitor DPI.
     public static bool ForceHighContrast; // Previews only.
     public static bool ForceReducedMotion;
+    public static Rectangle ForcedWorkArea;  // Previews only: the screen a forced DPI stands for.
+    public static Rectangle WorkArea(Control control) {
+        if (!ForcedWorkArea.IsEmpty) return ForcedWorkArea;
+        try { return Screen.FromControl(control).WorkingArea; } catch (Exception) { return new Rectangle(0, 0, 1920, 1040); }
+    }
     public static bool HighContrast { get { return ForceHighContrast || SystemInformation.HighContrast; } }
     static Color C(int rgb) { return Color.FromArgb(255, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
     // Previews on a machine without high contrast: Windows' "Night sky" colors stand in
@@ -600,10 +605,11 @@ public static class ToolkitTheme {
     public const TextFormatFlags Line = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter;
     public static int TextHeight(string text, Font font, int width) {
         if (String.IsNullOrEmpty(text)) return 0;
-        return TextRenderer.MeasureText(text, font, new Size(Math.Max(1, width), int.MaxValue), Wrap).Height;
+        // Bounded: odd font metrics must never overflow the layout arithmetic.
+        return Math.Min(4000, TextRenderer.MeasureText(text, font, new Size(Math.Max(1, width), 100000), Wrap).Height);
     }
     public static int TextWidth(string text, Font font) {
-        return String.IsNullOrEmpty(text) ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), Line).Width;
+        return String.IsNullOrEmpty(text) ? 0 : Math.Min(4000, TextRenderer.MeasureText(text, font, new Size(100000, 100000), Line).Width);
     }
     public static GraphicsPath Rounded(Rectangle r, int radius) {
         var path = new GraphicsPath();
@@ -648,7 +654,16 @@ public static class ToolkitTheme {
             }
         }
     }
+    [DllImport("comctl32.dll")] static extern int LoadIconWithScaleDown(IntPtr instance, IntPtr name, int cx, int cy, out IntPtr icon);
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
     public static void Shield(Graphics g, Rectangle r) {
+        try {
+            IntPtr handle; // IDI_SHIELD at the exact pixel size: crisp at 150% and 200%.
+            if (LoadIconWithScaleDown(IntPtr.Zero, new IntPtr(32518), r.Width, r.Height, out handle) == 0 && handle != IntPtr.Zero) {
+                try { using (var icon = Icon.FromHandle(handle)) g.DrawIcon(icon, r); } finally { DestroyIcon(handle); }
+                return;
+            }
+        } catch (Exception) { }
         try { using (var icon = new Icon(SystemIcons.Shield, r.Size)) g.DrawIcon(icon, r); }
         catch (Exception) { Badge(g, r, Accent, AccentText, "!"); }
     }
@@ -673,9 +688,9 @@ public sealed class ToolkitFonts : IDisposable {
 public sealed class ToolkitText : Control {
     public TextFormatFlags Flags = ToolkitTheme.Wrap;
     public ToolkitText() {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
         SetStyle(ControlStyles.Selectable, false);
-        TabStop = false; AccessibleRole = AccessibleRole.StaticText; BackColor = Color.Transparent;
+        TabStop = false; AccessibleRole = AccessibleRole.StaticText;
     }
     public int Fit(int x, int y, int width) {
         int h = Text.Length > 0 ? ToolkitTheme.TextHeight(Text, Font, width) + 2 : 0;
@@ -684,6 +699,8 @@ public sealed class ToolkitText : Control {
     }
     protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
     protected override void OnPaint(PaintEventArgs e) {
+        // Opaque, in the parent's color: no transparency, so printing and captures match.
+        using (var b = new SolidBrush(Parent != null ? Parent.BackColor : ToolkitTheme.Surface)) e.Graphics.FillRectangle(b, ClientRectangle);
         TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, Flags);
     }
     public void Announce() { AccessibilityNotifyClients(AccessibleEvents.NameChange, -1); AccessibilityNotifyClients(AccessibleEvents.SystemAlert, -1); }
@@ -854,10 +871,10 @@ public sealed class ToolkitChip : Control {
         animation.Start();
     }
     protected override void Dispose(bool disposing) { if (disposing) animation.Dispose(); base.Dispose(disposing); }
-    public int Fit(int x, int y) {
+    public int Fit(int x, int y, int maxWidth) {
         if (Fonts == null) return 0;
         int h = Fonts.S(28);
-        SetBounds(x, y, h + ToolkitTheme.TextWidth(Text, Fonts.SmallBold) + Fonts.S(14), h);
+        SetBounds(x, y, Math.Min(maxWidth, h + ToolkitTheme.TextWidth(Text, Fonts.SmallBold) + Fonts.S(14)), h);
         return h;
     }
     protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
@@ -885,7 +902,7 @@ public sealed class ToolkitChip : Control {
             using (var brush = new SolidBrush(ToolkitTheme.Muted)) g.FillEllipse(brush, Rectangle.Inflate(box, -Fonts.S(4), -Fonts.S(4)));
         } else ToolkitTheme.Badge(g, box, tone, ToolkitTheme.AccentText, Glyph);
         var text = new Rectangle(box.Right + Fonts.S(8), 0, Width - box.Right - Fonts.S(8), Height);
-        TextRenderer.DrawText(g, Text, Fonts.SmallBold, text, ink, ToolkitTheme.Line);
+        TextRenderer.DrawText(g, Text, Fonts.SmallBold, text, ink, ToolkitTheme.Line | TextFormatFlags.EndEllipsis);
     }
 }
 // A soft rounded box behind grouped content (what happens / numbered steps).
@@ -1062,7 +1079,6 @@ public sealed class ToolkitSetupView : Panel {
         Controls.Add(Footer); Controls.Add(Content); Controls.Add(Band);
         Yes.TabIndex = 0; No.TabIndex = 1; Yes.Kind = "secondary"; No.Kind = "default";
         Yes.Visible = No.Visible = false;
-        Title.AccessibleRole = AccessibleRole.TitleBar;
         Clock.Flags = ToolkitTheme.Line | TextFormatFlags.Right;
         Caption.Flags = ToolkitTheme.Line;
         Progress.Minimum = 0; Progress.Maximum = 100; Progress.MarqueeAnimationSpeed = 30;
@@ -1212,7 +1228,7 @@ public sealed class ToolkitSetupView : Panel {
         Band.SetBounds(0, 0, width, (Compact ? Brand.Bottom : Rail.Bottom) + S(14));
         // Content.
         int y = S(22);
-        y += Chip.Fit(margin, y) + S(14);
+        y += Chip.Fit(margin, y, inner - ClockReserve(s)) + S(14);
         y += Title.Fit(margin, y, inner);
         if (IsOn(Description)) { y += S(6); y += Description.Fit(margin, y, inner); }
         if (s.Mode == "working") {
@@ -1253,6 +1269,10 @@ public sealed class ToolkitSetupView : Panel {
         Footer.SetBounds(0, Content.Bottom + 1, width, footerHeight);
         Size = new Size(width, Footer.Bottom);
     }
+    // Room kept beside the chip for "Asked 1:04 ago" / "Paused for 0:37".
+    int ClockReserve(ToolkitViewState s) {
+        return s.Mode == "question" || s.Mode == "waiting" ? ToolkitTheme.TextWidth("Asked 00:00:00 ago", Fonts.Small) + S(16) : 0;
+    }
     int RailLabelHeight(int inner) {
         int slot = (inner + S(20)) / ToolkitSetupText.Phases.Length, h = 0;
         foreach (string phase in ToolkitSetupText.Phases) h = Math.Max(h, ToolkitTheme.TextHeight(phase, Fonts.SmallBold, slot - S(4)));
@@ -1292,7 +1312,6 @@ public sealed class ToolkitSupportView : Panel {
         DetailsBox.Controls.Add(Details);
         Footer.Controls.Add(KeepWaiting); Footer.Controls.Add(CloseButton);
         StepLine.Flags = ToolkitTheme.Line; TryLabel.Flags = HelpLabel.Flags = DetailsLabel.Flags = ToolkitTheme.Line;
-        Headline.AccessibleRole = AccessibleRole.TitleBar;
         StepLine.Text = ToolkitSetupText.During(text.Step);
         Headline.Text = text.Headline; What.Text = text.What;
         TryLabel.Text = "WHAT TO TRY"; TryText.Text = text.Try; TryText.AccessibleName = "What to try: " + text.Try;
@@ -1344,6 +1363,7 @@ public sealed class ToolkitSupportView : Panel {
         TryBox.Fill = ToolkitTheme.ToneSoft(tone); TryBox.Line = ToolkitTheme.HighContrast ? ToolkitTheme.System(SystemColors.WindowText) : Color.Empty;
         DetailsBox.Fill = ToolkitTheme.Canvas; DetailsBox.Line = ToolkitTheme.Border;
         Footer.Fill = ToolkitTheme.Canvas; Footer.Radius = 0;
+        TryBox.BackColor = TryBox.Fill; DetailsBox.BackColor = DetailsBox.Fill; Footer.BackColor = Footer.Fill; // Children paint this color.
         Details.BackColor = ToolkitTheme.Canvas; Details.ForeColor = ToolkitTheme.Text;
         TryBox.Radius = DetailsBox.Radius = S(6);
         if (CopyState == "copied") { HelpLine.Text = ToolkitSetupText.CopiedLine; HelpLine.ForeColor = ToolkitTheme.Success; Copy.Text = "Copied \u2713"; }
@@ -1375,7 +1395,7 @@ public sealed class ToolkitSupportView : Panel {
         // The exact text that is copied, small and scrollable.
         DetailsLabel.SetBounds(margin, y, inner, fonts.Caps.Height + S(2)); y += fonts.Caps.Height + S(6);
         int lines = 6;
-        try { if (Screen.FromControl(this).WorkingArea.Height < y + fonts.Mono.Height * 6 + S(150)) lines = 3; } catch (Exception) { }
+        if (ToolkitTheme.WorkArea(this).Height < y + fonts.Mono.Height * 6 + S(150)) lines = 3;
         int detailsHeight = fonts.Mono.Height * lines + S(16);
         DetailsBox.SetBounds(margin, y, inner, detailsHeight);
         Details.SetBounds(S(8), S(8), inner - S(16), detailsHeight - S(16));
@@ -1463,7 +1483,7 @@ public sealed class ToolkitSetupForm : Form {
     // so measure the real client area and correct; never leave the work area.
     public void FitView() {
         View.Location = Point.Empty;
-        var area = Screen.FromControl(this).WorkingArea;
+        var area = ToolkitTheme.WorkArea(this);
         bool compact = View.Height + (Height - ClientSize.Height) > area.Height && !View.Compact;
         if (compact) { View.Compact = true; View.Restyle(); }
         if (ClientSize == View.Size) return;
