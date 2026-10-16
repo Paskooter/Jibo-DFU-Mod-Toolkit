@@ -1,6 +1,32 @@
 # Synthetic console/WSL lifecycle; never invokes Win32, WSL, installers or USB.
 param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'), [string]$Case = 'classic')
 $ErrorActionPreference = 'Stop'
+if ($Case -eq 'setup-feedback') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-feedback-' + [guid]::NewGuid().ToString('N'))
+    try {
+        Initialize-ToolkitLog -Root $tmp -Build ('b' * 40)
+        Set-ToolkitStep 'Downloading Ubuntu'
+        Update-ToolkitSetup 'Downloading Ubuntu (120 of 345 MB)' 'Receiving bytes' 34
+        if ($env:OS -eq 'Windows_NT') {
+            Start-ToolkitSetup
+            Update-ToolkitSetup 'Downloading Ubuntu (120 of 345 MB)' 'Receiving bytes' 34
+            Start-Sleep -Milliseconds 300
+            $flags = [Reflection.BindingFlags]'Static,NonPublic'
+            $label = [ToolkitSetupStatus].GetField('label', $flags).GetValue($null)
+            $progress = [ToolkitSetupStatus].GetField('progress', $flags).GetValue($null)
+            if ($label.Text -notmatch '120 of 345' -or $progress.Value -ne 34 -or $progress.Style -ne 'Continuous') { throw 'Real progress not painted' }
+            Update-ToolkitSetup 'Checking the toolkit' 'Please wait'
+            Start-Sleep -Milliseconds 300
+            if ($label.Text -ne 'Checking the toolkit' -or $progress.Style -ne 'Marquee') { throw 'Step transition not painted' }
+        }
+        Complete-ToolkitStep failed 124 'Synthetic idle timeout'
+        $text = Get-ToolkitSupportDetails 'Synthetic idle timeout'
+        if ($text -notmatch 'Downloading Ubuntu' -or $text -notmatch 'Last log lines') { throw 'Missing support context' }
+        Write-Output "PASS console: $Case"
+    } finally { Stop-ToolkitSetup; if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp } }
+    exit 0
+}
 if ($Case -eq 'native-status') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     if ($env:OS -eq 'Windows_NT') {
