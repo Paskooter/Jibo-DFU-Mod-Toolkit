@@ -108,7 +108,32 @@ function ConvertTo-ToolkitNativeLines([string]$Text) {
     }
     return @($lines)
 }
-function Invoke-ToolkitNative([string]$File, [string[]]$Arguments) {
+function Wait-ToolkitProcess($Process, [double]$TimeoutSeconds = 120) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $Process.WaitForExit(100)) {
+        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            Stop-ToolkitProcess $Process
+            return $false
+        }
+    }
+    return $true
+}
+function Stop-ToolkitProcess($Process) {
+    if (-not $Process -or $Process.HasExited) { return }
+    try {
+        # taskkill /T also closes the hidden PowerShell USB helper's children.
+        # Never wait without a bound, including on the kill command itself.
+        if ($env:OS -eq 'Windows_NT') {
+            $kill = Start-ToolkitProcess -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList "/PID $($Process.Id) /T /F"
+            try { if (-not $kill.WaitForExit(5000)) { $kill.Kill() } } finally { $kill.Dispose() }
+        } else { $Process.Kill() }
+        if (-not $Process.WaitForExit(5000)) { throw 'Timed-out process did not stop. Restart Windows before trying again.' }
+    } catch {
+        # Killing a child which exited during the timeout check is harmless.
+        if (-not $Process.HasExited) { throw }
+    }
+}
+function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$TimeoutSeconds = 120) {
     # Never let PowerShell's native invocation allocate a console in a GUI launch.
     # Read both pipes concurrently so a verbose helper cannot deadlock on stderr.
     $info = New-Object Diagnostics.ProcessStartInfo
@@ -138,7 +163,12 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments) {
         # the existing Native NUL removal handles its ASCII distribution metadata.
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        $completed = Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds
+        # Pipe readers must also be bounded: descendants can inherit open handles.
+        $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 2000)
+        if (-not $completed -or -not $pipesComplete) {
+            return [pscustomobject]@{Output=@(); ExitCode=124; TimedOut=$true; StartError="Command stalled after $TimeoutSeconds seconds. Close other WSL work, run wsl --shutdown, then reopen. Restart Windows if it happens again."}
+        }
         # Match the classic "& $FilePath @ArgumentList 2>&1" capture shape: one
         # array item per OUTPUT LINE, not the entire stdout/stderr text as a
         # single string. Every run.ps1/bootstrap.ps1 consumer (Get-Wsl2Distributions'
