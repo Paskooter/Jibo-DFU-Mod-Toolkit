@@ -81,12 +81,12 @@ def test_every_logged_setup_string_has_plain_window_wording(tmp_path):
 
 
 @pytest.mark.parametrize('message,wait,tone,headline', [
-    ('Downloading Ubuntu stalled: no bytes arrived for 120 seconds. Check your internet connection, then reopen the toolkit.', True, 'stall', 'The download stopped'),
+    ('Downloading Ubuntu stalled: no bytes arrived for 120 seconds. Check your internet connection, then reopen the toolkit.', True, 'stall', 'The download seems stuck'),
     ('Unpacking the toolkit stalled: no completion after 300 seconds. Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', True, 'stall', 'Setup is taking longer than expected'),
     ('Opening the toolkit stalled: its window did not appear within 120 seconds. Close other WSL work, run wsl --shutdown, then reopen.', True, 'stall', 'The toolkit window did not appear'),
     ('Step: Checking the toolkit\r\nWSL failed: exit 7\r\nTry: Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', False, 'error', 'Setup stopped'),
     ('You closed the question. This counts as No; no approval was given.\r\nStep: Finding Linux\r\nDistribution setup declined. No download or import was attempted.\r\nTry: Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', False, 'info', 'Setup stopped'),
-    ('Step: Installing Windows components\r\nWSL setup requested. Reboot if Windows requests it, then run this download again.\r\nTry: Check for an installer or Windows administrator approval prompt. Restart Windows if requested.', False, 'info', 'Restart Windows to finish setup'),
+    ('Step: Installing Windows components\r\nWSL setup requested. Reboot if Windows requests it, then run this download again.\r\nTry: Check for an installer or Windows administrator approval prompt. Restart Windows if requested.', False, 'info', 'Open the toolkit again to finish setup'),
     ('Step: Checking the Ubuntu image\r\nUbuntu image checksum mismatch. Nothing was registered.\r\nTry: Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', False, 'error', 'The download was damaged'),
 ])
 def test_failure_wording_states_what_happened_and_what_to_try(tmp_path, message, wait, tone, headline):
