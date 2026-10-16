@@ -492,16 +492,382 @@ public static class ToolkitSetupText {
     static string LowerFirst(string text) { return text.Length > 1 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text; }
 }
 '@
-function Initialize-ToolkitStatus {
-    if ('ToolkitSetupStatus' -as [type]) { return }
-    if ($env:OS -ne 'Windows_NT') { return }
-    $source = @'
+# The Windows setup window and support dialog. Compiled together with the model
+# above; previews (render-setup-previews.ps1) compile this exact source.
+$script:ToolkitSetupUiSource = @'
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Threading;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
+// ---- Theme: palette, DPI-scaled fonts, drawing helpers. Presentation only. ----
+// Same palette as the toolkit window (jibo_gui.py) so setup and the toolkit look like
+// one app. High contrast uses Windows' system colors throughout.
+public static class ToolkitTheme {
+    public static int ForcedDpi;          // Previews only: render at 144/192 DPI. 0 = real monitor DPI.
+    public static bool ForceHighContrast; // Previews only.
+    public static bool ForceReducedMotion;
+    public static bool HighContrast { get { return ForceHighContrast || SystemInformation.HighContrast; } }
+    static Color C(int rgb) { return Color.FromArgb(255, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
+    static Color Pick(int rgb, Color system) { return HighContrast ? system : C(rgb); }
+    public static Color Surface { get { return Pick(0xffffff, SystemColors.Window); } }
+    public static Color Canvas { get { return Pick(0xf3f5f8, SystemColors.Window); } }
+    public static Color Header { get { return Pick(0x141c26, SystemColors.Window); } }
+    public static Color HeaderText { get { return Pick(0xeef2f6, SystemColors.WindowText); } }
+    public static Color HeaderMuted { get { return Pick(0xa9b6c6, SystemColors.WindowText); } }
+    public static Color Text { get { return Pick(0x17202b, SystemColors.WindowText); } }
+    public static Color Muted { get { return Pick(0x566273, SystemColors.WindowText); } }
+    public static Color Border { get { return Pick(0xd7dde5, SystemColors.WindowText); } }
+    public static Color Trough { get { return Pick(0xdfe5ec, SystemColors.Window); } }
+    public static Color Disabled { get { return Pick(0xa0aab6, SystemColors.GrayText); } }
+    public static Color Accent { get { return Pick(0x2563c9, SystemColors.Highlight); } }
+    public static Color AccentPressed { get { return Pick(0x1c4fa6, SystemColors.Highlight); } }
+    public static Color AccentText { get { return Pick(0xffffff, SystemColors.HighlightText); } }
+    public static Color AccentSoft { get { return Pick(0xe8effc, SystemColors.Window); } }
+    public static Color AccentInk { get { return Pick(0x1d4ea3, SystemColors.WindowText); } }
+    public static Color Attention { get { return Pick(0xb45309, SystemColors.Highlight); } }
+    public static Color AttentionSoft { get { return Pick(0xfdf3e1, SystemColors.Window); } }
+    public static Color AttentionInk { get { return Pick(0x8a3f06, SystemColors.WindowText); } }
+    public static Color Danger { get { return Pick(0xc4302b, SystemColors.Highlight); } }
+    public static Color DangerSoft { get { return Pick(0xfcebea, SystemColors.Window); } }
+    public static Color DangerInk { get { return Pick(0xa2231f, SystemColors.WindowText); } }
+    public static Color Success { get { return Pick(0x17804f, SystemColors.Highlight); } }
+    public static Color Hover { get { return Pick(0xf0f4fa, SystemColors.Window); } }
+    public static Color Pressed { get { return Pick(0xe3e9f1, SystemColors.Window); } }
+    public static Color ToneColor(string tone) { return tone == "attention" || tone == "stall" ? Attention : tone == "error" ? Danger : tone == "done" ? Success : Accent; }
+    public static Color ToneSoft(string tone) { return tone == "attention" || tone == "stall" ? AttentionSoft : tone == "error" ? DangerSoft : tone == "neutral" ? Canvas : AccentSoft; }
+    public static Color ToneInk(string tone) { return tone == "attention" || tone == "stall" ? AttentionInk : tone == "error" ? DangerInk : tone == "neutral" ? Muted : AccentInk; }
+    public static int S(int logical, int dpi) { return (int)Math.Round(logical * dpi / 96.0); }
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint param, ref bool value, uint flags);
+    // Crisp text at 125-200%: windows created on this thread follow each monitor's DPI
+    // (Windows 10 1703+, else 1607+). Older Windows keeps its own bitmap scaling.
+    public static void UsePerMonitorDpi() {
+        try { if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) SetThreadDpiAwarenessContext(new IntPtr(-3)); }
+        catch (Exception) { }
+    }
+    public static int DpiOf(Control control) {
+        if (ForcedDpi > 0) return ForcedDpi;
+        try { if (control.IsHandleCreated) { uint dpi = GetDpiForWindow(control.Handle); if (dpi >= 72) return (int)dpi; } }
+        catch (Exception) { }
+        try { using (var g = control.CreateGraphics()) return Math.Max(96, (int)Math.Round(g.DpiX)); }
+        catch (Exception) { return 96; }
+    }
+    public static bool ReducedMotion {
+        get {
+            if (ForceReducedMotion) return true;
+            try { bool on = true; return SystemParametersInfo(0x1042, 0, ref on, 0) && !on; } // SPI_GETCLIENTAREAANIMATION
+            catch (Exception) { return false; }
+        }
+    }
+    public const TextFormatFlags Wrap = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding;
+    public const TextFormatFlags Line = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter;
+    public static int TextHeight(string text, Font font, int width) {
+        if (String.IsNullOrEmpty(text)) return 0;
+        return TextRenderer.MeasureText(text, font, new Size(Math.Max(1, width), int.MaxValue), Wrap).Height;
+    }
+    public static int TextWidth(string text, Font font) {
+        return String.IsNullOrEmpty(text) ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), Line).Width;
+    }
+    public static GraphicsPath Rounded(Rectangle r, int radius) {
+        var path = new GraphicsPath();
+        int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+    public static void Fill(Graphics g, Color color, Rectangle r, int radius) {
+        using (var path = Rounded(r, radius)) using (var brush = new SolidBrush(color)) g.FillPath(brush, path);
+    }
+    public static void Outline(Graphics g, Color color, Rectangle r, int radius, float width) {
+        using (var path = Rounded(r, radius)) using (var pen = new Pen(color, width)) g.DrawPath(pen, path);
+    }
+    public static void Check(Graphics g, Color color, Rectangle r, float width) {
+        using (var pen = new Pen(color, width)) {
+            pen.StartCap = pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
+            g.DrawLines(pen, new PointF[] {
+                new PointF(r.X + r.Width * 0.22f, r.Y + r.Height * 0.52f),
+                new PointF(r.X + r.Width * 0.42f, r.Y + r.Height * 0.72f),
+                new PointF(r.X + r.Width * 0.78f, r.Y + r.Height * 0.30f) });
+        }
+    }
+    // Round badge with a glyph: "!" attention, "i" information, "x" error, "?" question, "pause".
+    public static void Badge(Graphics g, Rectangle r, Color fill, Color ink, string glyph) {
+        using (var brush = new SolidBrush(fill)) g.FillEllipse(brush, r);
+        float w = Math.Max(1.5f, r.Width / 9f);
+        using (var pen = new Pen(ink, w)) using (var dot = new SolidBrush(ink)) {
+            pen.StartCap = pen.EndCap = LineCap.Round;
+            float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, u = r.Width / 10f;
+            if (glyph == "!") { g.DrawLine(pen, cx, cy - 2.6f * u, cx, cy + 0.6f * u); g.FillEllipse(dot, cx - 0.65f * u, cy + 1.7f * u, 1.3f * u, 1.3f * u); }
+            else if (glyph == "i") { g.DrawLine(pen, cx, cy - 0.6f * u, cx, cy + 2.6f * u); g.FillEllipse(dot, cx - 0.65f * u, cy - 2.9f * u, 1.3f * u, 1.3f * u); }
+            else if (glyph == "x") { g.DrawLine(pen, cx - 2f * u, cy - 2f * u, cx + 2f * u, cy + 2f * u); g.DrawLine(pen, cx + 2f * u, cy - 2f * u, cx - 2f * u, cy + 2f * u); }
+            else if (glyph == "pause") { g.DrawLine(pen, cx - 1.2f * u, cy - 2.2f * u, cx - 1.2f * u, cy + 2.2f * u); g.DrawLine(pen, cx + 1.2f * u, cy - 2.2f * u, cx + 1.2f * u, cy + 2.2f * u); }
+            else if (glyph == "check") Check(g, ink, Rectangle.Round(new RectangleF(r.X + r.Width * 0.12f, r.Y + r.Height * 0.12f, r.Width * 0.76f, r.Height * 0.76f)), w);
+            else if (glyph == "?") {
+                using (var font = new Font("Segoe UI Semibold", Math.Max(6f, r.Height * 0.62f), FontStyle.Regular, GraphicsUnit.Pixel))
+                    TextRenderer.DrawText(g, "?", font, r, ink, Line | TextFormatFlags.HorizontalCenter);
+            }
+        }
+    }
+    public static void Shield(Graphics g, Rectangle r) {
+        try { using (var icon = new Icon(SystemIcons.Shield, r.Size)) g.DrawIcon(icon, r); }
+        catch (Exception) { Badge(g, r, Accent, AccentText, "!"); }
+    }
+}
+// Fonts in pixels for one DPI, so text is the same physical size on every monitor.
+public sealed class ToolkitFonts : IDisposable {
+    public readonly int Dpi;
+    public readonly Font Brand, Title, Body, BodyBold, Small, SmallBold, Caps, Button, Mono;
+    static Font Make(string family, float points, int dpi) { return new Font(family, points * dpi / 72f, FontStyle.Regular, GraphicsUnit.Pixel); }
+    public ToolkitFonts(int dpi) {
+        Dpi = dpi;
+        Brand = Make("Segoe UI Semibold", 10.5f, dpi); Title = Make("Segoe UI Semibold", 15f, dpi);
+        Body = Make("Segoe UI", 10f, dpi); BodyBold = Make("Segoe UI Semibold", 10f, dpi);
+        Small = Make("Segoe UI", 9f, dpi); SmallBold = Make("Segoe UI Semibold", 9f, dpi);
+        Caps = Make("Segoe UI Semibold", 8f, dpi); Button = Make("Segoe UI Semibold", 10f, dpi);
+        Mono = Make("Consolas", 9f, dpi);
+    }
+    public int S(int logical) { return ToolkitTheme.S(logical, Dpi); }
+    public void Dispose() { foreach (var f in new Font[] { Brand, Title, Body, BodyBold, Small, SmallBold, Caps, Button, Mono }) f.Dispose(); }
+}
+// Static text measured and painted with the same flags, so wrapped text is never clipped.
+public sealed class ToolkitText : Control {
+    public TextFormatFlags Flags = ToolkitTheme.Wrap;
+    public ToolkitText() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        SetStyle(ControlStyles.Selectable, false);
+        TabStop = false; AccessibleRole = AccessibleRole.StaticText; BackColor = Color.Transparent;
+    }
+    public int Fit(int x, int y, int width) {
+        int h = Visible && Text.Length > 0 ? ToolkitTheme.TextHeight(Text, Font, width) + 2 : 0;
+        SetBounds(x, y, width, Math.Max(1, h));
+        return h;
+    }
+    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, Flags);
+    }
+    public void Announce() { AccessibilityNotifyClients(AccessibleEvents.NameChange, -1); AccessibilityNotifyClients(AccessibleEvents.SystemAlert, -1); }
+}
+// Flat button: "primary" (filled), "secondary" (outlined). Keeps Button semantics:
+// AcceptButton/CancelButton, PerformClick, Enabled, keyboard and screen readers.
+public sealed class ToolkitButton : Button {
+    public string Kind = "secondary";
+    public bool Shield;
+    bool hover, down;
+    public ToolkitButton() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        UseMnemonic = false; // A typed letter must never press a setup button.
+        FlatStyle = FlatStyle.Flat; Cursor = Cursors.Hand;
+    }
+    public int Measure(Font font, int dpi) {
+        int text = ToolkitTheme.TextWidth(Text, font);
+        return Math.Max(ToolkitTheme.S(112, dpi), text + ToolkitTheme.S(Shield ? 58 : 36, dpi));
+    }
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        int dpi = ToolkitTheme.DpiOf(this); int radius = ToolkitTheme.S(4, dpi);
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        bool primary = Kind == "primary";
+        bool hc = ToolkitTheme.HighContrast;
+        Color fill, ink, line;
+        if (!Enabled) { fill = primary && !hc ? ToolkitTheme.Disabled : ToolkitTheme.Surface; ink = primary && !hc ? ToolkitTheme.AccentText : ToolkitTheme.Disabled; line = ToolkitTheme.Disabled; }
+        else if (primary) { fill = down ? ToolkitTheme.AccentPressed : ToolkitTheme.Accent; ink = ToolkitTheme.AccentText; line = fill; }
+        else { fill = down ? ToolkitTheme.Pressed : hover ? ToolkitTheme.Hover : ToolkitTheme.Surface; ink = ToolkitTheme.Text; line = hover && !hc ? ToolkitTheme.Muted : ToolkitTheme.Border; }
+        if (hc && Enabled && (hover || Focused)) { fill = SystemColors.Highlight; ink = SystemColors.HighlightText; line = SystemColors.HighlightText; }
+        ToolkitTheme.Fill(g, fill, r, radius);
+        float width = IsDefault && Enabled && !primary ? ToolkitTheme.S(2, dpi) : Math.Max(1, ToolkitTheme.S(1, dpi));
+        Color edge = IsDefault && Enabled && !primary ? ToolkitTheme.Accent : line;
+        var inset = Rectangle.Inflate(r, -(int)(width / 2), -(int)(width / 2));
+        ToolkitTheme.Outline(g, edge, inset, radius, width);
+        var content = new Rectangle(0, 0, Width, Height);
+        if (Shield) {
+            int icon = ToolkitTheme.S(16, dpi);
+            int textWidth = ToolkitTheme.TextWidth(Text, Font);
+            int start = (Width - icon - ToolkitTheme.S(8, dpi) - textWidth) / 2;
+            ToolkitTheme.Shield(g, new Rectangle(start, (Height - icon) / 2, icon, icon));
+            content = new Rectangle(start + icon + ToolkitTheme.S(8, dpi), 0, textWidth + 2, Height);
+            TextRenderer.DrawText(g, Text, Font, content, ink, ToolkitTheme.Line);
+        } else TextRenderer.DrawText(g, Text, Font, content, ink, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
+        if (Focused && ShowFocusCues) {
+            var focus = Rectangle.Inflate(r, -ToolkitTheme.S(3, dpi), -ToolkitTheme.S(3, dpi));
+            using (var pen = new Pen(primary ? ToolkitTheme.AccentText : ToolkitTheme.Text, 1)) { pen.DashStyle = DashStyle.Dot; g.DrawRectangle(pen, focus); }
+        }
+    }
+}
+// Accent bar on a rounded track. Marquee animates; Windows' reduced-motion setting
+// draws a calm static stripe instead. Still a real ProgressBar for screen readers.
+public sealed class ToolkitProgress : ProgressBar {
+    readonly System.Windows.Forms.Timer animation = new System.Windows.Forms.Timer();
+    readonly System.Diagnostics.Stopwatch since = System.Diagnostics.Stopwatch.StartNew();
+    public double Frame = -1; // Previews pin the marquee position (0..1).
+    public ToolkitProgress() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        animation.Interval = 33;
+        animation.Tick += delegate { if (Style == ProgressBarStyle.Marquee && Visible) Invalidate(); };
+        animation.Start();
+    }
+    protected override void Dispose(bool disposing) { if (disposing) animation.Dispose(); base.Dispose(disposing); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        var track = new Rectangle(0, 0, Width - 1, Height - 1);
+        int radius = Height / 2;
+        ToolkitTheme.Fill(g, ToolkitTheme.Trough, track, radius);
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, track, radius, 1);
+        Rectangle bar;
+        if (Style == ProgressBarStyle.Marquee) {
+            int segment = Math.Max(Height * 4, Width / 4);
+            if (ToolkitTheme.ReducedMotion && Frame < 0) {
+                using (var hatch = new HatchBrush(HatchStyle.WideUpwardDiagonal, ToolkitTheme.Accent, ToolkitTheme.Trough))
+                using (var path = ToolkitTheme.Rounded(track, radius)) g.FillPath(hatch, path);
+                return;
+            }
+            double t = Frame >= 0 ? Frame : (since.ElapsedMilliseconds % 1600) / 1600.0;
+            double eased = 0.5 - Math.Cos(Math.PI * t) / 2;
+            int x = (int)(-segment + eased * (Width + segment));
+            bar = new Rectangle(x, 0, segment, Height - 1);
+            using (var clip = ToolkitTheme.Rounded(track, radius)) {
+                g.SetClip(clip);
+                ToolkitTheme.Fill(g, ToolkitTheme.Accent, bar, radius);
+                g.ResetClip();
+            }
+            return;
+        }
+        int span = Maximum - Minimum;
+        if (span <= 0 || Value <= Minimum) return;
+        int w = (int)Math.Round((double)(Width - 1) * (Value - Minimum) / span);
+        bar = new Rectangle(0, 0, Math.Max(Height, w), Height - 1);
+        ToolkitTheme.Fill(g, ToolkitTheme.Accent, bar, radius);
+    }
+}
+// The five setup phases: done (check), now (number, filled), later (outlined number).
+public sealed class ToolkitPhaseRail : Control {
+    int current = 0;
+    bool attention;
+    public ToolkitFonts Fonts;
+    public ToolkitPhaseRail() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        SetStyle(ControlStyles.Selectable, false); TabStop = false;
+        AccessibleRole = AccessibleRole.StaticText;
+        SetPhase(0, false);
+    }
+    public int Current { get { return current; } }
+    public void SetPhase(int phase, bool needsYou) {
+        phase = Math.Max(0, Math.Min(ToolkitSetupText.Phases.Length - 1, phase));
+        if (phase == current && needsYou == attention && AccessibleName != null) return;
+        current = phase; attention = needsYou;
+        AccessibleName = "Setup step " + (current + 1) + " of " + ToolkitSetupText.Phases.Length + ": " + ToolkitSetupText.Phases[current];
+        Invalidate();
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (Fonts == null) return;
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var b = new SolidBrush(BackColor)) g.FillRectangle(b, ClientRectangle);
+        int n = ToolkitSetupText.Phases.Length;
+        int d = Fonts.S(22), slot = Width / n, line = Math.Max(1, Fonts.S(2));
+        for (int i = 0; i < n; i++) {
+            int cx = slot * i + slot / 2;
+            var circle = new Rectangle(cx - d / 2, 0, d, d);
+            if (i < n - 1) {
+                using (var pen = new Pen(i < current ? ToolkitTheme.Accent : ToolkitTheme.Border, line))
+                    g.DrawLine(pen, cx + d / 2 + Fonts.S(6), d / 2, cx + slot - d / 2 - Fonts.S(6), d / 2);
+            }
+            Color tone = attention ? ToolkitTheme.Attention : ToolkitTheme.Accent;
+            if (i < current) ToolkitTheme.Badge(g, circle, ToolkitTheme.Accent, ToolkitTheme.AccentText, "check");
+            else if (i == current) {
+                using (var brush = new SolidBrush(tone)) g.FillEllipse(brush, circle);
+                TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.AccentText, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
+            } else {
+                using (var brush = new SolidBrush(ToolkitTheme.Surface)) g.FillEllipse(brush, circle);
+                using (var pen = new Pen(ToolkitTheme.Border, line)) g.DrawEllipse(pen, Rectangle.Inflate(circle, -line / 2 - 1, -line / 2 - 1));
+                TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.Muted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
+            }
+            var label = new Rectangle(slot * i, d + Fonts.S(6), slot, Height - d - Fonts.S(6));
+            TextRenderer.DrawText(g, ToolkitSetupText.Phases[i], i == current ? Fonts.SmallBold : Fonts.Small, label,
+                i <= current ? ToolkitTheme.Text : ToolkitTheme.Muted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
+        }
+    }
+}
+// Status pill: what the window needs from the person right now. A spinner while
+// working (calm static dot with reduced motion), a glyph while waiting for them.
+public sealed class ToolkitChip : Control {
+    public string Tone = "working", Glyph = "";
+    public ToolkitFonts Fonts;
+    public double Frame = -1;
+    readonly System.Windows.Forms.Timer animation = new System.Windows.Forms.Timer();
+    readonly System.Diagnostics.Stopwatch since = System.Diagnostics.Stopwatch.StartNew();
+    public ToolkitChip() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.StaticText;
+        animation.Interval = 50;
+        animation.Tick += delegate { if (Tone == "working" && Visible) Invalidate(); };
+        animation.Start();
+    }
+    protected override void Dispose(bool disposing) { if (disposing) animation.Dispose(); base.Dispose(disposing); }
+    public int Fit(int x, int y) {
+        if (Fonts == null) return 0;
+        int h = Fonts.S(28);
+        SetBounds(x, y, h + ToolkitTheme.TextWidth(Text, Fonts.SmallBold) + Fonts.S(14), h);
+        return h;
+    }
+    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+    public void Announce() { AccessibilityNotifyClients(AccessibleEvents.NameChange, -1); AccessibilityNotifyClients(AccessibleEvents.SystemAlert, -1); }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (Fonts == null) return;
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        Color tone = ToolkitTheme.ToneColor(Tone), soft = ToolkitTheme.ToneSoft(Tone), ink = ToolkitTheme.ToneInk(Tone);
+        ToolkitTheme.Fill(g, soft, r, Height / 2);
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, r, Height / 2, 1);
+        int icon = Fonts.S(16), pad = (Height - icon) / 2;
+        var box = new Rectangle(pad + Fonts.S(2), pad, icon, icon);
+        if (Tone == "working") {
+            float w = Math.Max(2f, Fonts.S(2));
+            var ring = Rectangle.Inflate(box, -(int)w / 2 - 1, -(int)w / 2 - 1);
+            using (var pen = new Pen(Color.FromArgb(ToolkitTheme.HighContrast ? 255 : 60, tone), w)) g.DrawEllipse(pen, ring);
+            if (!ToolkitTheme.ReducedMotion || Frame >= 0) {
+                double t = Frame >= 0 ? Frame : (since.ElapsedMilliseconds % 1000) / 1000.0;
+                using (var pen = new Pen(tone, w)) { pen.StartCap = pen.EndCap = LineCap.Round; g.DrawArc(pen, ring, (float)(t * 360 - 90), 100); }
+            }
+        } else if (Glyph == "neutral") {
+            using (var brush = new SolidBrush(ToolkitTheme.Muted)) g.FillEllipse(brush, Rectangle.Inflate(box, -Fonts.S(4), -Fonts.S(4)));
+        } else ToolkitTheme.Badge(g, box, tone, ToolkitTheme.AccentText, Glyph);
+        var text = new Rectangle(box.Right + Fonts.S(8), 0, Width - box.Right - Fonts.S(8), Height);
+        TextRenderer.DrawText(g, Text, Fonts.SmallBold, text, ink, ToolkitTheme.Line);
+    }
+}
+// A soft rounded box behind grouped content (what happens / numbered steps).
+public sealed class ToolkitPanel : Panel {
+    public Color Fill = Color.Empty, Line = Color.Empty;
+    public int Radius = 6;
+    public ToolkitPanel() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        ToolkitTheme.Fill(g, Fill, r, Radius);
+        if (!Line.IsEmpty) ToolkitTheme.Outline(g, Line, r, Radius, 1);
+    }
+}
 public class ToolkitSetupStatus {
     static Form window;
     static Thread thread;
@@ -679,7 +1045,10 @@ public class ToolkitSetupStatus {
     }
 }
 '@
-    Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($source + $script:ToolkitQuestionModelSource)
+function Initialize-ToolkitStatus {
+    if ('ToolkitSetupStatus' -as [type]) { return }
+    if ($env:OS -ne 'Windows_NT') { return }
+    Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($script:ToolkitSetupUiSource + $script:ToolkitQuestionModelSource)
 }
 function Start-ToolkitSetup {
     Initialize-ToolkitStatus
