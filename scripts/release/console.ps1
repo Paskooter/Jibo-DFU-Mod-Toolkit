@@ -284,7 +284,7 @@ public sealed class ToolkitFailureText {
 public static class ToolkitSetupText {
     public const string Product = "Jibo DFU Toolkit";
     public const string Exe = "Jibo-DFU-Windows-x64.exe";
-    public static readonly string[] Phases = { "Check Windows", "Set up Linux", "Prepare the toolkit", "Connect USB", "Open the toolkit" };
+    public static readonly string[] Phases = { "Check Windows", "Set up Linux", "Prepare toolkit", "Connect USB", "Open toolkit" };
     public const string WorkingStatus = "Working \u2013 nothing for you to do right now";
     public const string QuestionStatus = "Your answer is needed";
     public const string ReminderStatus = "Still waiting for your answer";
@@ -645,7 +645,7 @@ public sealed class ToolkitText : Control {
         TabStop = false; AccessibleRole = AccessibleRole.StaticText; BackColor = Color.Transparent;
     }
     public int Fit(int x, int y, int width) {
-        int h = Visible && Text.Length > 0 ? ToolkitTheme.TextHeight(Text, Font, width) + 2 : 0;
+        int h = Text.Length > 0 ? ToolkitTheme.TextHeight(Text, Font, width) + 2 : 0;
         SetBounds(x, y, width, Math.Max(1, h));
         return h;
     }
@@ -655,7 +655,8 @@ public sealed class ToolkitText : Control {
     }
     public void Announce() { AccessibilityNotifyClients(AccessibleEvents.NameChange, -1); AccessibilityNotifyClients(AccessibleEvents.SystemAlert, -1); }
 }
-// Flat button: "primary" (filled), "secondary" (outlined). Keeps Button semantics:
+// Flat button: "primary" (filled), "secondary" (outlined), "default" (the safe choice
+// that Enter presses: soft accent fill, 2 px accent edge). Keeps Button semantics:
 // AcceptButton/CancelButton, PerformClick, Enabled, keyboard and screen readers.
 public sealed class ToolkitButton : Button {
     public string Kind = "secondary";
@@ -682,16 +683,17 @@ public sealed class ToolkitButton : Button {
         using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
         int dpi = ToolkitTheme.DpiOf(this); int radius = ToolkitTheme.S(4, dpi);
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
-        bool primary = Kind == "primary";
+        bool primary = Kind == "primary", safe = Kind == "default" || (IsDefault && !primary);
         bool hc = ToolkitTheme.HighContrast;
         Color fill, ink, line;
         if (!Enabled) { fill = primary && !hc ? ToolkitTheme.Disabled : ToolkitTheme.Surface; ink = primary && !hc ? ToolkitTheme.AccentText : ToolkitTheme.Disabled; line = ToolkitTheme.Disabled; }
         else if (primary) { fill = down ? ToolkitTheme.AccentPressed : ToolkitTheme.Accent; ink = ToolkitTheme.AccentText; line = fill; }
+        else if (safe) { fill = down ? ToolkitTheme.Pressed : hover ? ToolkitTheme.Hover : ToolkitTheme.AccentSoft; ink = ToolkitTheme.AccentInk; line = ToolkitTheme.Accent; }
         else { fill = down ? ToolkitTheme.Pressed : hover ? ToolkitTheme.Hover : ToolkitTheme.Surface; ink = ToolkitTheme.Text; line = hover && !hc ? ToolkitTheme.Muted : ToolkitTheme.Border; }
         if (hc && Enabled && (hover || Focused)) { fill = SystemColors.Highlight; ink = SystemColors.HighlightText; line = SystemColors.HighlightText; }
         ToolkitTheme.Fill(g, fill, r, radius);
-        float width = IsDefault && Enabled && !primary ? ToolkitTheme.S(2, dpi) : Math.Max(1, ToolkitTheme.S(1, dpi));
-        Color edge = IsDefault && Enabled && !primary ? ToolkitTheme.Accent : line;
+        float width = safe && Enabled ? ToolkitTheme.S(2, dpi) : Math.Max(1, ToolkitTheme.S(1, dpi));
+        Color edge = line;
         var inset = Rectangle.Inflate(r, -(int)(width / 2), -(int)(width / 2));
         ToolkitTheme.Outline(g, edge, inset, radius, width);
         var content = new Rectangle(0, 0, Width, Height);
@@ -842,7 +844,7 @@ public sealed class ToolkitChip : Control {
         if (Tone == "working") {
             float w = Math.Max(2f, Fonts.S(2));
             var ring = Rectangle.Inflate(box, -(int)w / 2 - 1, -(int)w / 2 - 1);
-            using (var pen = new Pen(Color.FromArgb(ToolkitTheme.HighContrast ? 255 : 60, tone), w)) g.DrawEllipse(pen, ring);
+            using (var pen = new Pen(Color.FromArgb(ToolkitTheme.HighContrast ? 255 : 90, tone), w)) g.DrawEllipse(pen, ring);
             if (!ToolkitTheme.ReducedMotion || Frame >= 0) {
                 double t = Frame >= 0 ? Frame : (since.ElapsedMilliseconds % 1000) / 1000.0;
                 using (var pen = new Pen(tone, w)) { pen.StartCap = pen.EndCap = LineCap.Round; g.DrawArc(pen, ring, (float)(t * 360 - 90), 100); }
@@ -866,6 +868,354 @@ public sealed class ToolkitPanel : Panel {
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         ToolkitTheme.Fill(g, Fill, r, Radius);
         if (!Line.IsEmpty) ToolkitTheme.Outline(g, Line, r, Radius, 1);
+    }
+}
+// Label/value pairs in a soft box: "What happens", "How long".
+public sealed class ToolkitFacts : Control {
+    public ToolkitFonts Fonts;
+    public string[] Labels = new string[0], Values = new string[0];
+    public ToolkitFacts() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.StaticText;
+    }
+    public void Set(string[] labels, string[] values) {
+        Labels = labels; Values = values;
+        var parts = new System.Collections.Generic.List<string>();
+        for (int i = 0; i < labels.Length; i++) if (!String.IsNullOrEmpty(values[i])) parts.Add(labels[i] + ": " + values[i]);
+        AccessibleName = String.Join(" ", parts.ToArray());
+        Invalidate();
+    }
+    int Pad { get { return Fonts.S(14); } }
+    public int Measure(int width) {
+        int h = Pad, inner = width - 2 * Pad;
+        for (int i = 0; i < Labels.Length; i++) {
+            if (String.IsNullOrEmpty(Values[i])) continue;
+            if (h > Pad) h += Fonts.S(10);
+            h += Fonts.Caps.Height + Fonts.S(2) + ToolkitTheme.TextHeight(Values[i], Fonts.Body, inner);
+        }
+        return h + Pad;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (Fonts == null) return;
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        var box = new Rectangle(0, 0, Width - 1, Height - 1);
+        ToolkitTheme.Fill(g, ToolkitTheme.Canvas, box, Fonts.S(6));
+        ToolkitTheme.Outline(g, ToolkitTheme.Border, box, Fonts.S(6), 1);
+        int y = Pad, inner = Width - 2 * Pad;
+        for (int i = 0; i < Labels.Length; i++) {
+            if (String.IsNullOrEmpty(Values[i])) continue;
+            if (y > Pad) y += Fonts.S(10);
+            TextRenderer.DrawText(g, Labels[i].ToUpperInvariant(), Fonts.Caps, new Rectangle(Pad, y, inner, Fonts.Caps.Height), ToolkitTheme.Muted, ToolkitTheme.Line);
+            y += Fonts.Caps.Height + Fonts.S(2);
+            int h = ToolkitTheme.TextHeight(Values[i], Fonts.Body, inner);
+            TextRenderer.DrawText(g, Values[i], Fonts.Body, new Rectangle(Pad, y, inner, h + 2), ToolkitTheme.Text, ToolkitTheme.Wrap);
+            y += h;
+        }
+    }
+}
+// Numbered "do this" steps for a person, in the attention color.
+public sealed class ToolkitSteps : Control {
+    public ToolkitFonts Fonts;
+    public string[] Items = new string[0];
+    public ToolkitSteps() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.StaticText;
+    }
+    public void Set(string[] items) {
+        Items = items ?? new string[0];
+        var parts = new string[Items.Length];
+        for (int i = 0; i < Items.Length; i++) parts[i] = (Items.Length > 1 ? (i + 1) + ". " : "") + Items[i];
+        AccessibleName = String.Join(" ", parts);
+        Invalidate();
+    }
+    int Pad { get { return Fonts.S(14); } }
+    int Number { get { return Fonts.S(22); } }
+    int TextLeft { get { return Items.Length > 1 ? Pad + Number + Fonts.S(12) : Pad; } }
+    public int Measure(int width) {
+        int h = Pad, inner = width - TextLeft - Pad;
+        for (int i = 0; i < Items.Length; i++) {
+            if (i > 0) h += Fonts.S(8);
+            h += Math.Max(Items.Length > 1 ? Number : 0, ToolkitTheme.TextHeight(Items[i], Fonts.Body, inner));
+        }
+        return h + Pad;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (Fonts == null) return;
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        var box = new Rectangle(0, 0, Width - 1, Height - 1);
+        ToolkitTheme.Fill(g, ToolkitTheme.AttentionSoft, box, Fonts.S(6));
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, box, Fonts.S(6), 1);
+        int y = Pad, left = TextLeft, inner = Width - left - Pad;
+        for (int i = 0; i < Items.Length; i++) {
+            if (i > 0) y += Fonts.S(8);
+            int h = ToolkitTheme.TextHeight(Items[i], Fonts.Body, inner);
+            int row = Math.Max(Items.Length > 1 ? Number : 0, h);
+            if (Items.Length > 1) {
+                var circle = new Rectangle(Pad, y + Math.Max(0, (Math.Min(row, Fonts.Body.Height + Fonts.S(4)) - Number) / 2), Number, Number);
+                using (var brush = new SolidBrush(ToolkitTheme.Attention)) g.FillEllipse(brush, circle);
+                TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.AccentText, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
+            }
+            int ty = y + (row > h ? (Math.Min(row, Number) - Math.Min(h, Fonts.Body.Height + 2)) / 2 : 0);
+            TextRenderer.DrawText(g, Items[i], Fonts.Body, new Rectangle(left, ty, inner, h + 2), ToolkitTheme.Text, ToolkitTheme.Wrap);
+            y += row;
+        }
+    }
+}
+// "Where to look": the taskbar shield icon next to a short hint.
+public sealed class ToolkitHint : Control {
+    public ToolkitFonts Fonts;
+    public ToolkitHint() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+        SetStyle(ControlStyles.Selectable, false); TabStop = false; AccessibleRole = AccessibleRole.StaticText;
+    }
+    int Icon { get { return Fonts.S(20); } }
+    public int Measure(int width) {
+        if (String.IsNullOrEmpty(Text)) return 0;
+        return Math.Max(Icon, ToolkitTheme.TextHeight(Text, Fonts.Body, width - Icon - Fonts.S(10)));
+    }
+    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AccessibleName = Text; Invalidate(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (Fonts == null) return;
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        Color parent = Parent != null ? Parent.BackColor : ToolkitTheme.Surface;
+        using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
+        int h = ToolkitTheme.TextHeight(Text, Fonts.Body, Width - Icon - Fonts.S(10));
+        int iconTop = Math.Max(0, (Math.Min(h, Fonts.Body.Height + 2) - Icon) / 2);
+        ToolkitTheme.Shield(g, new Rectangle(0, iconTop, Icon, Icon));
+        TextRenderer.DrawText(g, Text, Fonts.Body, new Rectangle(Icon + Fonts.S(10), 0, Width - Icon - Fonts.S(10), h + 2), ToolkitTheme.Text, ToolkitTheme.Wrap);
+    }
+}
+// Everything the setup window shows comes from this snapshot. The controller fills it
+// from the same strings it logs; previews fill it with sample data.
+public sealed class ToolkitViewState {
+    public string Mode = "working";   // working | question | answered | waiting | support
+    public string Step = "", Hint = "", Prompt = "", QuestionId = "", Answer = "", Wait = "";
+    public int Percent = -1;
+    public bool KeysEnabled, Reminder;
+    public double Seconds;            // this step / waiting for you / question open
+    public ToolkitFailureText Support;
+    public ToolkitViewState Copy() { return (ToolkitViewState)MemberwiseClone(); }
+}
+public sealed class ToolkitSetupView : Panel {
+    public ToolkitFonts Fonts;
+    public readonly Panel Band = new Panel(), Content = new Panel(), Footer = new Panel();
+    public readonly ToolkitPhaseRail Rail = new ToolkitPhaseRail();
+    public readonly ToolkitChip Chip = new ToolkitChip();
+    public readonly ToolkitText Title = new ToolkitText(), Description = new ToolkitText(), Caption = new ToolkitText(),
+        Clock = new ToolkitText(), Note = new ToolkitText(), Footnote = new ToolkitText(), FooterText = new ToolkitText();
+    public readonly ToolkitProgress Progress = new ToolkitProgress();
+    public readonly ToolkitFacts Facts = new ToolkitFacts();
+    public readonly ToolkitSteps Steps = new ToolkitSteps();
+    public readonly ToolkitHint Where = new ToolkitHint();
+    public readonly ToolkitButton Yes = new ToolkitButton(), No = new ToolkitButton();
+    ToolkitViewState shown;
+    // Intended visibility: Control.Visible reads false until the window is shown.
+    readonly System.Collections.Generic.List<Control> on = new System.Collections.Generic.List<Control>();
+    void Vis(Control c, bool visible) { on.Remove(c); if (visible) on.Add(c); c.Visible = visible; }
+    public bool IsOn(Control c) { return on.Contains(c); }
+    public const int LogicalWidth = 560;
+    static readonly System.Text.RegularExpressions.Regex DownloadCaption = new System.Text.RegularExpressions.Regex("^Downloading Ubuntu \\((.+) of (.+) MB\\)$");
+    public ToolkitSetupView() {
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        Band.Controls.Add(Rail);
+        foreach (Control c in new Control[] { Chip, Title, Description, Progress, Caption, Clock, Facts, Steps, Where, Note, Footnote }) Content.Controls.Add(c);
+        Footer.Controls.Add(FooterText); Footer.Controls.Add(Yes); Footer.Controls.Add(No);
+        Controls.Add(Footer); Controls.Add(Content); Controls.Add(Band);
+        Yes.TabIndex = 0; No.TabIndex = 1; Yes.Kind = "secondary"; No.Kind = "default";
+        Yes.Visible = No.Visible = false;
+        Title.AccessibleRole = AccessibleRole.TitleBar;
+        Clock.Flags = ToolkitTheme.Line | TextFormatFlags.Right;
+        Caption.Flags = ToolkitTheme.Line;
+        Progress.Minimum = 0; Progress.Maximum = 100; Progress.MarqueeAnimationSpeed = 30;
+        ApplyDpi(96);
+    }
+    public void ApplyDpi(int dpi) {
+        if (Fonts != null && Fonts.Dpi == dpi) return;
+        var old = Fonts;
+        Fonts = new ToolkitFonts(dpi);
+        Rail.Fonts = Chip.Fonts = Facts.Fonts = Steps.Fonts = Where.Fonts = Fonts;
+        Font = Fonts.Body;
+        Title.Font = Fonts.Title; Description.Font = Fonts.Body; Caption.Font = Fonts.SmallBold; Clock.Font = Fonts.Small;
+        Note.Font = Fonts.Small; Footnote.Font = Fonts.Small; FooterText.Font = Fonts.Small;
+        Yes.Font = No.Font = Fonts.Button; Where.Font = Fonts.Body;
+        if (shown != null) Show(shown);
+        if (old != null) old.Dispose();
+    }
+    int S(int logical) { return Fonts.S(logical); }
+    public static string StepKey(string step) {
+        if (step == "Downloading Ubuntu (complete)" || DownloadCaption.IsMatch(step ?? "")) return "Downloading Ubuntu";
+        return step ?? "";
+    }
+    string ProgressText(ToolkitViewState s) {
+        if (s.Step == "Downloading Ubuntu (complete)") return "Download complete";
+        var m = DownloadCaption.Match(s.Step ?? "");
+        if (m.Success) return m.Groups[1].Value + " MB of " + System.Text.RegularExpressions.Regex.Replace(m.Groups[2].Value, "[.,]0$", "") + " MB  \u00b7  " + Math.Max(0, Math.Min(100, s.Percent)) + "%";
+        return s.Percent >= 0 ? Math.Max(0, Math.Min(100, s.Percent)) + "%" : "";
+    }
+    public ToolkitStepText StepText(ToolkitViewState s) {
+        var known = ToolkitSetupText.Step(StepKey(s.Step), s.QuestionId);
+        if (known != null) return known;
+        var other = new ToolkitStepText(); other.Title = s.Step; other.Description = s.Hint; other.Phase = Rail.Current; return other;
+    }
+    static int QuestionPhase(string id, int fallback) { return id == "wsl" ? 0 : id == "linux" ? 1 : id == "usb" ? 2 : fallback; }
+    // Text that changes every tick (clock, reminder) without a full relayout.
+    public void Tick(ToolkitViewState s) {
+        if (shown == null || s.Mode != shown.Mode) { Show(s); return; }
+        string clock = ClockText(s);
+        if (Clock.Text != clock) Clock.Text = clock;
+        if (s.Mode == "question" && (s.Reminder != shown.Reminder || s.KeysEnabled != shown.KeysEnabled)) { Show(s); return; }
+        shown.Seconds = s.Seconds;
+    }
+    string ClockText(ToolkitViewState s) {
+        string t = ToolkitSetupText.Clock(s.Seconds);
+        if (s.Mode == "working") return "Running for " + t;
+        if (s.Mode == "waiting") return "Paused for " + t;
+        if (s.Mode == "question") return "Asked " + t + " ago";
+        return "";
+    }
+    public void Show(ToolkitViewState s) {
+        shown = s.Copy();
+        SuspendLayout();
+        BackColor = ToolkitTheme.Surface;
+        Band.BackColor = Footer.BackColor = ToolkitTheme.Canvas; Content.BackColor = ToolkitTheme.Surface;
+        Rail.BackColor = ToolkitTheme.Canvas;
+        Title.ForeColor = ToolkitTheme.Text; Description.ForeColor = s.Mode == "question" ? ToolkitTheme.Text : ToolkitTheme.Muted;
+        Caption.ForeColor = ToolkitTheme.Text; Clock.ForeColor = ToolkitTheme.Muted; Note.ForeColor = ToolkitTheme.Muted;
+        Footnote.ForeColor = ToolkitTheme.Muted; FooterText.ForeColor = ToolkitTheme.Muted;
+        foreach (Control c in new Control[] { Progress, Caption, Clock, Facts, Steps, Where, Note, Footnote, Yes, No, FooterText }) Vis(c, false);
+        var step = StepText(s);
+        int phase = step.Phase;
+        string chip, tone, glyph = "", title, description, footer = "";
+        if (s.Mode == "question") {
+            var q = ToolkitSetupText.Question(s.Prompt);
+            phase = QuestionPhase(q.Id, phase);
+            tone = "attention"; glyph = "?";
+            chip = s.Reminder ? ToolkitSetupText.ReminderStatus : ToolkitSetupText.QuestionStatus;
+            title = q.Title; description = q.Body ?? "";
+            Facts.Set(new string[] { "What happens", "How long" }, new string[] { q.WhatHappens, q.HowLong });
+            Vis(Facts, !String.IsNullOrEmpty(q.WhatHappens) || !String.IsNullOrEmpty(q.HowLong));
+            Footnote.Text = q.Footnote; Vis(Footnote, true);
+            Yes.Text = q.YesLabel; No.Text = q.NoLabel;
+            Yes.AccessibleName = q.YesLabel; No.AccessibleName = q.NoLabel;
+            Yes.AccessibleDescription = q.YesHelp;
+            No.AccessibleDescription = q.Title + " " + description + " " + q.Footnote;
+            Yes.Shield = q.Id == "wsl" || q.Id == "usb";
+            Yes.Enabled = No.Enabled = s.KeysEnabled;
+            Vis(Yes, true); Vis(No, true);
+            Vis(Clock, s.Reminder);
+        } else if (s.Mode == "answered") {
+            var q = ToolkitSetupText.Question(s.Prompt);
+            phase = QuestionPhase(q.Id, phase);
+            if (s.Answer == "yes") {
+                tone = "working"; chip = "Continuing setup";
+                title = "Thanks \u2013 continuing setup"; description = "You chose \u201c" + q.YesLabel + "\u201d.";
+                footer = ToolkitSetupText.ClosesItself;
+            } else {
+                tone = "neutral"; glyph = "neutral"; chip = "Setup is stopping";
+                title = s.Answer == "closed" ? "You closed the question" : "You chose \u201c" + q.NoLabel + "\u201d";
+                description = (s.Answer == "closed" ? "That counts as \u201c" + q.NoLabel + "\u201d. " : "") + (q.Id == "" ? "Setup stops here." : "Setup stops here. Nothing was downloaded or installed.");
+            }
+        } else if (s.Mode == "waiting") {
+            var w = ToolkitSetupText.Wait(s.Wait);
+            tone = "attention"; glyph = "pause"; chip = ToolkitSetupText.WaitStatus;
+            title = w.Title; description = "";
+            Steps.Set(w.Steps); Vis(Steps, w.Steps.Length > 0);
+            Where.Text = w.Hint; Vis(Where, !String.IsNullOrEmpty(w.Hint));
+            footer = ToolkitSetupText.WaitPaused;
+            Vis(Clock, true);
+            if (w.Kind == "admin" && step.Phase == 0) phase = 0;
+        } else if (s.Mode == "support" && s.Support != null) {
+            tone = s.Support.Tone == "info" ? "neutral" : s.Support.Tone; glyph = s.Support.Tone == "info" ? "i" : s.Support.Tone == "error" ? "x" : "!";
+            chip = s.Support.Tone == "stall" ? "Setup needs your decision" : "Setup stopped";
+            title = s.Support.Headline; description = s.Support.What;
+            footer = "The message in front of this window says what to do next.";
+        } else {
+            tone = "working"; chip = ToolkitSetupText.WorkingStatus;
+            title = step.Title; description = step.Description ?? "";
+            Vis(Progress, true); Vis(Clock, true);
+            if (s.Percent >= 0) { Progress.Style = ProgressBarStyle.Continuous; Progress.Value = Math.Max(0, Math.Min(100, s.Percent)); }
+            else Progress.Style = ProgressBarStyle.Marquee;
+            Caption.Text = ProgressText(s); Vis(Caption, Caption.Text.Length > 0);
+            Note.Text = "If anything takes much longer than expected, this window will tell you what to do."; Vis(Note, true);
+            footer = ToolkitSetupText.ClosesItself;
+        }
+        Rail.SetPhase(phase, tone == "attention");
+        bool chipChanged = Chip.Text != chip || Chip.Tone != tone;
+        Chip.Tone = tone; Chip.Glyph = glyph; Chip.Text = chip; Chip.AccessibleName = chip;
+        Title.Text = title; Title.AccessibleName = title;
+        Description.Text = description; Vis(Description, description.Length > 0); Description.AccessibleName = description;
+        Clock.Text = ClockText(s);
+        FooterText.Text = footer; Vis(FooterText, footer.Length > 0 && s.Mode != "question");
+        Arrange(s);
+        ResumeLayout(true);
+        Invalidate(true);
+        if (chipChanged && (tone == "attention" || s.Mode == "support")) Chip.Announce();
+    }
+    // Layout in device pixels from the current DPI. Returns the full view size.
+    void Arrange(ToolkitViewState s) {
+        int width = S(LogicalWidth), margin = S(28), inner = width - 2 * margin;
+        // Phase rail band.
+        int railHeight = S(22) + S(6) + RailLabelHeight(inner);
+        Rail.SetBounds(margin - S(10), S(16), inner + S(20), railHeight);
+        Band.SetBounds(0, 0, width, S(16) + railHeight + S(14));
+        // Content.
+        int y = S(22);
+        y += Chip.Fit(margin, y) + S(14);
+        y += Title.Fit(margin, y, inner);
+        if (IsOn(Description)) { y += S(6); y += Description.Fit(margin, y, inner); }
+        if (s.Mode == "working") {
+            y += S(22);
+            Progress.SetBounds(margin, y, inner, S(8)); y += S(8) + S(10);
+            int clockWidth = ToolkitTheme.TextWidth("Running for 00:00:00", Clock.Font) + S(4);
+            Clock.SetBounds(margin + inner - clockWidth, y, clockWidth, Fonts.Small.Height + S(4));
+            Caption.SetBounds(margin, y, inner - clockWidth - S(8), Fonts.SmallBold.Height + S(4));
+            y += Math.Max(Fonts.Small.Height, Fonts.SmallBold.Height) + S(4) + S(18);
+            y += Note.Fit(margin, y, inner);
+        } else if (s.Mode == "question") {
+            if (IsOn(Facts)) { y += S(16); int h = Facts.Measure(inner); Facts.SetBounds(margin, y, inner, h); y += h; }
+            y += S(12); y += Footnote.Fit(margin, y, inner);
+        } else if (s.Mode == "waiting") {
+            if (IsOn(Steps)) { y += S(16); int h = Steps.Measure(inner); Steps.SetBounds(margin, y, inner, h); y += h; }
+            if (IsOn(Where)) { y += S(14); int h = Where.Measure(inner); Where.SetBounds(margin, y, inner, h); y += h; }
+        }
+        if (IsOn(Clock) && s.Mode != "working") {
+            int clockWidth = ToolkitTheme.TextWidth("Asked 00:00:00 ago", Clock.Font) + S(4);
+            Clock.SetBounds(margin + inner - clockWidth, S(22), clockWidth, Chip.Height);
+        }
+        y += S(24);
+        int contentHeight = Math.Max(y, S(s.Mode == "working" ? 196 : 150));
+        Content.SetBounds(0, Band.Bottom + 1, width, contentHeight);
+        // Footer: buttons for a question, otherwise one calm line.
+        int footerHeight;
+        if (s.Mode == "question") {
+            int bh = S(34), gap = S(10);
+            int noWidth = No.Measure(Fonts.Button, Fonts.Dpi), yesWidth = Yes.Measure(Fonts.Button, Fonts.Dpi);
+            footerHeight = S(16) * 2 + bh;
+            No.SetBounds(width - margin - noWidth, S(16), noWidth, bh);
+            Yes.SetBounds(No.Left - gap - yesWidth, S(16), yesWidth, bh);
+        } else if (IsOn(FooterText)) {
+            int h = ToolkitTheme.TextHeight(FooterText.Text, FooterText.Font, inner);
+            footerHeight = h + S(12) * 2;
+            FooterText.SetBounds(margin, S(12), inner, h + 2);
+        } else footerHeight = S(12);
+        Footer.SetBounds(0, Content.Bottom + 1, width, footerHeight);
+        Size = new Size(width, Footer.Bottom);
+    }
+    int RailLabelHeight(int inner) {
+        int slot = (inner + S(20)) / ToolkitSetupText.Phases.Length, h = 0;
+        foreach (string phase in ToolkitSetupText.Phases) h = Math.Max(h, ToolkitTheme.TextHeight(phase, Fonts.SmallBold, slot - S(4)));
+        return h;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);
+        using (var pen = new Pen(ToolkitTheme.Border)) {
+            e.Graphics.DrawLine(pen, 0, Band.Bottom, Width, Band.Bottom);
+            e.Graphics.DrawLine(pen, 0, Content.Bottom, Width, Content.Bottom);
+        }
     }
 }
 public class ToolkitSetupStatus {
