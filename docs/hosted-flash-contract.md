@@ -95,7 +95,10 @@ is refused before USB action; old records are not reinterpreted under a new poli
 
 Authenticated package prefixes must match the signed member hashes before local
 calibration edits. Personalized candidates retain the prefix lengths; operation
-records and mandatory Phoenix readback use their final candidate hashes. The
+records and optional readback use their final candidate hashes. Phoenix and
+official packages default to DFU transfer completion, not post-write readback.
+`flash-update --verify-readback` remains an opt-in. The database-calibration path
+retains its mandatory readback; community sharing is disabled in this release. The
 original signed package remains unchanged. Profile is
 `jibo-t124-stock-gpt-13-v1`; strategy is `compact-prefix-v1`; capability is
 `hosted-flash-v1`. Official base provenance, three source revisions, recipe and
@@ -106,6 +109,23 @@ Envelope/payload bounds are 262144/196608 bytes for index and manifest, and
 maximum 8589934592, unpacked maximum 34359738368, declared workspace maximum
 137438953472. The toolkit reserves the greater of the signed workspace request
 and its locally computed preparation/rollback requirement.
+
+## Check and preparation lifetime
+
+After downloading, one forward decompression verifies the signed metadata,
+structure and every member hash while checking the compressed size/SHA-256
+against the signed index. A second forward pass extracts the needed images;
+extracted bytes are checked again before any USB write. No repeated indexing
+or backwards seeks are needed.
+
+Successful checks may be reused only within the process, bound to exactly
+`(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` and the checked signed-index
+SHA-256. Signed provenance on disk never substitutes for these checks. Any file
+identity change forces a full check. The same no-follow descriptor is used for
+the final check and extraction; mutation during extraction is refused. Failed
+or canceled preparation removes temporary partition images. Check/preparation
+progress counts compressed bytes and emits a moving update at least every
+quarter-second while other local work is busy.
 
 ## Build boundary and release holds
 

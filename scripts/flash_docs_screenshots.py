@@ -112,6 +112,8 @@ def capture_hosted(out):
     hosted = FakeHosted(catalog=catalog)
     hosted.gate = threading.Event()
     resume_gate = threading.Event()
+    checking_gate = threading.Event()
+    preparing_gate = threading.Event()
     attempts = []
     original_download = hosted.download_image
     def download(image_id, *, dest_dir=None, progress=None, cancel=None):
@@ -122,13 +124,27 @@ def capture_hosted(out):
             if not hosted.gate.wait(10):
                 raise TimeoutError('Documentation download was not released')
             raise HostedError('offline', 'Connection interrupted')
-        return original_download(image_id, dest_dir=dest_dir, progress=progress, cancel=cancel)
+        path = original_download(image_id, dest_dir=dest_dir, progress=progress, cancel=cancel)
+        progress(Progress('verify', 2400, 4000, 60.0, None, None, 'Checking the image...'))
+        if not checking_gate.wait(10):
+            raise TimeoutError('Documentation image check was not released')
+        return path
     hosted.download_image = download
     def retry_wait(seconds, cancel, backend):
         if not resume_gate.wait(10):
             raise TimeoutError('Documentation resume was not released')
     api = FakeHostedApi(hosted, packages=['updates/jibo-13.0.0.tar.bz2'])
     api.BACKUP_ROOT = Path('~/Jibo-Backups')
+    original_flash = api.flash_hosted_update
+    def flash(*args, **kwargs):
+        def prepare():
+            import jibo_flash_contract as contract
+            contract.phase('prepare', 1800, 4000)
+            if not preparing_gate.wait(10):
+                raise TimeoutError('Documentation preparation was not released')
+        kwargs['local_work'](prepare, "Preparing Jibo's software")
+        return original_flash(*args, **kwargs)
+    api.flash_hosted_update = flash
     errors = []
     with tempfile.TemporaryDirectory(prefix='hosted-docs-') as temp:
         directory = Path(temp)
@@ -212,6 +228,13 @@ def capture_hosted(out):
                 pump(lambda: window._cancel_shown and 'Connection dropped, resuming' in window.progress_status.cget('text'))
                 capture('hosted-resuming')
                 resume_gate.set()
+                pump(lambda: window._cancel_shown and 'Checking the image... 60%' in window.progress_status.cget('text'))
+                capture('hosted-checking')
+                checking_gate.set()
+                pump(lambda: window._cancel_shown and "Preparing Jibo's software" in window.progress_status.cget('text')
+                     and '45%' in window.progress_status.cget('text'))
+                capture('hosted-preparing')
+                preparing_gate.set()
                 pump(lambda: window.prompt is not None and window.prompt.kind == 'confirm')
                 assert window.prompt.initial == 'cancel'
                 assert policy.PHOENIX_LINE in window.prompt.detail
@@ -223,6 +246,8 @@ def capture_hosted(out):
         finally:
             hosted.gate.set()
             resume_gate.set()
+            checking_gate.set()
+            preparing_gate.set()
             controller.shutdown()
             pump(lambda: not controller.busy)
             window.close()

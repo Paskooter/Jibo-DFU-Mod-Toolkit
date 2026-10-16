@@ -1,7 +1,7 @@
 name: Calibration v3 client
 on:
   push:
-    branches: [feat/calibration-v3-share]
+    branches: [feat/calibration-v3-share, release/toolkit-2026-10-flashflow]
   workflow_dispatch:
 permissions:
   contents: read

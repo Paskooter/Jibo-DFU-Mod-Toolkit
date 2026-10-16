@@ -615,9 +615,10 @@ def _local(path):
     if len(manifest_raw) != row['manifest_size'] or hashlib.sha256(manifest_raw).hexdigest() != row['manifest_sha256']:
         raise HostedError('hash', 'Local signed manifest does not match authenticated catalog pin')
     manifest = c.validate_manifest(c.verify_envelope(manifest_raw, 'manifest'), row, origin=ORIGIN)
-    if path.stat().st_size != row['size'] or c.hash_file(path) != row['sha256']:
-        raise HostedError('hash', 'Completed archive no longer matches signed hash/size')
-    metadata = c.verify_archive(path, manifest)
+    try:
+        metadata = c.verify_archive(path, manifest)
+    except tarfile.TarError as exc:
+        raise HostedError('hash', 'The saved image is damaged. Download it again.') from exc
     return row, manifest, metadata
 
 
@@ -641,8 +642,9 @@ def _download(image_id, dest, progress, cancel):
     final = _safe_path(dest / _filename(row))
     with _lock(final.with_name(final.name + '.lock')):
         if final.exists():
-            _local(final)  # Never overwrite a pre-existing user archive.
-            _progress(progress, 'done', row['size'], row['size'], 'Verified existing hosted archive')
+            with c.operation(progress, cancel):
+                _local(final)  # Never overwrite a pre-existing user archive.
+            _progress(progress, 'done', 0, None, 'Getting ready for your review')
             return str(final)
         _progress(progress, 'manifest', 0, row['manifest_size'], 'Authenticating signed artifact manifest')
         manifest_raw = _fetch(row['manifest_url'], c.ENVELOPE_MAX, 15, cancel, row['manifest_size'])
@@ -730,18 +732,13 @@ def _download(image_id, dest, progress, cancel):
                         # EOF, cancellation and exceptions all publish the last durable batch.
                         checkpoint()
         _cancel(cancel)
-        _progress(progress, 'verify', offset, row['size'], 'Verifying complete archive and signed member hashes')
+        _progress(progress, 'verify', 0, None, 'Checking the image')
         if offset != row['size']:
             raise HostedError('http', 'Archive was truncated; partial retained for exact-ID resume')
         if digest.hexdigest() != row['sha256']:
             quarantine = partial.with_name(partial.name + '.bad-hash-' + os.urandom(4).hex())
             os.rename(partial, quarantine)
             raise HostedError('hash', 'Archive SHA-256 mismatch; bytes quarantined and never usable')
-        try:
-            c.verify_archive(partial, manifest)
-        except tarfile.TarError as exc:
-            raise HostedError('hash', 'Invalid hosted archive container') from exc
-        _cancel(cancel)
         # Receipt first, then an exclusive hardlink publishes without overwriting
         # a local archive created during the transfer. Both are same filesystem.
         _atomic(_provenance(final), _json({'schema': 1, 'id': wanted,
@@ -750,7 +747,18 @@ def _download(image_id, dest, progress, cancel):
         os.link(partial, final)
         partial.unlink()
         receipt_path.unlink(missing_ok=True)
-        _progress(progress, 'done', offset, row['size'], 'Verified download complete; flashing still requires a separate review')
+        try:
+            with c.operation(progress, cancel):
+                c.verify_archive(final, manifest)
+        except BaseException as exc:
+            # Never leave a completed-looking file after a failed/canceled check.
+            final.rename(final.with_name(final.name + '.bad-check-' + os.urandom(4).hex()))
+            _provenance(final).unlink(missing_ok=True)
+            if isinstance(exc, tarfile.TarError):
+                raise HostedError('hash', 'The downloaded image is damaged.') from exc
+            raise
+        _cancel(cancel)
+        _progress(progress, 'done', 0, None, 'Getting ready for your review')
         return str(final)
 
 

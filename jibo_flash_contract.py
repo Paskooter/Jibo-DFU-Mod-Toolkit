@@ -11,6 +11,7 @@ import binascii
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -325,49 +326,197 @@ def hash_file(path):
 
 
 import tarfile
+import copy
+import threading
+import time
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+
+# Successful checks live only in this process. Never trust an on-disk receipt.
+_verified = {}
+_verified_lock = threading.Lock()
+_local = threading.local()
+
+
+def file_identity(source):
+    info = os.fstat(source.fileno()) if hasattr(source, 'fileno') else os.stat(source, follow_symlinks=False)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _check_cancel():
+    state = getattr(_local, 'operation', None)
+    if state and state.cancel is not None and state.cancel.cancelled:
+        fail('Image check canceled. Nothing was written.', 'canceled')
+
+
+@contextmanager
+def operation(progress=None, cancel=None):
+    """Keep checks and local preparation responsive, including slow disk/tool waits."""
+    previous = getattr(_local, 'operation', None)
+    state = SimpleNamespace(progress=progress, cancel=cancel, phase='verify', size=0,
+                            total=None, started=time.monotonic(), lock=threading.RLock(), error=None)
+    _local.operation = state
+    stop = threading.Event()
+    def report():
+        with state.lock:
+            if state.progress:
+                elapsed = time.monotonic() - state.started
+                label = "Preparing Jibo's software" if state.phase == 'prepare' else 'Checking the image'
+                message = label + '.' * (1 + int(elapsed * 4) % 3)
+                try:
+                    state.progress(SimpleNamespace(phase=state.phase, bytes=state.size, total=state.total,
+                        percent=min(99, 100 * state.size / state.total) if state.total else None,
+                        rate=None, eta=None, message=message))
+                except BaseException as exc:
+                    state.error = exc
+    state.report = report
+    state.last_report = time.monotonic()
+    report()
+    def heartbeat():
+        while not stop.wait(0.25):
+            report()
+    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread.start()
+    try:
+        _check_cancel()
+        yield
+        _check_cancel()
+        if state.error:
+            raise state.error
+    finally:
+        stop.set()
+        thread.join()
+        _local.operation = previous
+
+
+def phase(name, size=0, total=None):
+    state = getattr(_local, 'operation', None)
+    if state:
+        with state.lock:
+            changed = state.phase != name or state.total != total
+            advanced = total and (state.size == 0 < size or
+                                  int(100 * size / total) != int(100 * state.size / total))
+            state.phase, state.size, state.total = name, size, total
+            now = time.monotonic()
+            if changed or advanced or now - state.last_report >= 0.1:
+                state.last_report = now
+                state.report()
+    _check_cancel()
+
+
+class ProgressReader:
+    """Count compressed bytes without seeking backwards or hiding cancellation."""
+    def __init__(self, stream, name='verify', digest=False):
+        self.stream, self.name = stream, name
+        self.total = os.fstat(stream.fileno()).st_size
+        self.count = 0
+        self.digest = hashlib.sha256() if digest else None
+        phase(name, 0, self.total)
+
+    def read(self, size=-1):
+        _check_cancel()
+        raw = self.stream.read(size)
+        self.count += len(raw)
+        if self.digest is not None:
+            self.digest.update(raw)
+        phase(self.name, self.count, self.total)
+        return raw
+
+
+def cached_archive(source, sha256=None):
+    with _verified_lock:
+        cached = _verified.get(file_identity(source))
+        if cached and (sha256 is None or cached[1] == sha256):
+            return copy.deepcopy(cached[0])
+    return None
+
+
+def _match_manifest(metadata, manifest):
+    if manifest is not None:
+        for field in set(CONTRACT['fields']['metadata']) - {'kind'}:
+            if metadata.get(field) != manifest.get(field):
+                fail('Embedded metadata disagrees with signed manifest: ' + field)
+        if metadata['_metadata_sha256'] != manifest['embedded_metadata_sha256']:
+            fail('Embedded metadata hash disagrees with signed manifest', 'hash')
 
 
 def verify_archive(source, manifest=None):
-    """Authenticate embedded metadata and exact member bytes without extraction.
+    """One forward pass checks signed metadata, structure and EVERY payload hash.
 
-    Returning None means genuinely legacy, not malformed/unsigned Phoenix. A
-    signed hosted archive may contain directory headers but no extra payloads,
-    links, hooks, device nodes, duplicate paths or unbounded member geometry.
+    Metadata may be last. Keep only bounded headers and digests, never payloads.
+    Reuse requires all five file-identity fields and (for hosted files) the signed
+    transport hash. Mutation during a check never publishes a successful memo.
     """
-    opener = {'fileobj': source} if hasattr(source, 'read') else {'name': source}
-    with tarfile.open(mode='r:*', **opener) as archive:
-        entries = []
-        for entry in archive:
-            if manifest is not None and (len(entries) >= 32 or entry.size > ENVELOPE_MAX + manifest['unpacked_size']):
-                fail('Hosted archive header exceeds member/count bound')
-            entries.append(entry)
-        markers = [m for m in entries if PurePosixPath(m.name).name == 'phoenix-flash.json']
+    _check_cancel()
+    before = file_identity(source)
+    expected_hash = manifest.get('sha256') if manifest else None
+    metadata = cached_archive(source, expected_hash)
+    if metadata is not None:
+        _match_manifest(metadata, manifest)
+        return metadata
+    own_stream = not hasattr(source, 'read')
+    stream = open(source, 'rb') if own_stream else source
+    try:
+        if file_identity(stream) != before:
+            fail('Image changed before checking', 'hash')
+        reader = ProgressReader(stream, digest=True)
+        entries, payloads, markers, seen = [], {}, [], set()
+        with tarfile.open(fileobj=reader, mode='r|*') as archive:
+            for entry in archive:
+                _check_cancel()
+                if manifest is not None and (len(entries) >= 32 or entry.size > ENVELOPE_MAX + manifest['unpacked_size']):
+                    fail('Hosted archive header exceeds member/count bound')
+                entries.append(entry)
+                if entry.name in seen or entry.name.startswith('/') or '..' in PurePosixPath(entry.name).parts or \
+                        '\\' in entry.name or '%' in entry.name:
+                    fail('Unsafe or duplicate hosted archive member')
+                seen.add(entry.name)
+                marker = PurePosixPath(entry.name).name == 'phoenix-flash.json'
+                if marker and (not entry.isfile() or not 0 < entry.size <= ENVELOPE_MAX):
+                    fail('Invalid Phoenix metadata member')
+                if entry.isfile():
+                    result = hashlib.sha256()
+                    raw_marker = bytearray()
+                    with archive.extractfile(entry) as payload:
+                        remaining = entry.size
+                        while remaining:
+                            _check_cancel()
+                            chunk = payload.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                fail('Truncated hosted archive member', 'hash')
+                            result.update(chunk)
+                            remaining -= len(chunk)
+                            if marker:
+                                raw_marker.extend(chunk)
+                    payloads[entry.name] = result.hexdigest()
+                    if marker:
+                        markers.append((entry, bytes(raw_marker)))
+        # Include trailing compressed bytes in the signed transport digest.
+        while reader.read(1024 * 1024):
+            pass
+        if file_identity(stream) != before or file_identity(source) != before:
+            fail('Image changed while checking', 'hash')
+        if expected_hash is not None and (before[2] != manifest['size'] or reader.digest.hexdigest() != expected_hash):
+            fail('Completed archive no longer matches signed hash/size', 'hash')
         if not markers:
             if manifest is not None:
                 fail('Hosted archive is missing signed Phoenix metadata')
             return None
-        if len(markers) != 1 or not markers[0].isfile() or not 0 < markers[0].size <= ENVELOPE_MAX:
+        if len(markers) != 1:
             fail('Invalid or duplicate Phoenix metadata member')
-        raw = archive.extractfile(markers[0]).read(ENVELOPE_MAX + 1)
+        marker, raw = markers[0]
         metadata = validate_metadata(verify_envelope(raw, 'metadata'))
+        metadata = {**metadata, '_metadata_sha256': hashlib.sha256(raw).hexdigest(),
+                    '_archive_sha256': reader.digest.hexdigest(), '_archive_size': before[2]}
         expected_marker = 'phoenix-' + metadata['id'] + '/phoenix-flash.json'
-        if markers[0].name != expected_marker:
+        if marker.name != expected_marker:
             fail('Phoenix metadata path disagrees with signed image id')
-        if manifest is not None:
-            for field in set(CONTRACT['fields']['metadata']) - {'kind'}:
-                if metadata.get(field) != manifest.get(field):
-                    fail('Embedded metadata disagrees with signed manifest: ' + field)
-            if hashlib.sha256(raw).hexdigest() != manifest['embedded_metadata_sha256']:
-                fail('Embedded metadata hash disagrees with signed manifest', 'hash')
+        _match_manifest(metadata, manifest)
         allowed = {m['name']: m for m in metadata['members']}
-        seen = set()
         if len(entries) > 32:
             fail('Hosted archive has too many members')
         for member in entries:
-            if member.name in seen or member.name.startswith('/') or '..' in PurePosixPath(member.name).parts or \
-                    '\\' in member.name or '%' in member.name:
-                fail('Unsafe or duplicate hosted archive member')
-            seen.add(member.name)
             if member.name == expected_marker:
                 continue
             if member.isdir():
@@ -377,20 +526,21 @@ def verify_archive(source, manifest=None):
             expected = allowed.get(member.name)
             if not expected or not member.isfile() or member.size != expected['size']:
                 fail('Unexpected hosted archive member/type/size')
-            result = hashlib.sha256()
-            remaining = member.size
-            with archive.extractfile(member) as stream:
-                while remaining:
-                    chunk = stream.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        fail('Truncated hosted archive member', 'hash')
-                    result.update(chunk)
-                    remaining -= len(chunk)
-            if result.hexdigest() != expected['sha256']:
+            if payloads[member.name] != expected['sha256']:
                 fail('Hosted filesystem member SHA-256 mismatch', 'hash')
         if not set(allowed).issubset(seen):
             fail('Missing signed hosted filesystem member')
-        return {**metadata, '_metadata_sha256': hashlib.sha256(raw).hexdigest()}
+        _check_cancel()
+        with _verified_lock:
+            if len(_verified) >= 32:
+                _verified.clear()
+            _verified[before] = (copy.deepcopy(metadata), reader.digest.hexdigest())
+        return metadata
+    finally:
+        if own_stream:
+            stream.close()
+        phase('verify')
+
 
 
 def workspace_bytes(manifest, var_capacity=524288000):

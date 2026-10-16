@@ -5,7 +5,7 @@ on:
   push:
     tags: ['v*']
     # Validation branch only; source launchers and main are not altered by CI.
-    branches: [feature/release-builds]
+    branches: [feature/release-builds, release/toolkit-2026-10-flashflow]
 
 permissions:
   contents: read

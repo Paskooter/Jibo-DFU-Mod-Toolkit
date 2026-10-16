@@ -334,7 +334,7 @@ class GuiController:
             if self._closing:
                 cancel.cancel()
             self._work_cancel, self._work_token = cancel, token
-        self.write_output(str(title) + "\n")
+        self.write_output("\n" + str(title) + "\n")
         self._emit(("download", True))
 
         def report(progress):

@@ -249,8 +249,9 @@ _HOSTED_ERROR_TEXT = {
 }
 _PHASE_TEXT = {
     "index": "Checking the image list", "manifest": "Checking the image details",
-    "download": "Downloading", "verify": "Checking the download",
-    "done": "Download complete", "error": "Download stopped", "canceled": "Download canceled",
+    "download": "Downloading", "verify": "Checking the image",
+    "prepare": "Preparing Jibo's software", "done": "Getting ready for your review",
+    "error": "Download stopped", "canceled": "Download canceled",
 }
 
 
@@ -299,6 +300,8 @@ def format_progress(progress):
     if getattr(progress, "phase", "") == "resume":
         return str(progress.message)
     text = _PHASE_TEXT.get(getattr(progress, "phase", ""), "Working")
+    if getattr(progress, "phase", "") in ("verify", "prepare") and getattr(progress, "message", ""):
+        text = str(progress.message)
     percent = getattr(progress, "percent", None)
     if percent is not None:
         text += " %d%%" % int(max(0.0, min(100.0, percent)))
@@ -569,12 +572,26 @@ def _hosted_confirmation_details(plan):
         if phoenix.get(key):
             lines.append("{}: {}".format(label, phoenix[key]))
     if phoenix.get("var_write_bytes"):
-        lines.append("Var write: {} bytes, read back after writing.".format(phoenix["var_write_bytes"]))
+        lines.append("Var write: {} bytes. The write finishes when Jibo accepts the transfer.".format(phoenix["var_write_bytes"]))
     if phoenix.get("var_candidate_sha256"):
         lines.append("New var SHA-256: {}".format(phoenix["var_candidate_sha256"]))
     lines.append("Only var gets a rollback copy. The boot chain and partition table are not changed "
                  "or repaired by this install.")
     return "\n".join(lines)
+
+
+def _run_image_work(callback, label):
+    import jibo_flash_contract as contract
+    from jibo_hosted_updates import CancelToken
+    def work(report, cancel):
+        with contract.operation(report, cancel):
+            if label.startswith('Preparing'):
+                contract.phase('prepare')
+            return callback()
+    result, error = run_with_progress(label, work, CancelToken())
+    if error is not None:
+        raise error
+    return result
 
 
 def _install_hosted(api, hosted, image, path, port, policy=None):
@@ -587,7 +604,7 @@ def _install_hosted(api, hosted, image, path, port, policy=None):
     confirmation = lambda plan: confirm_action("Confirm Phoenix image install",
                                                _hosted_confirmation_details(plan))
     result = api.flash_hosted_update(path, var_policy=policy, port=port,
-                                     confirmation=confirmation,
+                                     local_work=_run_image_work, confirmation=confirmation,
                                      unsafe_without_calibration=policy == flash_policy.WITHOUT)
     # The backend's result is the reviewed flash result; name the image for the summary.
     return {**result, "phoenix_image": str(image.version)} if isinstance(result, dict) else result

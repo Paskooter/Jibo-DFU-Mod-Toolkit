@@ -322,7 +322,16 @@ def _call_with_progress(callback, label):
     if not interactive:
         print(label + "...", file=terminal, flush=True)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(callback)
+        def checked_work():
+            import jibo_flash_contract as contract
+            def report(event):
+                import jibo_tui
+                print("\r" + jibo_tui.format_progress(event), file=terminal, flush=True)
+            with contract.operation(report):
+                if label.startswith('Preparing'):
+                    contract.phase('prepare')
+                return callback()
+        future = pool.submit(checked_work)
         frames = 0
         spinner = "|/-\\"
         last_length = 0
@@ -1882,7 +1891,7 @@ def _hosted_space_precheck(metadata, out, var_capacity):
 
 def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util=None, out=None,
                  confirmation=None, dry_run=False, resume_from=None,
-                 verify_readback=False, unsafe_without_calibration=False):
+                 verify_readback=False, unsafe_without_calibration=False, local_work=None):
     """Install fresh userspace filesystems, optionally restoring this robot's calibration."""
     if resume_from is not None:
         raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup; "
@@ -1892,11 +1901,9 @@ def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util
     fresh_with_calibration = var_policy == flash_policy.KEEP
     if not fresh_with_calibration and not dry_run and unsafe_without_calibration is not True:
         raise DfuError("Flashing without calibration requires explicit unsafe confirmation.")
-    package = _call_with_progress(lambda: updates.validate_package(package_path),
-                                  "Checking the selected update package")
+    local_work = local_work or _call_with_progress
+    package = local_work(lambda: updates.validate_package(package_path), "Checking the image")
     phoenix = getattr(package, 'phoenix', None)
-    if phoenix:
-        verify_readback = True
     dfu_util = dfu_util or tool("dfu-util")
     selected = select_device(devices(), port)
     if selected is None:
@@ -1948,13 +1955,13 @@ def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util
     record_path = directory / "update-manifest.json"
     record = {"schema": 1, "kind": "jibo-full-flash-update", "created_utc": _utc_now(),
               **plan, "status": "preparing", "backups": {}, "writes": []}
-    record["package_sha256"] = _package_content_sha256(package)
+    record["package_sha256"] = local_work(lambda: _package_content_sha256(package), "Checking the image")
     _private_write(record_path, record)
     try:
         with tempfile.TemporaryDirectory(prefix="prepared-", dir=directory) as prepared_dir:
-            compact_images = _call_with_progress(
+            compact_images = local_work(
                 lambda: updates.prepare_compact_images(package, capacities, prepared_dir),
-                "Preparing compact partition images on this computer")
+                "Preparing Jibo's software")
             prepared = dict(compact_images.images)
             missing_candidates = [name for name in partitions if name not in prepared]
             if missing_candidates:
@@ -1970,7 +1977,9 @@ def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util
                     raise DfuError("Prepared {} prefix does not fit the GPT partition or 512-byte DFU sectors."
                                    .format(name))
                 transfer_sizes[name] = transfer_size
-            candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
+            candidate_hashes = local_work(
+                lambda: {name: _sha256_file(prepared[name]) for name in partitions},
+                "Preparing Jibo's software")
             if phoenix:
                 signed = {member['role']: member for member in phoenix['members']}
                 for name in partitions:
@@ -2035,7 +2044,9 @@ def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util
 
             # Signed package prefixes were checked BEFORE local calibration edits.
             # Freeze hashes of the actual personalized candidates for readback.
-            candidate_hashes = {name: _sha256_file(prepared[name]) for name in partitions}
+            candidate_hashes = local_work(
+                lambda: {name: _sha256_file(prepared[name]) for name in partitions},
+                "Preparing Jibo's software")
             for name in partitions:
                 if Path(prepared[name]).stat().st_size != transfer_sizes[name]:
                     raise DfuError("Calibration changed the partition prefix length; no write attempted.")
@@ -2927,7 +2938,8 @@ def _launch_gui():
 
 def flash_hosted_update(package_path, *, var_policy=flash_policy.KEEP, port=None,
                         dfu_util=None, out=None, confirmation=None,
-                        dry_run=False, resume_from=None, unsafe_without_calibration=False):
+                        dry_run=False, resume_from=None, unsafe_without_calibration=False, local_work=None,
+                        verify_readback=False):
     """Authenticate the local hosted artifact before the reviewed DFU flow."""
     if resume_from is not None:
         raise DfuError("Interrupted flashes cannot currently resume. Keep the saved rollback backup.")
@@ -2935,7 +2947,8 @@ def flash_hosted_update(package_path, *, var_policy=flash_policy.KEEP, port=None
         raise hosted.HostedError('incompatible', 'Unsupported calibration choice')
     path = hosted._safe_path(package_path)
     with hosted._lock(path.with_name(path.name + '.lock')):
-        checked = hosted.verify_local_image(path)
+        work = local_work or _call_with_progress
+        checked = work(lambda: hosted.verify_local_image(path), "Checking the image")
         review = confirmation
         if callable(confirmation):
             def review(plan):
@@ -2944,7 +2957,8 @@ def flash_hosted_update(package_path, *, var_policy=flash_policy.KEEP, port=None
                 return confirmation({**plan, 'phoenix': details})
         return flash_update(path, var_policy, port=port, dfu_util=dfu_util, out=out,
                             confirmation=review, dry_run=dry_run,
-                            verify_readback=True, unsafe_without_calibration=unsafe_without_calibration)
+                            unsafe_without_calibration=unsafe_without_calibration, local_work=local_work,
+                            verify_readback=verify_readback)
 
 
 def _hosted_cli_list(directory, offline):
@@ -3125,7 +3139,7 @@ def main(argv=None):
             var_group.add_argument('--keep-calibration', action='store_true', help=flash_policy.KEEP_LABEL + ' (default)')
             var_group.add_argument('--without-calibration', action='store_true', help=flash_policy.WITHOUT_LABEL + '; requires --confirm FLASH UPDATE')
             hosted_parser.add_argument('--confirm', help='Exactly FLASH UPDATE; otherwise a cancel-default review is required')
-            hosted_parser.add_argument('--verify-readback', action='store_true', help='Always forced for hosted writes')
+            hosted_parser.add_argument('--verify-readback', action='store_true', help='Read back each written image and compare its checksum')
             hosted_parser.add_argument('--resume-from', type=Path)
             _add_device_arguments(hosted_parser)
             _add_dfu_argument(hosted_parser)
@@ -3300,7 +3314,7 @@ def main(argv=None):
                 result = flash_hosted_update(path, port=args.port, dfu_util=args.dfu_util,
                     out=args.operation_dir, confirmation=args.confirm,
                     var_policy=flash_policy.WITHOUT if args.without_calibration else flash_policy.KEEP,
-                    unsafe_without_calibration=args.without_calibration)
+                    unsafe_without_calibration=args.without_calibration, verify_readback=args.verify_readback)
         elif args.command == "list-updates":
             result = [{"path": str(path), "name": path.name}
                       for path in _update_candidates(args.directory)]

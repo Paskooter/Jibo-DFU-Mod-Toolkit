@@ -298,7 +298,8 @@ class FakeHostedApi(FakeApi):
         self.fail_flashes = 0             # raise a recorded failure before this many flashes
 
     def flash_hosted_update(self, package_path, *, var_policy="keep-calibration", port=None, dfu_util=None,
-                            out=None, confirmation=None, dry_run=False, resume_from=None, unsafe_without_calibration=False):
+                            out=None, confirmation=None, dry_run=False, resume_from=None, unsafe_without_calibration=False, local_work=None,
+                            verify_readback=False):
         self.calls.append(("flash_hosted_update", (str(package_path),),
                            {"var_policy": var_policy, "port": port, "resume_from": resume_from}))
         assert callable(confirmation), "hosted installs must pass a review callback"

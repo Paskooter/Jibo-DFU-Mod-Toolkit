@@ -84,7 +84,20 @@ def test_progress_line_has_bytes_percent_rate_and_time_left():
     line = jibo_tui.format_progress(Progress("download", 1500000, 6000000, 25.0, 500000.0, 90.0))
     assert line == "Downloading 25% \u2014 1.5 MB of 6.0 MB, 500.0 KB/s, about 2 min left"
     assert jibo_tui.format_progress(Progress("verify", 6, 6, 100.0, None, None)).startswith(
-        "Checking the download 100%")
+        "Checking the image 100%")
+
+
+def test_consecutive_progress_stages_do_not_join_their_visible_labels():
+    api = FakeHostedApi()
+    controller, _ = gui_controller(api, [])
+    controller._run_work('Checking the image',
+                         lambda report, token: report(Progress('verify', 2, 4, 50.0, None, None)),
+                         api.hosted.CancelToken())
+    controller._run_work("Preparing Jibo's software", lambda report, token: None,
+                         api.hosted.CancelToken())
+    assert controller.output_state().step == "Preparing Jibo's software"
+    assert not any("KBPreparing" in line or "%Preparing" in line
+                   for line in controller.output_state().lines)
 
 
 def test_both_fresh_choices_are_enabled_for_hosted_images():
@@ -356,7 +369,7 @@ def test_gui_network_work_runs_off_main_thread_and_progress_is_marshalled():
     assert api.hosted.threads and all(thread is not main for thread in api.hosted.threads)
     assert ("download", True) in events and ("download", False) in events
     assert any("Downloading 25%" in line for line in c.output_state().lines) or \
-        "Download complete" in c.output_state().status
+        "Getting ready for your review" in c.output_state().status
 
 
 def test_gui_cancel_download_keeps_partial_writes_nothing_and_drops_late_callbacks():

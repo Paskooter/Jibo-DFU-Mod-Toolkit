@@ -96,7 +96,7 @@ Available operations use `jibo_tui.execute_action()` and the original
 - **Phoenix images:** the Phoenix image is featured at the top of the same flash
   list as local packages, marked **— recommended**. Choose it and calibration
   handling first; the toolkit gets the image from jibo.io, checks it, reviews,
-  writes and reads it back in one flow, with a **Cancel download** button
+  writes in one flow, with a **Cancel download** button
   (Esc also cancels) while it is fetched on the worker thread. The fetched
   image, its receipts and working files are removed after success, a failed
   write or a cancelled review. Robot backups
@@ -104,13 +104,18 @@ Available operations use `jibo_tui.execute_action()` and the original
   A dropped connection resumes automatically in this flow, up to six attempts,
   with **Connection dropped, resuming…** shown during the cancelable retry wait.
   Untrusted image data is never retried.
-  Phoenix writes always read back every transferred prefix. Their review states:
+  After the download, **Checking the image** and **Preparing Jibo's software**
+  keep moving, showing a percentage while reading the image and an animated
+  indicator during other local work. Cancel also stops these checks before writing.
+  Phoenix writes finish when Jibo accepts each transfer, just like official packages;
+  there is no automatic read-back. A fresh var rollback copy is still saved first.
+  Their review states:
   **This image connects Jibo to Phoenix (jibo.io). After flashing he starts at the
   setup screens; finish setup at jibo.io.** Ordinary package reviews omit this line.
   See [Phoenix images from jibo.io](hosted-flash-images.md).
 - **Interrupted flash:** keep the rollback copy and record. Resume currently
   refuses before USB action; select the package again for a new reviewed flash.
-  For ordinary packages, the CLI's `--verify-readback` enables full prefix checks.
+  For official and Phoenix packages, `flash-update --verify-readback` enables extra checks.
 - **More tools:** partition-layout check, selected-partition backup/restore,
   writing an edited var image, inspecting/editing local backups, and
   **Remove boot-screen Wi-Fi/IP status**. To restore only var from a backup

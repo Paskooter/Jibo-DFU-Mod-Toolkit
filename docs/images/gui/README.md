@@ -21,7 +21,9 @@ xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/docs_screenshots.py --ph
 ```
 
 The unified flash list and download progress use `hosted-home.png`,
-`hosted-chooser.png`, `hosted-progress.png` and `hosted-resuming.png`. The hosted capture checks the
+`hosted-chooser.png`, `hosted-progress.png`, `hosted-resuming.png`,
+`hosted-checking.png` and `hosted-preparing.png`. Each progress capture waits for
+the visible label and Cancel button. The hosted capture checks the
 featured-first list, calibration-before-download order and Cancel-default review,
 plus layout at 920 × 640 and 1080 × 720.
 

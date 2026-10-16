@@ -60,6 +60,16 @@ try can continue from the checked partial.
 
 ![An interrupted download resuming in the same flash flow, with Cancel download still available](images/gui/hosted-resuming.png)
 
+After the download, **Checking the image** shows progress as the image is read.
+The signed details and every software file are checked together in one pass.
+**Preparing Jibo's software** then shows progress while unpacking the files once.
+Other checks keep an animated indicator moving, rather than resting on
+"Download complete 100%". Cancel remains available during this local work.
+
+![Checking the image with moving progress](images/gui/hosted-checking.png)
+
+![Preparing Jibo's software with moving progress](images/gui/hosted-preparing.png)
+
 ## Calibration choices
 
 Every package offers exactly two choices:
@@ -83,7 +93,10 @@ for recovery.
 Selecting an image or finishing a download never starts a flash. Review the package,
 calibration choice, official base, checksums, partitions and limitations first.
 **Cancel** is the default at every confirmation. Nothing is written unless you
-explicitly confirm. Phoenix images always read every transferred prefix back.
+explicitly confirm. As with official packages, a write finishes when Jibo accepts
+the transfer. Phoenix images do not automatically read each partition back.
+The fresh var rollback copy is still taken before writing. For an extra check,
+use the CLI's `flash-update --verify-readback`.
 
 The review of an authenticated Phoenix image states:
 

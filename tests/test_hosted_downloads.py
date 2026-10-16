@@ -19,7 +19,7 @@ class DownloadTests(HostedFixture):
         path = Path(h.download_image('latest', dest_dir=self.dest, progress=events.append))
         self.assertEqual(path.read_bytes(), self.server.files[self.archive_path])
         self.assertEqual(events[-1].phase, 'done')
-        self.assertEqual(events[-1].percent, 100)
+        self.assertIsNone(events[-1].percent)  # Review handoff is not a full, frozen download bar.
         self.assertEqual(len(h.local_hosted_images(self.dest)), 1)
         with patch.object(h, '_open', side_effect=AssertionError('offline must not fetch')):
             self.assertEqual(h.local_hosted_images(self.dest)[0].downloaded_path, str(path))

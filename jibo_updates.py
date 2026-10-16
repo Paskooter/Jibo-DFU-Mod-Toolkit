@@ -195,10 +195,11 @@ def validate_package(path: str | os.PathLike[str]) -> UpdatePackage:
         raise UpdateError("The selected update package cannot be a symbolic link.")
     source = selected.resolve()
     if source.is_file() and source.name.lower().endswith(ARCHIVE_SUFFIXES):
-        members = _archive_images(source)
         import jibo_flash_contract as contract
         try:
             phoenix = contract.verify_archive(source)
+            members = ({contract.ROLES[m['role']]: m['name'] for m in phoenix['members']}
+                       if phoenix else _archive_images(source))
         except (contract.ContractError, OSError, tarfile.TarError) as exc:
             raise UpdateError('Phoenix package authentication refused: ' + str(exc)) from exc
         return UpdatePackage(source, source.stem, {}, members,
@@ -718,11 +719,19 @@ def _package_images(package: UpdatePackage, workdir=None) -> Iterator[Mapping[st
                 try:
                     metadata = package.phoenix
                     contract.verify_archive(stream, {**metadata, 'unpacked_size': contract.validate_members(metadata),
-                                                     'embedded_metadata_sha256': metadata['_metadata_sha256']})
+                                                     'embedded_metadata_sha256': metadata['_metadata_sha256'],
+                                                     'sha256': metadata['_archive_sha256'],
+                                                     'size': metadata['_archive_size']})
                 except contract.ContractError as exc:
                     raise UpdateError('Hosted source changed before extraction: ' + str(exc)) from exc
+                before = contract.file_identity(stream)
                 stream.seek(0)
-                yield _extract_archive_images(package, Path(temporary), stream)
+                reader = contract.ProgressReader(stream, 'prepare')
+                extracted = _extract_archive_images(package, Path(temporary), reader)
+                if contract.file_identity(stream) != before:
+                    raise UpdateError('Image changed while preparing; nothing was written.')
+                contract.phase('prepare')
+                yield extracted
         else:
             yield _extract_archive_images(package, Path(temporary))
 

@@ -17,6 +17,7 @@ def test_hosted_docs_flow_has_featured_list_and_no_download_only_action(tmp_path
                             capture_output=True, text=True, timeout=40)
     assert result.returncode == 0, result.stdout + result.stderr
     assert {path.name for path in tmp_path.glob('hosted-*.png')} == {
-        'hosted-home.png', 'hosted-chooser.png', 'hosted-progress.png', 'hosted-resuming.png'}
+        'hosted-home.png', 'hosted-chooser.png', 'hosted-progress.png', 'hosted-resuming.png',
+        'hosted-checking.png', 'hosted-preparing.png'}
     assert 'Verified hosted flow: featured first, calibration before download, Cancel-default review' in result.stdout
     assert 'Geometry checked at 920x640 and 1080x720' in result.stdout

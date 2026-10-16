@@ -205,13 +205,19 @@ With Jibo in DFU, open **Install a Phoenix image or an official update**.
 The Phoenix image is featured first in the same list as your local
 packages, marked **— recommended**. Choosing it gets the image from jibo.io,
 checks it, then continues through calibration handling, the Cancel-default
-review, writing and readback without returning to the menu -- one flow with no
+review and writing without returning to the menu -- one flow with no
 separate download step. The fetched image
 and its working files are removed when the attempt ends, including a cancelled
 review or a failed write. Robot backups and your own packages are kept. Only an
 interrupted download stays so the same image can resume next time. Connection
 interruptions retry automatically up to six attempts without starting a second
 flash. You can cancel the retry wait; untrusted images are never retried.
+After downloading, **Checking the image** and **Preparing Jibo's software** show
+moving progress. The image is checked in one forward pass and unpacked once,
+without repeating those checks for an unchanged file. Like official packages,
+Phoenix writes finish when Jibo accepts each transfer; no automatic read-back
+follows. The fresh var rollback copy is still taken before writing. The CLI's
+`flash-update --verify-readback` remains available for an extra check.
 See [Phoenix images from jibo.io](docs/hosted-flash-images.md) for the two
 calibration choices and what an install does not fix.
 
