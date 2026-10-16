@@ -5,13 +5,17 @@ $ProgressPreference = 'SilentlyContinue'
 $launcherExitCode = 1
 
 function Confirm-Setup([string]$Question) {
-    Update-ToolkitSetup 'Waiting for your answer' $Question
-    Write-ToolkitLog 'question-start' @{ step=$script:ToolkitStep }
+    $script:ToolkitQuestionAnswer = $null
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    Write-ToolkitLog 'question-start' @{ step=$script:ToolkitStep; question=$Question }
     try {
         $answer = Show-ToolkitQuestion $Question
-        Write-ToolkitLog 'question-end' @{ step=$script:ToolkitStep; approved=[bool]$answer }
+        $choice = if ($script:ToolkitQuestionAnswer) { $script:ToolkitQuestionAnswer } elseif ($answer) { 'yes' } else { 'no' }
+        Write-ToolkitLog 'question-end' @{ step=$script:ToolkitStep; question=$Question; answer=$choice; duration_seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3); approved=[bool]$answer }
         return $answer
-    } finally { Update-ToolkitSetup $script:ToolkitStep $script:ToolkitPolicy.Hint }
+    } finally {
+        if ($script:ToolkitQuestionAnswer -ne 'closed') { Update-ToolkitSetup $script:ToolkitStep 'Continuing setup. You will be warned if this step stalls.' }
+    }
 }
 function Invoke-ApprovedAdmin([string]$File, [string]$Arguments) {
     $p = Invoke-ToolkitElevated -File $File -Arguments $Arguments -TimeoutSeconds 900 -AllowWait
@@ -126,12 +130,16 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
     New-Item -ItemType Directory -Path $run | Out-Null
     $setupStopped = $false
     $supportFailed = $false
+    $gui = $null
+    $guiStarted = [DateTime]::UtcNow
+    $guiTimer = [Diagnostics.Stopwatch]::StartNew()
     try {
         $readyFile = Join-Path $run 'ready'
         $linuxReady = Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'wslpath', '-u', '--', $readyFile)
         $command = ConvertTo-NativeArgumentLine @('bash', "$Target/wsl-user-launch.sh", "$Target/jibo-dfu", $Session, $linuxReady)
         $line = '--distribution {0} --user {1} --exec {2}' -f $Name, $User, $command
-        $gui = Start-ToolkitProcess -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList $line
+        Write-ToolkitLog 'command-start' @{step='Opening the toolkit'; command='wsl-gui'; start_utc=$guiStarted.ToString('o'); limit_seconds=$ReadyTimeoutSeconds}
+        $gui = Start-ToolkitProcess -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList $line -CaptureOutput
         $null = $gui.Handle # Retain ExitCode when using WaitForExit instead of -Wait.
         $readyTimer = [Diagnostics.Stopwatch]::StartNew()
         while (-not $gui.WaitForExit(100)) {
@@ -167,6 +175,16 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
         throw
     } finally {
         if (-not $setupStopped -and $gui -and -not $gui.WaitForExit(0)) { Stop-ToolkitProcess $gui }
+        if ($gui -and $gui.ToolkitStdout -and $gui.ToolkitStderr) {
+            $null = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($gui.ToolkitStdout, $gui.ToolkitStderr), 2000)
+            $output = ''
+            foreach ($pipe in @($gui.ToolkitStdout, $gui.ToolkitStderr)) {
+                if ($pipe.IsCompleted -and -not $pipe.IsFaulted) { $output += $pipe.GetAwaiter().GetResult() }
+            }
+            $output = if ($setupStopped -and $gui.ExitCode -eq 0) { '' } else { Protect-ToolkitText $output }
+            if ($output.Length -gt 8000) { $output = $output.Substring($output.Length - 8000) }
+            Write-ToolkitLog 'command-end' @{step='Opening the toolkit'; command='wsl-gui'; start_utc=$guiStarted.ToString('o'); end_utc=[DateTime]::UtcNow.ToString('o'); duration_seconds=[Math]::Round($guiTimer.Elapsed.TotalSeconds,3); result=$(if ($setupStopped -and $gui.ExitCode -eq 0) {'ok'} else {'failed'}); exit_code=$gui.ExitCode; output=$output}
+        }
         Remove-Item -LiteralPath $run -Recurse -Force
     }
 }
@@ -254,6 +272,7 @@ try {
         Set-ToolkitStep 'Installing Windows components'
         Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --no-distribution'
         Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--update'
+        Set-ToolkitUserWait $true 'Waiting for you: restart Windows if the WSL installer requested it, then reopen Jibo-DFU-Windows-x64.exe. Check the installer window or flashing shield icon on the taskbar.'
         throw 'WSL setup requested. Reboot if Windows requests it, then run this download again.'
     }
     $rows = @()
@@ -275,6 +294,7 @@ try {
         if (-not $winget) { throw 'Install Microsoft App Installer (winget) or usbipd-win from https://github.com/dorssel/usbipd-win/releases, then reopen this app.' }
         Set-ToolkitStep 'Installing Windows components'
         Invoke-ApprovedAdmin $winget.Source 'install --interactive --exact --id dorssel.usbipd-win'
+        Set-ToolkitUserWait $true 'Waiting for you: finish any usbipd-win installer window, restart Windows if requested, then reopen the EXE. Look for its installer window or flashing shield icon on the taskbar.'
         throw 'usbipd-win setup finished. Reopen this app so Windows refreshes PATH.'
     }
     $linuxUser = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-un')
@@ -307,7 +327,10 @@ try {
         # Existing validated bind/attach/reattach logic retains usbipd's UAC prompt.
         Set-ToolkitStep 'Connecting USB'
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
-        $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper) -TimeoutSeconds 180 -AllowWait
+        Set-ToolkitUserWait $true 'Waiting for you: approve USB sharing at the Windows administrator prompt. If it is hidden, look for a flashing shield icon on the taskbar.'
+        try {
+            $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper) -TimeoutSeconds 180 -AllowWait
+        } finally { Set-ToolkitUserWait $false }
         if ($usbResult.ExitCode -ne 0) {
             $error = New-Object Exception "USB handoff failed or administrator approval was declined. No GUI was started. $($usbResult.StartError) $($usbResult.Output -join ' ')"
             $error.Data['ToolkitExitCode'] = $usbResult.ExitCode

@@ -1,6 +1,45 @@
 # Synthetic console/WSL lifecycle; never invokes Win32, WSL, installers or USB.
 param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'), [string]$Case = 'classic')
 $ErrorActionPreference = 'Stop'
+if ($Case -eq 'setup-questions') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $source = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1'))
+    $questionPath = ($source -split 'function Show-ToolkitQuestion', 2)[1] -split 'function ', 2
+    if ($questionPath[0] -match 'MessageBox' -or $questionPath[0] -notmatch 'AskQuestion') { throw 'Question path must use the embedded view, not MessageBox' }
+    if ($env:OS -eq 'Windows_NT') { Start-ToolkitSetup }
+    else { Add-Type -TypeDefinition $script:ToolkitQuestionModelSource }
+    $q = New-Object ToolkitQuestionState
+    $q.Begin('Set up Linux?', 0)
+    if (-not $q.Pending -or $q.Answer -ne 'no' -or $q.KeysEnabled(0)) { throw 'Question must default to guarded No' }
+    if ($q.Respond('yes', 0.1)) { throw 'Accidental early key answered a question' }
+    if ($q.Remind(59) -or -not $q.Remind(60) -or $q.Remind(61)) { throw 'Reminder cadence is not 60 seconds' }
+    if (-not $q.Respond('closed', 61) -or $q.Pending -or $q.Answer -ne 'closed') { throw 'Close must count as No/closed' }
+    if ($env:OS -eq 'Windows_NT') {
+        try {
+            [ToolkitSetupStatus]::AskQuestion('Set up Linux?')
+            [ToolkitSetupStatus]::AnswerQuestion('yes')
+            if (-not [ToolkitSetupStatus]::QuestionPending) { throw 'Real view accepted a key before the guard' }
+            $flags = [Reflection.BindingFlags]'Static,NonPublic'
+            $window = [ToolkitSetupStatus].GetField('window',$flags).GetValue($null)
+            $label = [ToolkitSetupStatus].GetField('label',$flags).GetValue($null)
+            $detail = [ToolkitSetupStatus].GetField('detail',$flags).GetValue($null)
+            if (-not $window.TopMost -or -not $window.ControlBox -or $window.AcceptButton.Text -ne 'No' -or $label.Text -ne 'Waiting for your answer' -or $detail.Text -notmatch 'Set up Linux.*' -or $detail.Text -notmatch 'Closing.*No') { throw 'Question view state/text/default was not visible' }
+            # Advance the real question's own model, not the command/stall clock.
+            $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
+            $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
+            $model.Begin('Reminder fixture', $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
+            Start-Sleep -Milliseconds 300
+            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'question-reminder').Count -lt 1) { throw 'Real UI timer did not remind' }
+            [ToolkitSetupStatus]::AnswerQuestion('closed')
+            if ([ToolkitSetupStatus]::QuestionPending -or [ToolkitSetupStatus]::LastAnswer -ne 'closed' -or $label.Text -notmatch 'counts as No') { throw 'Closed question state/text was lost' }
+            [ToolkitSetupStatus]::UserWait($true, 'Waiting for you: approve Windows. Look for a flashing shield icon on the taskbar.')
+            if ($label.Text -ne 'Waiting for you' -or $detail.Text -notmatch 'shield icon') { throw 'External prompt instructions missing' }
+            [ToolkitSetupStatus]::UserWait($false, '')
+        } finally { Stop-ToolkitSetup }
+    }
+    Write-Output "PASS console: $Case"
+    exit 0
+}
 if ($Case -eq 'setup-feedback') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-feedback-' + [guid]::NewGuid().ToString('N'))
@@ -47,6 +86,69 @@ if ($Case -eq 'setup-stalls') {
         $rows = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json })
         $end = @($rows | Where-Object event -eq 'command-end')[-1]
         if ($end.exit_code -ne 124 -or $end.result -ne 'stalled' -or -not $end.start_utc -or -not $end.end_utc -or $summary -notmatch 'Checking the toolkit') { throw 'Command receipt/support text incomplete' }
+        Set-ToolkitUserWait $true 'Waiting for you: finish the installer; look for its shield icon.'
+        try {
+            $waiting = Invoke-ToolkitNative -File $binary -Arguments @('-NoProfile','-Command','Start-Sleep -Milliseconds 400') -TimeoutSeconds 0.1
+            if ($waiting.TimedOut -or $waiting.ExitCode -ne 0) { throw 'Waiting on a user was reported as a command stall' }
+        } finally { Set-ToolkitUserWait $false }
+        Write-Output "PASS console: $Case"
+    } finally { Remove-Item -Recurse -Force $tmp }
+    exit 0
+}
+if ($Case -eq 'setup-download') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+public class ToolkitHttpFixture : IDisposable {
+    readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+    TcpClient client;
+    public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
+    public ToolkitHttpFixture(string mode) {
+        listener.Start();
+        var thread = new Thread(delegate() {
+            try {
+                using (client = listener.AcceptTcpClient()) {
+                    var stream = client.GetStream();
+                    stream.Read(new byte[4096], 0, 4096);
+                    if (mode == "headers") Thread.Sleep(2000);
+                    byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n");
+                    stream.Write(header, 0, header.Length);
+                    byte[] block = new byte[65536];
+                    for (int i = 0; i < 8; i++) {
+                        stream.Write(block, 0, block.Length); stream.Flush();
+                        Thread.Sleep(mode == "idle" ? 2000 : 100);
+                    }
+                }
+            } catch { } // Client cancellation is the idle test's expected result.
+        });
+        thread.IsBackground = true; thread.Start();
+    }
+    public void Dispose() { listener.Stop(); if (client != null) client.Close(); }
+}
+'@
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-download-' + [guid]::NewGuid().ToString('N'))
+    Initialize-ToolkitLog -Root $tmp -Build ('d' * 40)
+    function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
+    function Update-ToolkitSetup { param($Text,$Detail,$Percent); if ($Percent -gt 0 -and $Percent -lt 100) { $script:intermediate++ } }
+    try {
+        foreach ($mode in @('active','idle','headers')) {
+            $script:intermediate = 0
+            $server = New-Object ToolkitHttpFixture $mode
+            $file = Join-Path $tmp ($mode + '.wsl')
+            $stalled = $false
+            try {
+                Set-ToolkitStep 'Downloading Ubuntu'
+                try { Receive-ToolkitDownload -Uri ("http://127.0.0.1:$($server.Port)/fixture") -OutFile $file -ExpectedBytes 524288 -IdleSeconds 0.4 }
+                catch { if ($_.Exception.Message -notmatch 'stalled') { throw }; $stalled = $true }
+                if ($stalled -ne ($mode -ne 'active')) { throw "Wrong download result: $mode" }
+                if ($mode -eq 'active' -and ($script:intermediate -lt 1 -or (Get-Item $file).Length -ne 524288)) { throw 'Download lacked real byte progress' }
+                if ($stalled -and (Test-Path $file)) { throw 'Stalled download was not removed' }
+            } finally { $server.Dispose() }
+        }
         Write-Output "PASS console: $Case"
     } finally { Remove-Item -Recurse -Force $tmp }
     exit 0
@@ -173,7 +275,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-feedback','setup-stalls','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
+    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
@@ -215,6 +317,18 @@ public class ToolkitConsoleNative {
 '@
     function Record($Kind, $Values) { [IO.File]::AppendAllText($global:ConsoleFixtureTrace, (([pscustomobject]@{Kind=$Kind; Values=@($Values)} | ConvertTo-Json -Compress) + "`n")) }
     if ($Case -in @('classic','terminal','hide-fallback')) {
+        Add-Type -TypeDefinition @'
+public class ToolkitSetupStatus {
+    public static System.IntPtr OwnerHandle { get { return new System.IntPtr(42); } }
+    public static bool QuestionPending { get { return false; } }
+    public static string LastAnswer { get { return "no"; } }
+    public static void Start() {} public static void Stop() {}
+    public static void AskQuestion(string text) {
+        System.IO.File.AppendAllText(System.Environment.GetEnvironmentVariable("DFU_CONSOLE_TEST_TRACE"), "{\"Kind\":\"question-view\",\"Values\":[]}\n");
+    }
+    public static object[] DrainEvents() { return new object[0]; }
+}
+'@
         $helper = Join-Path (Split-Path $BootstrapPath) 'console.ps1'
         if (-not (Test-Path $helper)) { throw 'Missing console controller' }
         . $helper
@@ -223,7 +337,7 @@ public class ToolkitConsoleNative {
         if (Show-ToolkitQuestion 'Setup?') { throw 'Dialog default must be No' }
         Show-ToolkitFailure 'Synthetic failure'
         $events = @(Get-Content $trace | ForEach-Object { $_ | ConvertFrom-Json })
-        if ($events.Count -ne 2 -or $events[0].Values[0] -ne 0x00051124 -or $events[1].Values[0] -ne 0x00010010) { throw 'Wrong question/error dialog flags or unexpected console operations' }
+        if ($events.Count -ne 2 -or $events[0].Kind -ne 'question-view' -or $events[1].Values[0] -ne 0x00010010) { throw 'Wrong question/error dialog flags or unexpected console operations' }
         Write-Output "PASS console: $Case"
         exit 0
     }

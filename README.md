@@ -19,8 +19,14 @@ Linux and Mac downloads include Python/Tk and all toolkit tools: no clone, compi
 
 **Windows command window:** the EXE is a Windows GUI application: no command
 window or Terminal tab is created, even at startup. Setup questions and failures
-use native dialogs; a small “Setting up Jibo DFU Toolkit…” window stays responsive
-until the GUI appears. Windows may still request UAC approval. Run
+use native dialogs; a small setup window names the current step and elapsed time.
+The Ubuntu download shows received MB and real progress. Setup warns if a step
+stalls, with **Keep waiting** where appropriate, rather than waiting forever.
+Questions appear inside that same window with **Yes / No** (default **No**).
+While waiting for you it stays on top, restores itself, flashes its taskbar button
+and sounds a reminder about once a minute. Closing a question means **No**.
+Windows may still request UAC approval; the window tells you to look for the
+flashing shield icon or installer. Waiting for your answer is not a setup stall. Run
 `Jibo-DFU-Windows-x64.exe -ShowConsole` only when troubleshooting; this can be
 combined with `-Distro NAME`. Source launchers keep their terminal.
 
@@ -141,6 +147,31 @@ Open PowerShell in the downloaded or cloned toolkit folder and run:
 ```
 
 The launcher selects that WSL 2 distribution, shares and attaches a connected Jibo USB device, then runs `run.sh --gui` inside WSL. WSLg must be available to display the window; if it is missing, run `wsl --update` and `wsl --shutdown`, then reopen the launcher. The robot can change from APX (`0955:7740`) to DFU (`0955:701a`); the launcher watches both USB identities while the menu is open. Sharing a new USB identity may show a Windows administrator prompt. Run `.\run.ps1 -Gui -Distro Ubuntu-22.04 -ManualUsb` if you prefer to attach from another PowerShell window with `usbipd bind --busid <BUSID>` (administrator) and `usbipd attach --wsl --busid <BUSID>`. The Linux `./run.sh --gui` also works directly inside WSL with manual USB attachment and WSLg. If PowerShell's script policy blocks the launcher, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Gui -Distro Ubuntu-22.04` for that invocation.
+
+### Windows troubleshooting
+
+If setup stops, use **Copy details** and paste that short summary in **#help** in
+[Phoenix Discord](https://discord.gg/FyDVYQ6FfV). It includes the build, Windows/WSL
+versions, the step that failed, the error and recent log lines. Review it before
+sharing; do not post passwords or Wi-Fi settings. **Open log folder** opens the
+full setup log. You can also paste `%LOCALAPPDATA%\Jibo-DFU-Toolkit\logs` into File
+Explorer. Each launch has a `setup-<UTC time>-<id>.log`; if local app data is not
+writable, the launcher uses `%TEMP%\Jibo-DFU-Toolkit\logs` instead.
+
+For **Starting Linux**, **Unpacking the toolkit**, **Checking the toolkit** or
+**Opening the toolkit**, close other WSL work first, run `wsl --shutdown` in
+PowerShell, then reopen the EXE. This stops all your WSL Linux sessions. Restart
+Windows if it still fails or a WSL install requested a reboot. For a stopped
+Ubuntu download, check your internet connection. For **Connecting USB**, look
+for a Windows administrator approval prompt and check the USB cable.
+`Jibo-DFU-Windows-x64.exe -ShowConsole` still provides console diagnostics.
+
+If `run-gui.cmd` says the only Linux is **Jibo-DFU-Toolkit**, use
+**Jibo-DFU-Windows-x64.exe** instead. That private Linux intentionally has no
+Linux password or sudo access; do not try to invent a password or run the source
+launcher as Windows administrator. For source builds, install your own Ubuntu
+with a normal sudo-enabled user and select it with
+`.\run.ps1 -Gui -Distro Ubuntu-22.04`.
 
 ## macOS
 

@@ -54,6 +54,24 @@ $UsbOnly = $true
 if ((Select-Distribution -Distributions $privateRows -Requested 'Jibo-DFU-Toolkit') -cne 'Jibo-DFU-Toolkit') { throw 'Release USB helper lost private distro access' }
 $UsbOnly = $false
 Write-Output 'PASS helpers: source private no-sudo guard (automatic/explicit); release USB access preserved'
+$questionFixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-question-log-' + [guid]::NewGuid().ToString('N'))
+try {
+    Initialize-ToolkitLog -Root $questionFixture -Build ('b' * 40)
+    Set-ToolkitStep 'Finding Linux'
+    function Show-ToolkitQuestion { param($Question); $script:ToolkitQuestionAnswer='closed'; return $false }
+    if (Confirm-Setup 'Set up a private Linux?') { throw 'Closed setup question was accepted' }
+    $questions = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json })
+    $asked = @($questions | Where-Object event -eq 'question-start')[-1]
+    $answered = @($questions | Where-Object event -eq 'question-end')[-1]
+    if ($asked.question -ne 'Set up a private Linux?' -or $answered.answer -ne 'closed' -or -not $asked.utc -or -not $answered.utc -or $answered.duration_seconds -lt 0) { throw 'Question log lacks text, answer or timing' }
+    1..12 | ForEach-Object { Write-ToolkitLog 'other' @{message='later event'} }
+    if ((Get-ToolkitSupportDetails 'failure') -notmatch 'closed') { throw 'Copy details lost question history' }
+    Write-Output 'PASS helpers: question text/closed answer/times/support history'
+} finally {
+    $script:ToolkitLogPath=$null; $script:ToolkitStepTimer=$null; $script:ToolkitFailedStep=$null
+    Remove-Item -Recurse -Force $questionFixture
+}
+
 
 # Exercise the entire missing-WSLg refusal path in a child process. A mock admin
 # function leaves a sentinel if any installation is attempted after declining.

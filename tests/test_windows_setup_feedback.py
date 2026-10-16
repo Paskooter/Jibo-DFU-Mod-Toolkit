@@ -174,6 +174,131 @@ Write-Output 'PASS private source guard'
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_launcher_early_failure_always_leaves_redacted_support_log(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('feedback_launcher', ROOT / 'scripts/release/windows_launcher.py')
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    log = module.initialize_setup_log(tmp_path, 'a' * 40)
+    module.write_setup_log(log, 'launcher-failed', r'C:\Users\private-name\failed password=private-secret')
+    details = module.support_details(log, r'C:\Users\private-name\failed password=private-secret')
+    assert log.is_file()
+    assert 'a' * 40 in details
+    assert 'Starting Windows launcher' in details
+    assert 'WSL: not checked' in details
+    assert 'private-name' not in details + log.read_text()
+    assert 'private-secret' not in details + log.read_text()
+
+
+def test_gui_ready_does_not_time_out_normal_toolkit_use(tmp_path):
+    code = """
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('BOOTSTRAP', [ref]$tokens, [ref]$errors)
+foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]}, $true)) { Invoke-Expression $f.Extent.Text }
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('e' * 40)
+Set-ToolkitStep 'Opening the toolkit'
+$script:ready=$null
+function Native { param($Arguments); $script:ready=$Arguments[-1]; return $script:ready }
+function Start-ToolkitProcess { param($FilePath,$ArgumentList); [IO.File]::WriteAllText($script:ready,'ready'); return [Diagnostics.Process]::Start((Get-Process -Id $PID).Path, '-NoProfile -Command "Start-Sleep -Milliseconds 900; exit 0"') }
+function Show-ToolkitSupportDialog { param($Message,[switch]$AllowWait); throw 'Ready GUI was incorrectly diagnosed as stalled' }
+$timer=[Diagnostics.Stopwatch]::StartNew()
+$code=Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session -ReadyTimeoutSeconds 0.2
+if ($code -ne 0 -or $timer.Elapsed.TotalSeconds -lt 0.8) { throw 'Normal toolkit lifetime was truncated' }
+Write-Output 'PASS ready GUI lifetime'
+""".replace('BOOTSTRAP', str(ROOT / 'scripts/release/bootstrap.ps1'))
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_gui_startup_failure_captures_real_stderr(tmp_path):
+    code = """
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('BOOTSTRAP', [ref]$tokens, [ref]$errors)
+foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]}, $true)) { Invoke-Expression $f.Extent.Text }
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('e' * 40)
+Set-ToolkitStep 'Opening the toolkit'
+function Native { param($Arguments); return $Arguments[-1] }
+$script:realStart=[scriptblock]::Create((Get-Command Start-ToolkitProcess).Definition)
+function Start-ToolkitProcess { param($FilePath,$ArgumentList,[switch]$CaptureOutput); return (& $script:realStart -FilePath (Get-Process -Id $PID).Path -ArgumentList (ConvertTo-NativeArgumentLine @('-NoProfile','-Command','[Console]::Error.WriteLine("synthetic GUI stderr"); exit 7')) -CaptureOutput:$CaptureOutput) }
+$code=Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session
+if ($code -ne 7 -or [IO.File]::ReadAllText($script:ToolkitLogPath) -notmatch 'synthetic GUI stderr') { throw 'GUI startup error output was hidden' }
+Write-Output 'PASS GUI stderr capture'
+""".replace('BOOTSTRAP', str(ROOT / 'scripts/release/bootstrap.ps1'))
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_secret_json_fields_are_not_copied_or_logged(tmp_path):
+    result = run_ps("""
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('a' * 40)
+Write-ToolkitLog 'diagnostic' @{output='{"ssid":"synthetic-network","password":"synthetic-password"}'}
+$text=Get-ToolkitSupportDetails 'test'
+if (($text + [IO.File]::ReadAllText($script:ToolkitLogPath)) -match 'synthetic-network|synthetic-password') { throw 'Quoted credential fields leaked' }
+""", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_winforms_failure_uses_copyable_native_fallback(tmp_path):
+    result = run_ps("""
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('a' * 40)
+Set-ToolkitStep 'Checking the toolkit'
+function Initialize-ToolkitStatus { throw 'Synthetic WinForms unavailable' }
+function Initialize-ToolkitConsole { return $true }
+function Get-ToolkitDialogOwner { return [IntPtr]42 }
+Add-Type -TypeDefinition 'using System; public class ToolkitConsoleNative { public static int MessageBox(IntPtr h,string text,string title,uint flags) { if ((flags & 3) != 3 || !text.Contains("Copy details") || !text.Contains("Open log folder")) throw new Exception("Missing recovery choices"); return 6; } }'
+$env:OS='Windows_NT'
+$script:copied=''
+function Set-Clipboard {param($Value); $script:copied=$Value}
+Show-ToolkitSupportDialog 'Synthetic failure' | Out-Null
+if ($script:copied -notmatch 'Checking the toolkit') { throw 'UI failure hid support details' }
+""", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_question_state_safe_default_guard_reminder_and_close(tmp_path):
+    result = run_ps("""
+Add-Type -TypeDefinition $script:ToolkitQuestionModelSource
+$q=New-Object ToolkitQuestionState
+$q.Begin('Set up Linux?', 0)
+if (-not $q.Pending -or $q.Answer -ne 'no' -or $q.Prompt -ne 'Set up Linux?') { throw 'Question did not start in safe No state' }
+if ($q.Respond('yes', [ToolkitQuestionState]::KeyGuardSeconds / 2)) { throw 'Early key answered a question' }
+if ($q.Remind([ToolkitQuestionState]::ReminderSeconds - 1) -or -not $q.Remind([ToolkitQuestionState]::ReminderSeconds) -or $q.Remind([ToolkitQuestionState]::ReminderSeconds + 1)) { throw 'Question reminder cadence is wrong' }
+if (-not $q.Respond('closed', 61) -or $q.Pending -or $q.Answer -ne 'closed') { throw 'Close did not count as No/closed' }
+""", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_confirm_setup_logs_closed_question_and_support_history(tmp_path):
+    code = """
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('BOOTSTRAP', [ref]$tokens, [ref]$errors)
+$f=$ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Confirm-Setup'}, $true)[0]
+Invoke-Expression $f.Extent.Text
+Add-Type -TypeDefinition 'public class ToolkitSetupStatus { public static void Start() {} public static void AskQuestion(string text) {} public static bool QuestionPending { get { return false; } } public static string LastAnswer { get { return "closed"; } } public static object[] DrainEvents() { return new object[0]; } public static void Update(string t,string d,int p) {} }'
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('b' * 40)
+Set-ToolkitStep 'Finding Linux'
+if (Confirm-Setup 'Set up a private Linux?') { throw 'Closed question was accepted' }
+$rows=@(Get-Content $script:ToolkitLogPath | ForEach-Object {$_ | ConvertFrom-Json})
+$start=@($rows | Where-Object event -eq 'question-start')[-1]
+$end=@($rows | Where-Object event -eq 'question-end')[-1]
+if ($start.question -ne 'Set up a private Linux?' -or $end.answer -ne 'closed' -or -not $end.utc -or $end.duration_seconds -lt 0) { throw 'Question/answer timing log incomplete' }
+Set-ToolkitStep 'Checking the toolkit'
+1..12 | ForEach-Object { Write-ToolkitLog 'other' @{message='later event'} }
+$details=Get-ToolkitSupportDetails 'failure'
+if ($details -notmatch 'Set up a private Linux' -or $details -notmatch 'closed') { throw 'Support text lost question history' }
+""".replace('BOOTSTRAP', str(ROOT / 'scripts/release/bootstrap.ps1'))
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_question_path_never_uses_message_box():
+    source = (ROOT / 'scripts/release/console.ps1').read_text()
+    question = source.split('function Show-ToolkitQuestion', 1)[1].split('function ', 1)[0]
+    assert 'MessageBox' not in question
+    assert 'AskQuestion' in question
+
+
 def test_download_inactivity_uses_changed_bytes_not_total_elapsed(tmp_path):
     result = run_ps("""
 if (Test-ToolkitStall -ElapsedSeconds 4000 -IdleSeconds 1 -LimitSeconds 120 -ActivityBased) { throw 'Slow active download was timed out by total duration' }

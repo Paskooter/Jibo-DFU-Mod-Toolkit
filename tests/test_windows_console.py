@@ -33,7 +33,7 @@ def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
 
 
 @pytest.mark.parametrize('case', [
-    'setup-feedback', 'setup-stalls', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
+    'setup-questions', 'setup-feedback', 'setup-stalls', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',
     'gui-start-failed', 'cleanup-failed', 'monitor-prompt', 'terminal-failed', 'hide-fallback',
     'watcher-exit-race', 'monitor-exit-race', 'gui-handle', 'watcher-handle', 'gui-code-unavailable',
@@ -145,7 +145,8 @@ def test_show_console_does_not_weaken_argument_validation(tmp_path, monkeypatch,
 def test_ready_signal_cannot_hide_console_during_a_prompt(tmp_path):
     helper = (ROOT / 'scripts/release/console.ps1').read_text()
     bootstrap = (ROOT / 'scripts/release/bootstrap.ps1').read_text()
-    assert 'ShowWindow' not in helper
+    assert 'GetConsoleWindow' not in helper
+    assert 'ShowWindow(owner, 5)' in helper  # Owned error fallback is shown, never a console hidden.
     assert 'Set-ToolkitConsole' not in bootstrap
     assert 'Stop-ToolkitSetup' in bootstrap
     assert 'Invoke-ToolkitConsolePrompt' not in (ROOT / 'run.ps1').read_text()
