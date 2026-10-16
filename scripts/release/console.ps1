@@ -439,7 +439,7 @@ public static class ToolkitSetupText {
         foreach (string known in KnownHints) if (hint == null && text.EndsWith(known)) hint = known;
         string plainTry = PlainTry(hint);
         string declined = closed ? "You closed the question, which counts as Not now." : "You chose Not now.";
-        string keepWaiting = "Choose Keep waiting to give it more time, or Stop setup to end setup now.";
+        string keepWaiting = "Choose Keep waiting to give it " + (waited == null ? "more time" : "another " + waited) + ", or Stop setup to end setup now.";
         ToolkitFailureText f;
         if (text.StartsWith("WSL setup declined."))
             f = F("info", "Setup stopped", declined + " Windows\u2019 Linux support was not installed, and nothing was changed.", "Open the toolkit again when you are ready to install it.");
@@ -454,8 +454,9 @@ public static class ToolkitSetupText {
         else if (text.IndexOf("canceled by the user", System.StringComparison.OrdinalIgnoreCase) >= 0)
             f = F("info", "Setup stopped", "The Windows permission prompt was declined, so nothing was installed.", "Open the toolkit again and choose Yes when Windows asks for permission.");
         else if (text.StartsWith("Downloading Ubuntu stalled"))
-            f = F("stall", "The download stopped", "No data has arrived for " + (waited ?? "a while") + ". The internet connection may have dropped.",
-                allowWait ? "Check your internet connection. " + keepWaiting : "Check your internet connection, then open the toolkit again.");
+            f = F("stall", "The download seems stuck", "No data has arrived for " + (waited ?? "a while") + ". The internet connection may have dropped.",
+                allowWait ? "Check your internet connection, then choose Keep waiting. If nothing arrives for another " + (waited ?? "while") + ", you will be asked again. Stop setup ends setup now."
+                          : "Check your internet connection, then open the toolkit again.");
         else if (text.StartsWith("Opening the toolkit stalled"))
             f = F("stall", "The toolkit window did not appear", "The toolkit has not opened after " + (waited ?? "a while") + ".",
                 allowWait ? keepWaiting + " If you stop, restart Windows before opening the toolkit again." : "Restart Windows, then open the toolkit again.");
@@ -503,7 +504,9 @@ public static class ToolkitSetupText {
         f.Decision = allowWait;
         return f;
     }
-    static string LowerFirst(string text) { return text.Length > 1 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text; }
+    static string LowerFirst(string text) { return text.Length > 1 && char.IsLower(text[1]) ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text; }
+    // "While downloading the toolkit's Linux": step titles all start with a verb.
+    public static string During(string stepTitle) { return string.IsNullOrEmpty(stepTitle) ? "" : "While " + LowerFirst(stepTitle); }
 }
 '@
 # The Windows setup window and support dialog. Compiled together with the model
@@ -1280,7 +1283,7 @@ public sealed class ToolkitSupportForm : Form {
         Footer.Controls.Add(KeepWaiting); Footer.Controls.Add(CloseButton);
         StepLine.Flags = ToolkitTheme.Line; TryLabel.Flags = HelpLabel.Flags = DetailsLabel.Flags = ToolkitTheme.Line;
         Headline.AccessibleRole = AccessibleRole.TitleBar;
-        StepLine.Text = text.Step == null ? "" : "While: " + text.Step;
+        StepLine.Text = ToolkitSetupText.During(text.Step);
         Headline.Text = text.Headline; What.Text = text.What;
         Technical.Text = String.IsNullOrEmpty(text.Technical) ? "" : "Message: " + text.Technical;
         Technical.Visible = Technical.Text.Length > 0;
@@ -1291,7 +1294,8 @@ public sealed class ToolkitSupportForm : Form {
         KeepWaiting.Text = "Keep waiting"; KeepWaiting.Visible = allowWait; KeepWaiting.AccessibleDescription = "Give this step more time.";
         CloseButton.Text = allowWait ? "Stop setup" : "Close";
         if (allowWait) CloseButton.AccessibleDescription = "Stop setup now. You can open the toolkit again later.";
-        Details.Multiline = true; Details.ReadOnly = true; Details.ScrollBars = ScrollBars.Both; Details.WordWrap = false;
+        // Wrapped, so nothing is hidden off to the right; copied text is unchanged.
+        Details.Multiline = true; Details.ReadOnly = true; Details.ScrollBars = ScrollBars.Vertical; Details.WordWrap = true;
         Details.BorderStyle = BorderStyle.None; Details.Text = summary; Details.AccessibleName = "Details for support";
         Copy.TabIndex = 0; Open.TabIndex = 1; Details.TabIndex = 2; Footer.TabIndex = 3; KeepWaiting.TabIndex = 0; CloseButton.TabIndex = 1;
         Copy.Click += delegate { DoCopy(); };
