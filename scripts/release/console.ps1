@@ -368,7 +368,7 @@ public static class ToolkitSetupText {
                 return W("restart", "Restart Windows, then open the toolkit again", "Not sure? Check the installer window or a flashing shield icon on the taskbar.",
                     "Restart Windows if the installer asked you to.", "Then open " + Exe + " again to finish setup.");
             case "Waiting for you: finish any usbipd-win installer window, restart Windows if requested, then reopen the EXE. Look for its installer window or flashing shield icon on the taskbar.":
-                return W("restart", "Finish installing USB support, then open the toolkit again", "Not sure? Check the installer window or a flashing shield icon on the taskbar.",
+                return W("restart", "Finish installing USB support", "Not sure? Check the installer window or a flashing shield icon on the taskbar.",
                     "Finish the usbipd-win installer, if it is still open.", "Restart Windows if it asks you to.", "Then open " + Exe + " again.");
             case "Waiting for you: approve USB sharing at the Windows administrator prompt. If it is hidden, look for a flashing shield icon on the taskbar.":
                 return W("admin", "Approve USB sharing if Windows asks", "Don\u2019t see a prompt? Check the taskbar for a flashing shield icon. If there is none, setup continues by itself.",
@@ -528,7 +528,21 @@ public static class ToolkitTheme {
     public static bool ForceReducedMotion;
     public static bool HighContrast { get { return ForceHighContrast || SystemInformation.HighContrast; } }
     static Color C(int rgb) { return Color.FromArgb(255, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255); }
-    static Color Pick(int rgb, Color system) { return HighContrast ? system : C(rgb); }
+    // Previews on a machine without high contrast: Windows' "Night sky" colors stand in
+    // for the system colors. Real high contrast always uses the system colors.
+    static Color Simulated(Color system) {
+        if (system == SystemColors.Window) return C(0x000000);
+        if (system == SystemColors.WindowText) return C(0xffffff);
+        if (system == SystemColors.Highlight) return C(0x8ee3f0);
+        if (system == SystemColors.HighlightText) return C(0x263b50);
+        if (system == SystemColors.GrayText) return C(0xa6a6a6);
+        return system;
+    }
+    static Color Pick(int rgb, Color system) {
+        if (ForceHighContrast && !SystemInformation.HighContrast) return Simulated(system);
+        return HighContrast ? system : C(rgb);
+    }
+    public static Color System(Color system) { return ForceHighContrast && !SystemInformation.HighContrast ? Simulated(system) : system; }
     public static Color Surface { get { return Pick(0xffffff, SystemColors.Window); } }
     public static Color Canvas { get { return Pick(0xf3f5f8, SystemColors.Window); } }
     public static Color Header { get { return Pick(0x141c26, SystemColors.Window); } }
@@ -709,7 +723,7 @@ public sealed class ToolkitButton : Button {
         else if (primary) { fill = down ? ToolkitTheme.AccentPressed : ToolkitTheme.Accent; ink = ToolkitTheme.AccentText; line = fill; }
         else if (safe) { fill = down ? ToolkitTheme.Pressed : hover ? ToolkitTheme.Hover : ToolkitTheme.AccentSoft; ink = ToolkitTheme.AccentInk; line = ToolkitTheme.Accent; }
         else { fill = down ? ToolkitTheme.Pressed : hover ? ToolkitTheme.Hover : ToolkitTheme.Surface; ink = ToolkitTheme.Text; line = hover && !hc ? ToolkitTheme.Muted : ToolkitTheme.Border; }
-        if (hc && Enabled && (hover || Focused)) { fill = SystemColors.Highlight; ink = SystemColors.HighlightText; line = SystemColors.HighlightText; }
+        if (hc && Enabled && (hover || Focused)) { fill = ToolkitTheme.System(SystemColors.Highlight); ink = ToolkitTheme.System(SystemColors.HighlightText); line = ToolkitTheme.System(SystemColors.HighlightText); }
         ToolkitTheme.Fill(g, fill, r, radius);
         float width = safe && Enabled ? ToolkitTheme.S(2, dpi) : Math.Max(1, ToolkitTheme.S(1, dpi));
         Color edge = line;
@@ -750,7 +764,7 @@ public sealed class ToolkitProgress : ProgressBar {
         var track = new Rectangle(0, 0, Width - 1, Height - 1);
         int radius = Height / 2;
         ToolkitTheme.Fill(g, ToolkitTheme.Trough, track, radius);
-        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, track, radius, 1);
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, ToolkitTheme.System(SystemColors.WindowText), track, radius, 1);
         Rectangle bar;
         if (Style == ProgressBarStyle.Marquee) {
             int segment = Math.Max(Height * 4, Width / 4);
@@ -856,7 +870,7 @@ public sealed class ToolkitChip : Control {
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         Color tone = ToolkitTheme.ToneColor(Tone), soft = ToolkitTheme.ToneSoft(Tone), ink = ToolkitTheme.ToneInk(Tone);
         ToolkitTheme.Fill(g, soft, r, Height / 2);
-        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, r, Height / 2, 1);
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, ToolkitTheme.System(SystemColors.WindowText), r, Height / 2, 1);
         int icon = Fonts.S(16), pad = (Height - icon) / 2;
         var box = new Rectangle(pad + Fonts.S(2), pad, icon, icon);
         if (Tone == "working") {
@@ -966,7 +980,7 @@ public sealed class ToolkitSteps : Control {
         using (var b = new SolidBrush(parent)) g.FillRectangle(b, ClientRectangle);
         var box = new Rectangle(0, 0, Width - 1, Height - 1);
         ToolkitTheme.Fill(g, ToolkitTheme.AttentionSoft, box, Fonts.S(6));
-        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, SystemColors.WindowText, box, Fonts.S(6), 1);
+        if (ToolkitTheme.HighContrast) ToolkitTheme.Outline(g, ToolkitTheme.System(SystemColors.WindowText), box, Fonts.S(6), 1);
         int y = Pad, left = TextLeft, inner = Width - left - Pad;
         for (int i = 0; i < Items.Length; i++) {
             if (i > 0) y += Fonts.S(8);
@@ -1251,7 +1265,7 @@ public sealed class ToolkitSetupView : Panel {
 }
 // Stall / failure dialog: what happened, what to try, then one obvious Copy details
 // action. The summary text is shown and copied exactly as given (never reworded).
-public sealed class ToolkitSupportForm : Form {
+public sealed class ToolkitSupportView : Panel {
     public readonly ToolkitButton Copy = new ToolkitButton(), Open = new ToolkitButton(), KeepWaiting = new ToolkitButton(), CloseButton = new ToolkitButton();
     public readonly ToolkitText StepLine = new ToolkitText(), Headline = new ToolkitText(), What = new ToolkitText(), TryLabel = new ToolkitText(),
         TryText = new ToolkitText(), HelpLabel = new ToolkitText(), HelpLine = new ToolkitText(), DetailsLabel = new ToolkitText();
@@ -1263,17 +1277,10 @@ public sealed class ToolkitSupportForm : Form {
     readonly bool allowWait;
     ToolkitFonts fonts;
     public string CopyState = ""; // "", "copied", "failed" (previews set it directly)
-    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
     public const int LogicalWidth = 600;
-    public ToolkitSupportForm(ToolkitFailureText text, string summary, string folder, bool allowWait) {
+    public ToolkitSupportView(ToolkitFailureText text, string summary, string folder, bool allowWait) {
         this.text = text; this.summary = summary; this.allowWait = allowWait;
-        Text = ToolkitSetupText.Product + (allowWait ? " \u2013 setup needs a decision" : " \u2013 setup stopped");
-        AccessibleName = text.Headline;
-        AccessibleDescription = text.What + " " + text.Try;
-        StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false; MinimizeBox = false; TopMost = true; ShowInTaskbar = false;
-        AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
         icon.Paint += delegate(object sender, PaintEventArgs e) {
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             string tone = text.Tone == "info" ? "accent" : text.Tone;
@@ -1290,7 +1297,9 @@ public sealed class ToolkitSupportForm : Form {
         Headline.Text = text.Headline; What.Text = text.What;
         TryLabel.Text = "WHAT TO TRY"; TryText.Text = text.Try; TryText.AccessibleName = "What to try: " + text.Try;
         HelpLabel.Text = "GET HELP"; DetailsLabel.Text = "DETAILS FOR SUPPORT (THIS IS WHAT GETS COPIED)";
-        Copy.Text = "Copy details"; Copy.Kind = "primary"; Copy.AccessibleDescription = ToolkitSetupText.HelpLine;
+        Copy.Text = "Copy details"; Copy.Kind = "primary";
+        // Read first by screen readers, since focus starts here.
+        Copy.AccessibleDescription = text.Headline + ". " + text.What + " What to try: " + text.Try + " " + ToolkitSetupText.HelpLine;
         Open.Text = "Open log folder"; Open.Enabled = !String.IsNullOrEmpty(folder);
         KeepWaiting.Text = "Keep waiting"; KeepWaiting.Visible = allowWait; KeepWaiting.AccessibleDescription = "Give this step more time.";
         CloseButton.Text = allowWait ? "Stop setup" : "Close";
@@ -1304,10 +1313,9 @@ public sealed class ToolkitSupportForm : Form {
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true }); }
             catch (Exception) { Open.Text = "Could not open the folder"; Relayout(); }
         };
-        AcceptButton = Copy; CancelButton = CloseButton;
         ApplyDpi(96);
     }
-    void DoCopy() {
+    public void DoCopy() {
         try { Clipboard.SetText(summary); CopyState = "copied"; }
         catch (Exception) { CopyState = "failed"; }
         Relayout();
@@ -1333,7 +1341,7 @@ public sealed class ToolkitSupportForm : Form {
         StepLine.ForeColor = ToolkitTheme.Muted; Headline.ForeColor = ToolkitTheme.Text; What.ForeColor = ToolkitTheme.Text;
         TryLabel.ForeColor = ToolkitTheme.ToneInk(tone); TryText.ForeColor = ToolkitTheme.Text;
         HelpLabel.ForeColor = DetailsLabel.ForeColor = ToolkitTheme.Muted;
-        TryBox.Fill = ToolkitTheme.ToneSoft(tone); TryBox.Line = ToolkitTheme.HighContrast ? SystemColors.WindowText : Color.Empty;
+        TryBox.Fill = ToolkitTheme.ToneSoft(tone); TryBox.Line = ToolkitTheme.HighContrast ? ToolkitTheme.System(SystemColors.WindowText) : Color.Empty;
         DetailsBox.Fill = ToolkitTheme.Canvas; DetailsBox.Line = ToolkitTheme.Border;
         Footer.Fill = ToolkitTheme.Canvas; Footer.Radius = 0;
         Details.BackColor = ToolkitTheme.Canvas; Details.ForeColor = ToolkitTheme.Text;
@@ -1381,32 +1389,59 @@ public sealed class ToolkitSupportForm : Form {
             int waitWidth = KeepWaiting.Measure(fonts.Button, fonts.Dpi);
             KeepWaiting.SetBounds(CloseButton.Left - S(10) - waitWidth, S(16), waitWidth, bh);
         }
-        var size = new Size(width, Footer.Bottom);
-        ClientSize = size;
-        if (ClientSize != size) Size = new Size(Width + size.Width - ClientSize.Width, Height + size.Height - ClientSize.Height);
+        Size = new Size(width, Footer.Bottom);
         ResumeLayout(true);
         Invalidate(true);
-    }
-    protected override void OnLoad(EventArgs e) {
-        ApplyDpi(ToolkitTheme.DpiOf(this));
-        if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
-        base.OnLoad(e);
-        ActiveControl = Copy;
     }
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
         using (var pen = new Pen(ToolkitTheme.Border)) e.Graphics.DrawLine(pen, 0, Footer.Top - 1, Width, Footer.Top - 1);
     }
+}
+// Window for the support view: owned by the setup window, topmost, sized to the view.
+public sealed class ToolkitSupportForm : Form {
+    public readonly ToolkitSupportView View;
+    public ToolkitButton KeepWaiting { get { return View.KeepWaiting; } }
+    public ToolkitButton CloseButton { get { return View.CloseButton; } }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    public ToolkitSupportForm(ToolkitFailureText text, string summary, string folder, bool allowWait) {
+        View = new ToolkitSupportView(text, summary, folder, allowWait);
+        Text = ToolkitSetupText.Product + (allowWait ? " \u2013 setup needs a decision" : " \u2013 setup stopped");
+        AccessibleName = text.Headline; AccessibleRole = AccessibleRole.Dialog;
+        AccessibleDescription = text.What + " " + text.Try;
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false; TopMost = true; ShowInTaskbar = false;
+        AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
+        Controls.Add(View);
+        AcceptButton = View.Copy; CancelButton = View.CloseButton;
+        View.SizeChanged += delegate { Fit(); };
+        Fit();
+    }
+    void Fit() {
+        View.Location = Point.Empty;
+        if (ClientSize == View.Size) return;
+        ClientSize = View.Size;
+        if (ClientSize != View.Size) Size = new Size(Width + View.Width - ClientSize.Width, Height + View.Height - ClientSize.Height);
+    }
+    protected override void OnLoad(EventArgs e) {
+        View.ApplyDpi(ToolkitTheme.DpiOf(this));
+        Fit();
+        if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        base.OnLoad(e);
+        ActiveControl = View.Copy;
+    }
     protected override void WndProc(ref Message m) {
         if (m.Msg == 0x02E0) {
             var r = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
-            if (ToolkitTheme.ForcedDpi == 0) ApplyDpi((int)((long)m.WParam & 0xffff));
+            if (ToolkitTheme.ForcedDpi == 0) View.ApplyDpi((int)((long)m.WParam & 0xffff));
             Location = new Point(r.Left, r.Top);
+            Fit();
             m.Result = IntPtr.Zero;
             return;
         }
         base.WndProc(ref m);
-        if ((m.Msg == 0x0015 || m.Msg == 0x001A) && fonts != null) Relayout();
+        if (m.Msg == 0x0015 || m.Msg == 0x001A) View.Relayout();
     }
 }
 // Window that hosts the setup view: keeps its size in step with the view, follows
