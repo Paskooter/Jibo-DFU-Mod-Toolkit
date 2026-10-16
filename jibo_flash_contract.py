@@ -470,7 +470,7 @@ def verify_archive(source, manifest=None):
                 entries.append(entry)
                 if entry.name in seen or entry.name.startswith('/') or '..' in PurePosixPath(entry.name).parts or \
                         '\\' in entry.name or '%' in entry.name:
-                    fail('Unsafe or duplicate hosted archive member')
+                    fail('Hosted archive has an unsafe path or duplicate member')
                 seen.add(entry.name)
                 marker = PurePosixPath(entry.name).name == 'phoenix-flash.json'
                 if marker and (not entry.isfile() or not 0 < entry.size <= ENVELOPE_MAX):
