@@ -5,6 +5,9 @@ name: Setup window previews
 # tags, releases or publishes anything, and never runs setup, WSL or USB.
 on:
   workflow_dispatch:
+  # Throwaway preview branches only (GitHub cannot dispatch a workflow that is not on main yet).
+  push:
+    branches: ['preview/**']
 
 permissions:
   contents: read
