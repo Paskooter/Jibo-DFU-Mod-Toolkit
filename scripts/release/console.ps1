@@ -272,7 +272,7 @@ public sealed class ToolkitStepText {
     public int Phase;
 }
 public sealed class ToolkitQuestionText {
-    public string Id, Title, Body, WhatHappens, HowLong, YesLabel, NoLabel, YesHelp, Footnote;
+    public string Id, Title, Body, WhatHappens, HowLong, YesLabel, NoLabel, YesHelp, Footnote, Declined;
 }
 public sealed class ToolkitWaitText {
     public string Kind, Title, Hint;
@@ -328,8 +328,8 @@ public static class ToolkitSetupText {
         }
         return "";
     }
-    static ToolkitQuestionText Q(string id, string title, string body, string what, string howLong, string yes, string yesHelp) {
-        var q = new ToolkitQuestionText(); q.Id = id; q.Title = title; q.Body = body; q.WhatHappens = what; q.HowLong = howLong;
+    static ToolkitQuestionText Q(string id, string title, string body, string what, string howLong, string yes, string yesHelp, string declined) {
+        var q = new ToolkitQuestionText(); q.Id = id; q.Title = title; q.Body = body; q.WhatHappens = what; q.HowLong = howLong; q.Declined = declined;
         q.YesLabel = yes; q.NoLabel = "Not now"; q.YesHelp = yesHelp;
         q.Footnote = "Not now stops setup here and installs nothing. Closing this window also counts as Not now.";
         return q;
@@ -339,18 +339,21 @@ public static class ToolkitSetupText {
             case "wsl": return Q("wsl", "Install Windows\u2019 Linux support?",
                 "The toolkit runs on Linux inside Windows. Windows needs its Linux feature (WSL) installed or updated first.",
                 "Windows installs it from Microsoft. Windows will ask for permission, and may ask you to restart.",
-                "Several minutes, depending on your internet speed.", "Install", "Installs Windows\u2019 Linux feature from Microsoft");
+                "Several minutes, depending on your internet speed.", "Install", "Installs Windows\u2019 Linux feature from Microsoft",
+                "Windows\u2019 Linux support was not installed.");
             case "linux": return Q("linux", "Set up the toolkit\u2019s Linux?",
                 "The toolkit runs in its own private copy of Ubuntu Linux, kept separate from the rest of this PC.",
                 "A one-time download of about 345 MB from Ubuntu\u2019s official site. No Linux account or password needed.",
-                "Usually several minutes, depending on your internet speed.", "Set it up", "Downloads about 345 MB and sets up the toolkit\u2019s Linux");
+                "Usually several minutes, depending on your internet speed.", "Set it up", "Downloads about 345 MB and sets up the toolkit\u2019s Linux",
+                "Nothing was downloaded or installed.");
             case "usb": return Q("usb", "Install USB support?",
                 "To talk to Jibo over USB, the toolkit needs usbipd-win, a free Windows tool.",
                 "Its installer opens. Follow its steps and choose Yes if Windows asks for permission. Then open the toolkit again.",
-                "Usually a minute or two.", "Install", "Opens the usbipd-win installer");
+                "Usually a minute or two.", "Install", "Opens the usbipd-win installer",
+                "USB support was not installed.");
         }
         var other = new ToolkitQuestionText(); other.Id = ""; other.Title = prompt; other.YesLabel = "Yes"; other.NoLabel = "No";
-        other.YesHelp = ""; other.Footnote = "No stops setup here. Closing this window also counts as No.";
+        other.YesHelp = ""; other.Declined = ""; other.Footnote = "No stops setup here. Closing this window also counts as No.";
         return other;
     }
     static ToolkitWaitText W(string kind, string title, string hint, params string[] steps) {
@@ -710,7 +713,7 @@ public sealed class ToolkitText : Control {
 // AcceptButton/CancelButton, PerformClick, Enabled, keyboard and screen readers.
 public sealed class ToolkitButton : Button {
     public string Kind = "secondary";
-    public bool Shield;
+    public bool Shield, Done; // Done: a drawn check mark before the text (no font glyph needed).
     bool hover, down;
     public ToolkitButton() {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
@@ -719,7 +722,7 @@ public sealed class ToolkitButton : Button {
     }
     public int Measure(Font font, int dpi) {
         int text = ToolkitTheme.TextWidth(Text, font);
-        return Math.Max(ToolkitTheme.S(112, dpi), text + ToolkitTheme.S(Shield ? 58 : 36, dpi));
+        return Math.Max(ToolkitTheme.S(112, dpi), text + ToolkitTheme.S(Shield || Done ? 58 : 36, dpi));
     }
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = down = false; Invalidate(); base.OnMouseLeave(e); }
@@ -747,11 +750,12 @@ public sealed class ToolkitButton : Button {
         var inset = Rectangle.Inflate(r, -(int)(width / 2), -(int)(width / 2));
         ToolkitTheme.Outline(g, edge, inset, radius, width);
         var content = new Rectangle(0, 0, Width, Height);
-        if (Shield) {
+        if (Shield || Done) {
             int icon = ToolkitTheme.S(16, dpi);
             int textWidth = ToolkitTheme.TextWidth(Text, Font);
             int start = (Width - icon - ToolkitTheme.S(8, dpi) - textWidth) / 2;
-            ToolkitTheme.Shield(g, new Rectangle(start, (Height - icon) / 2, icon, icon));
+            var box = new Rectangle(start, (Height - icon) / 2, icon, icon);
+            if (Shield) ToolkitTheme.Shield(g, box); else ToolkitTheme.Check(g, ink, box, Math.Max(1.5f, ToolkitTheme.S(2, dpi)));
             content = new Rectangle(start + icon + ToolkitTheme.S(8, dpi), 0, textWidth + 2, Height);
             TextRenderer.DrawText(g, Text, Font, content, ink, ToolkitTheme.Line);
         } else TextRenderer.DrawText(g, Text, Font, content, ink, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
@@ -1172,7 +1176,7 @@ public sealed class ToolkitSetupView : Panel {
             } else {
                 tone = "neutral"; glyph = "neutral"; chip = "Setup is stopping";
                 title = s.Answer == "closed" ? "You closed the question" : "You chose \u201c" + q.NoLabel + "\u201d";
-                description = (s.Answer == "closed" ? "That counts as \u201c" + q.NoLabel + "\u201d. " : "") + (q.Id == "" ? "Setup stops here." : "Setup stops here. Nothing was downloaded or installed.");
+                description = (s.Answer == "closed" ? "That counts as \u201c" + q.NoLabel + "\u201d. " : "") + "Setup stops here." + (q.Declined.Length > 0 ? " " + q.Declined : "");
             }
         } else if (s.Mode == "waiting") {
             var w = ToolkitSetupText.Wait(s.Wait);
@@ -1326,7 +1330,10 @@ public sealed class ToolkitSupportView : Panel {
         // Wrapped, so nothing is hidden off to the right; copied text is unchanged.
         Details.Multiline = true; Details.ReadOnly = true; Details.ScrollBars = ScrollBars.Vertical; Details.WordWrap = true;
         Details.BorderStyle = BorderStyle.None; Details.Text = summary; Details.AccessibleName = "Details for support";
-        Copy.TabIndex = 0; Open.TabIndex = 1; Details.TabIndex = 2; Footer.TabIndex = 3; KeepWaiting.TabIndex = 0; CloseButton.TabIndex = 1;
+        // Tab order: Copy details, Open log folder, the details text, then the decision.
+        int order = 10;
+        foreach (Control c in Controls) c.TabIndex = order++;
+        Copy.TabIndex = 0; Open.TabIndex = 1; DetailsBox.TabIndex = 2; Footer.TabIndex = 3; KeepWaiting.TabIndex = 0; CloseButton.TabIndex = 1;
         Copy.Click += delegate { DoCopy(); };
         Open.Click += delegate {
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true }); }
@@ -1366,7 +1373,8 @@ public sealed class ToolkitSupportView : Panel {
         TryBox.BackColor = TryBox.Fill; DetailsBox.BackColor = DetailsBox.Fill; Footer.BackColor = Footer.Fill; // Children paint this color.
         Details.BackColor = ToolkitTheme.Canvas; Details.ForeColor = ToolkitTheme.Text;
         TryBox.Radius = DetailsBox.Radius = S(6);
-        if (CopyState == "copied") { HelpLine.Text = ToolkitSetupText.CopiedLine; HelpLine.ForeColor = ToolkitTheme.Success; Copy.Text = "Copied \u2713"; }
+        Copy.Done = CopyState == "copied";
+        if (CopyState == "copied") { HelpLine.Text = ToolkitSetupText.CopiedLine; HelpLine.ForeColor = ToolkitTheme.Success; Copy.Text = "Copied"; }
         else if (CopyState == "failed") { HelpLine.Text = ToolkitSetupText.CopyFailedLine; HelpLine.ForeColor = ToolkitTheme.DangerInk; Copy.Text = "Copy again"; }
         else { HelpLine.Text = ToolkitSetupText.HelpLine; HelpLine.ForeColor = ToolkitTheme.Text; Copy.Text = "Copy details"; }
         HelpLine.AccessibleName = HelpLine.Text;
@@ -1431,7 +1439,7 @@ public sealed class ToolkitSupportForm : Form {
         AccessibleDescription = text.What + " " + text.Try;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false; MinimizeBox = false; TopMost = true; ShowInTaskbar = false;
+        MaximizeBox = false; MinimizeBox = false; TopMost = true;
         AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
         Controls.Add(View);
         AcceptButton = View.Copy; CancelButton = View.CloseButton;
@@ -1729,7 +1737,10 @@ function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
             try {
                 if ($choice -eq 6) { Set-Clipboard -Value $summary }
                 if ($choice -eq 7 -and $folder) { Start-Process -FilePath explorer.exe -ArgumentList ('"' + $folder + '"') | Out-Null }
-            } catch { [ToolkitConsoleNative]::MessageBox($owner, 'Could not copy the details or open the log folder. Look in %LOCALAPPDATA%\Jibo-DFU-Toolkit\logs for the setup log, and look it over before sharing it.', 'Jibo DFU Toolkit', 0x00010010) | Out-Null }
+            } catch {
+                $where = if ($folder) { "The setup log is in $folder" } else { 'The setup log folder is unknown' }
+                [ToolkitConsoleNative]::MessageBox($owner, "Could not copy the details or open the log folder. $where. Look it over before sharing it.", 'Jibo DFU Toolkit', 0x00010010) | Out-Null
+            }
             return $false
         }
     }
