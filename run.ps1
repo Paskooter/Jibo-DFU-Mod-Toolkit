@@ -190,7 +190,8 @@ function Invoke-UacBind {
         $argumentLine = 'bind --busid ' + $BusId
         $bind = {
             Write-Host ("Sharing Jibo on USB port {0}; Windows may ask for administrator approval." -f $BusId) -ForegroundColor Cyan
-            Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru -WorkingDirectory $env:SystemRoot
+            if ($ConsoleHelper) { Invoke-ToolkitElevated -File $script:UsbipdPath -Arguments $argumentLine -TimeoutSeconds 120 }
+            else { Start-Process -FilePath $script:UsbipdPath -ArgumentList $argumentLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru -WorkingDirectory $env:SystemRoot }
         }
         $process = & $bind
         if ($process.ExitCode -ne 0) {
@@ -309,7 +310,13 @@ function Get-LinuxRepoPath {
 function Select-Distribution {
     param([object[]]$Distributions, [string]$Requested)
 
-    $available = @($Distributions | Where-Object { $_.Version -eq 2 })
+    $allWsl2 = @($Distributions | Where-Object { $_.Version -eq 2 })
+    # The EXE's locked, no-sudo account is for its frozen payload, not builds.
+    # USB-only invocations belong to the EXE and must retain access to it.
+    if (-not $UsbOnly -and ($Requested -ieq 'Jibo-DFU-Toolkit' -or ($allWsl2.Count -gt 0 -and @($allWsl2 | Where-Object { $_.Name -ine 'Jibo-DFU-Toolkit' }).Count -eq 0))) {
+        throw 'Jibo-DFU-Toolkit is the EXE''s private Linux and has no Linux password or sudo access. Open Jibo-DFU-Windows-x64.exe instead. For source builds, install your own Ubuntu with a sudo-enabled user and run .\run.ps1 -Gui -Distro Ubuntu-22.04. Running Windows as administrator does not change the Linux user.'
+    }
+    $available = @($allWsl2 | Where-Object { $UsbOnly -or $_.Name -ine 'Jibo-DFU-Toolkit' })
     if ($available.Count -eq 0) {
         throw 'No installed WSL 2 distribution was found. This launcher does not install WSL or a Linux distribution.'
     }

@@ -76,9 +76,9 @@ function Set-ToolkitStep([string]$Name) {
     Update-ToolkitSetup $Name $script:ToolkitPolicy.Hint
 }
 function Complete-ToolkitStep([string]$Result = 'ok', [int]$ExitCode = 0, [string]$ErrorText = '') {
+    if ($Result -ne 'ok' -and -not $script:ToolkitFailedStep) { $script:ToolkitFailedStep = $script:ToolkitStep }
     if (-not $script:ToolkitStepTimer) { return }
     Write-ToolkitLog 'step-end' @{ step=$script:ToolkitStep; start_utc=$script:ToolkitStepStart.ToString('o'); end_utc=[DateTime]::UtcNow.ToString('o'); duration_seconds=[Math]::Round($script:ToolkitStepTimer.Elapsed.TotalSeconds,3); result=$Result; exit_code=$ExitCode; error=$ErrorText }
-    if ($Result -ne 'ok') { $script:ToolkitFailedStep = $script:ToolkitStep }
     $script:ToolkitStepTimer = $null
 }
 function Get-ToolkitSupportDetails([string]$Message) {
@@ -174,8 +174,11 @@ public class ToolkitConsoleNative {
 }
 function Show-ToolkitQuestion([string]$Question) {
     if (-not (Initialize-ToolkitConsole)) { throw 'Windows setup dialogs are unavailable.' }
-    # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND.
-    return ([ToolkitConsoleNative]::MessageBox([IntPtr]::Zero, $Question, 'Jibo DFU Toolkit', 0x00010124) -eq 6)
+    # Owned, foreground, topmost/system-modal: a question must not hide behind
+    # the status window or another app. No remains the default.
+    $owner = [IntPtr]::Zero
+    if ('ToolkitSetupStatus' -as [type]) { $owner = [ToolkitSetupStatus]::OwnerHandle }
+    return ([ToolkitConsoleNative]::MessageBox($owner, $Question, 'Jibo DFU Toolkit', 0x00051124) -eq 6)
 }
 function Initialize-ToolkitStatus {
     if (-not ('ToolkitSetupStatus' -as [type])) {
@@ -190,6 +193,8 @@ using System.Windows.Forms;
 public class ToolkitSetupStatus {
     static Form window;
     static Thread thread;
+    static IntPtr ownerHandle;
+    public static IntPtr OwnerHandle { get { return ownerHandle; } }
     static Label label, detail, elapsed;
     static ProgressBar progress;
     static DateTime stepStart;
@@ -225,7 +230,7 @@ public class ToolkitSetupStatus {
             timer.Tick += delegate { elapsed.Text = "This step: " + (int)(DateTime.UtcNow - stepStart).TotalSeconds + " seconds. Setup is supervised for stalls."; };
             timer.Start();
             window.FormClosed += delegate { timer.Dispose(); };
-            window.Shown += delegate { ready.Set(); };
+            window.Shown += delegate { ownerHandle = window.Handle; ready.Set(); };
             Application.Run(window);
         });
         thread.IsBackground = true;
@@ -243,7 +248,7 @@ public class ToolkitSetupStatus {
         // Queue ALL widget access on the owning STA thread.
         if (window != null && window.IsHandleCreated && !window.IsDisposed) {
             window.BeginInvoke(new Action(delegate {
-                if (currentStep != text && percent < 0) stepStart = DateTime.UtcNow;
+                if (percent < 0) stepStart = DateTime.UtcNow;
                 currentStep = text; currentDetail = hint; currentPercent = percent;
                 PaintStatus();
             }));
@@ -355,6 +360,28 @@ function ConvertTo-ToolkitNativeLines([string]$Text) {
         $lines = $lines[0..($lines.Count - 2)]
     }
     return @($lines)
+}
+function Invoke-ToolkitElevated([string]$File, [string]$Arguments, [double]$TimeoutSeconds = 180, [switch]$AllowWait) {
+    $started = [DateTime]::UtcNow
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $code = 1; $message = ''; $process = $null
+    Write-ToolkitLog 'command-start' @{step=$script:ToolkitStep; command=[IO.Path]::GetFileName($File); start_utc=$started.ToString('o'); limit_seconds=$TimeoutSeconds}
+    try {
+        $process = Start-Process -FilePath $File -ArgumentList $Arguments -Verb RunAs -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        if (-not (Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait)) {
+            $code = 124
+            $error = New-Object TimeoutException "$script:ToolkitStep stalled: administrator command did not finish. Check Windows prompts, then restart Windows and reopen."
+            $error.Data['ToolkitStall'] = $true
+            throw $error
+        }
+        $code = $process.ExitCode
+        return [pscustomobject]@{ExitCode=$code}
+    } catch { $message = $_.Exception.Message; throw }
+    finally {
+        Write-ToolkitLog 'command-end' @{step=$script:ToolkitStep; command=[IO.Path]::GetFileName($File); start_utc=$started.ToString('o'); end_utc=[DateTime]::UtcNow.ToString('o'); duration_seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3); result=$(if ($code -eq 0) {'ok'} elseif ($code -eq 124) {'stalled'} else {'failed'}); exit_code=$code; error=$message}
+        if ($process -is [Diagnostics.Process]) { $process.Dispose() }
+    }
 }
 function Wait-ToolkitProcess($Process, [double]$TimeoutSeconds = 120, [switch]$AllowWait) {
     $timer = [Diagnostics.Stopwatch]::StartNew()

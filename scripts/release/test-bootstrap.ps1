@@ -3,7 +3,7 @@ param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'))
 $ErrorActionPreference = 'Stop'
 $bootstrapText = [IO.File]::ReadAllText($BootstrapPath)
 if ($bootstrapText -match 'Read-Host') { throw 'Windowless bootstrap must never wait for console input' }
-if ($bootstrapText -notmatch '-Verb RunAs -WindowStyle Hidden') { throw 'Elevated setup must be hidden' }
+if ($bootstrapText -notmatch 'Invoke-ToolkitElevated' -or [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) -notmatch '-Verb RunAs -WindowStyle Hidden') { throw 'Elevated setup must use the bounded hidden helper' }
 $hostBinary = (Get-Process -Id $PID).Path
 $path = $BootstrapPath
 $tokens = $null
@@ -40,6 +40,21 @@ $usbPath = Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'run.ps1'
 $usbErrors=$null
 [System.Management.Automation.Language.Parser]::ParseFile($usbPath, [ref]$tokens, [ref]$usbErrors) | Out-Null
 if ($usbErrors.Count) { throw ($usbErrors | Out-String) }
+$usbAst = [System.Management.Automation.Language.Parser]::ParseFile($usbPath, [ref]$tokens, [ref]$usbErrors)
+$select = $usbAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Select-Distribution'}, $true)[0]
+Invoke-Expression $select.Extent.Text
+$privateRows = @([pscustomobject]@{Name='Jibo-DFU-Toolkit'; Version=2; IsDefault=$true})
+foreach ($requested in @('', 'Jibo-DFU-Toolkit')) {
+    $UsbOnly = $false; $refused = $false
+    try { Select-Distribution -Distributions $privateRows -Requested $requested | Out-Null }
+    catch { if ($_.Exception.Message -notmatch 'Jibo-DFU-Windows-x64.exe') { throw }; $refused = $true }
+    if (-not $refused) { throw 'Source build selected the private no-sudo distro' }
+}
+$UsbOnly = $true
+if ((Select-Distribution -Distributions $privateRows -Requested 'Jibo-DFU-Toolkit') -cne 'Jibo-DFU-Toolkit') { throw 'Release USB helper lost private distro access' }
+$UsbOnly = $false
+Write-Output 'PASS helpers: source private no-sudo guard (automatic/explicit); release USB access preserved'
+
 # Exercise the entire missing-WSLg refusal path in a child process. A mock admin
 # function leaves a sentinel if any installation is attempted after declining.
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-bootstrap-test-' + [guid]::NewGuid())
@@ -53,10 +68,12 @@ function Invoke-ToolkitNative { param($File, [string[]]$Arguments); $output = @(
 function Show-ToolkitQuestion { param($Question); return $false }
 function Start-ToolkitSetup {}
 function Stop-ToolkitSetup {}
+function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     [IO.File]::WriteAllText((Join-Path $fixture 'payload.tar.gz'), 'not read on refusal')
     [IO.File]::WriteAllText((Join-Path $fixture 'run.ps1'), 'not run on refusal')
+    [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
     $child = Join-Path $fixture 'refusal.ps1'
     $childText = @'
 param($Bootstrap, $Payload, $Case)
@@ -173,6 +190,7 @@ foreach ($name in @('Ubuntu with spaces', 'a"b', "a`tb", '', ('x' * 257))) {
 # password; the GUI uses an explicit non-root user.
 function Start-ToolkitSetup {}
 function Stop-ToolkitSetup {}
+function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
 function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
 $script:calls = @()
 function Native { param([string[]]$Arguments); $script:calls += ,$Arguments; return '' }
@@ -232,8 +250,10 @@ function Invoke-ToolkitNative {
     return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null}
 }
 function Show-ToolkitQuestion { param($Question); return ((Read-Host $Question) -match '^(?i:y|yes)$') }
+function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Start-ToolkitSetup {}
 function Stop-ToolkitSetup {}
+function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh')) {
@@ -301,7 +321,7 @@ function wsl.exe {
 function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 } }
 function Get-Command { param($Name, $ErrorAction); return [pscustomobject]@{Source='fixture-usbipd'} }
 function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
-function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
+function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Get-Item { param($LiteralPath); return [pscustomobject]@{Length=$(if ($global:UacCase -eq 'size-mismatch') { 12 } else { 360684292 })} }
 function Get-FileHash { param($LiteralPath, $Algorithm); Record 'hash' @($Algorithm); return [pscustomobject]@{Hash=$(if ($global:UacCase -eq 'hash-mismatch') { '0' * 64 } else { '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f' })} }
 function Start-Process {
@@ -359,7 +379,7 @@ exit $LASTEXITCODE
                 if ($code -ne 1 -or $gui.Count) { throw ('failed to refuse: ' + $text) }
             }
             if ($case -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) {
-                if ($prompts.Count -ne 1 -or $downloads.Count -ne 1) { throw 'creation did not ask/download once' }
+                if ($prompts.Count -ne 1 -or $downloads.Count -ne 1) { throw ('creation did not ask/download once: ' + $text) }
                 if ($downloads[0].Values[0] -cne 'https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl') { throw 'image URL not pinned' }
                 if ($case -ne 'size-mismatch' -and @($events | Where-Object { $_.Kind -eq 'hash' }).Count -ne 1) { throw 'hash mock was not used; real boundary escaped' }
                 if (Test-Path $downloads[0].Values[1]) { throw 'download survived setup' }

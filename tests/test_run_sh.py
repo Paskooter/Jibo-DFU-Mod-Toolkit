@@ -347,6 +347,27 @@ exit 0
         self.assertIn("sudo -v", events)
         self.assertIsNone(self.launch_index(events), events)
 
+    @unittest.skipIf(os.geteuid() == 0, "requires a non-root test process")
+    def test_private_wsl_source_route_never_requests_a_locked_password(self):
+        result = self.run_launcher(create_pyz=True, extra_env={
+            "WSL_DISTRO_NAME": "Jibo-DFU-Toolkit", "FAIL_SUDO_VALIDATE": "1",
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Jibo-DFU-Toolkit", result.stderr)
+        self.assertIn("Jibo-DFU-Windows-x64.exe", result.stderr)
+        self.assertFalse(any(event.startswith("sudo ") for event in self.events()), self.events())
+        self.assertIsNone(self.launch_index(self.events()))
+
+    @unittest.skipIf(os.geteuid() == 0, "requires a non-root test process")
+    def test_wsl_sudo_denial_names_the_distro_and_next_step(self):
+        result = self.run_launcher(create_pyz=True, extra_env={
+            "WSL_DISTRO_NAME": "Ubuntu-22.04", "FAIL_SUDO_VALIDATE": "1",
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Ubuntu-22.04", result.stderr)
+        self.assertIn("Jibo-DFU-Windows-x64.exe", result.stderr)
+        self.assertIsNone(self.launch_index(self.events()))
+
     def test_wsl_runs_one_shot_usb_attach_then_monitor_before_tool(self):
         result = self.run_launcher(create_pyz=True, extra_env={
             "WSL_DISTRO_NAME": "Ubuntu",

@@ -107,10 +107,10 @@ def test_default_scripts_have_no_console_wait_or_hide_minimize():
     assert 'Read-Host' not in bootstrap
     assert 'input(' not in launcher
     assert 'Set-ToolkitConsole' not in bootstrap
-    assert '-Verb RunAs -WindowStyle Hidden' in bootstrap
+    assert 'Invoke-ToolkitElevated' in bootstrap
     assert '-Verb RunAs -WindowStyle Hidden' in (ROOT / 'run.ps1').read_text()
     assert 'Start-ToolkitProcess' in bootstrap
-    assert bootstrap.count('Start-Process') == 2  # RunAs plus the argument-format comment only.
+    assert bootstrap.count('Start-Process') == 1  # Argument-format comment only; UAC is supervised in console.ps1.
     helper = (ROOT / 'scripts/release/console.ps1').read_text()
     assert helper.count('$info.CreateNoWindow = $true') == 2
     assert 'Start-ToolkitSetup' in bootstrap

@@ -90,7 +90,7 @@ def test_windows_bootstrap_reuses_existing_usb_monitor_without_cloning():
     path = ROOT / 'scripts/release/bootstrap.ps1'
     assert path.is_file(), 'missing Windows bootstrap'
     text = path.read_text()
-    for required in ('run.ps1', '-UsbOnly -MonitorUsb', 'RunAs', 'Show-ToolkitQuestion',
+    for required in ('run.ps1', '-UsbOnly -MonitorUsb', 'Invoke-ToolkitElevated', 'Show-ToolkitQuestion',
                      '--version', '/mnt/wslg', 'payload.tar.gz'):
         assert required in text
     assert 'git clone' not in text
@@ -389,9 +389,9 @@ def test_native_release_has_self_contained_production_flash_verification(monkeyp
 def test_non_windows_launchers_are_byte_identical_to_release_builds_base():
     import hashlib
     # Source launchers are pinned to public main 5d8b136; release adapters to
-    # 03a25aa. Windows root permissions must not alter native flow.
+    # 03a25aa. run.sh now has WSL no-sudo diagnostics (covered by test_run_sh);
+    # Mac and frozen Linux adapters must remain byte-identical.
     expected = {
-        'run.sh': '77b46291029e2aa0008f73919a36788944f2b06226d713d2f1aec04ae2c34fe8',
         'run-macos.sh': '859eeabc991687f18290d1e918499e75ff4cfb2e76bc755e4d72302dff220071',
         'run-gui.sh': 'cdf548d795acf939184ffe51d0b689cde4133958b006cd083fbf28b469cc5fde',
         'scripts/release/AppRun': '9e9f7f214a2224b0b1c06b698e75cd88a6348fac4bf2e0de2c9d95ce262f10f8',

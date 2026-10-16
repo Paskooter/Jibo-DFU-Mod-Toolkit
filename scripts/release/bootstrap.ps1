@@ -1,18 +1,32 @@
 [CmdletBinding()]
 param([string]$PayloadRoot = $PSScriptRoot, [string]$Distro, [switch]$SelfCheck, [switch]$ShowConsole)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $launcherExitCode = 1
 
 function Confirm-Setup([string]$Question) {
-    return (Show-ToolkitQuestion $Question)
+    Update-ToolkitSetup 'Waiting for your answer' $Question
+    Write-ToolkitLog 'question-start' @{ step=$script:ToolkitStep }
+    try {
+        $answer = Show-ToolkitQuestion $Question
+        Write-ToolkitLog 'question-end' @{ step=$script:ToolkitStep; approved=[bool]$answer }
+        return $answer
+    } finally { Update-ToolkitSetup $script:ToolkitStep $script:ToolkitPolicy.Hint }
 }
 function Invoke-ApprovedAdmin([string]$File, [string]$Arguments) {
-    $p = Start-Process -FilePath $File -ArgumentList $Arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    $p = Invoke-ToolkitElevated -File $File -Arguments $Arguments -TimeoutSeconds 900 -AllowWait
     if ($p.ExitCode -ne 0) { throw "Setup exited with code $($p.ExitCode). Restart this app after any requested reboot." }
 }
-function Native([string[]]$Arguments) {
-    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments
-    if ($result.ExitCode -ne 0) { throw "WSL failed: $($result.StartError) $($result.Output -join ' ')" }
+function Native([string[]]$Arguments, [double]$TimeoutSeconds = 0) {
+    $policy = if ($script:ToolkitPolicy) { $script:ToolkitPolicy } else { Get-ToolkitStepPolicy 'Starting Linux' }
+    if ($TimeoutSeconds -le 0) { $TimeoutSeconds = $policy.Seconds }
+    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowWait:$policy.AllowWait
+    if ($result.ExitCode -ne 0) {
+        $error = New-Object Exception "WSL failed: $($result.StartError) $($result.Output -join ' ')"
+        $error.Data['ToolkitExitCode'] = $result.ExitCode
+        if ($result.TimedOut) { $error.Data['ToolkitStall'] = $true }
+        throw $error
+    }
     return (($result.Output | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
 }
 function ConvertTo-NativeArgumentLine([string[]]$Arguments) {
@@ -68,11 +82,14 @@ function Install-PrivateDistribution([string]$Root) {
     $download = Join-Path $base ('ubuntu-' + [guid]::NewGuid().ToString('N') + '.wsl')
     $imported = $false
     try {
+        Set-ToolkitStep 'Downloading Ubuntu'
         Write-Host 'Downloading the official Ubuntu 22.04 image for the private toolkit Linux...'
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing
+        Receive-ToolkitDownload -Uri $url -OutFile $download -ExpectedBytes $bytes
         if ((Get-Item -LiteralPath $download).Length -ne $bytes) { throw 'Ubuntu image size mismatch. Nothing was registered.' }
+        Set-ToolkitStep 'Checking the Ubuntu image'
         if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ine $sha256) { throw 'Ubuntu image checksum mismatch. Nothing was registered.' }
+        Set-ToolkitStep "Installing the toolkit's Linux"
         Write-Host 'Verified Ubuntu image. Setting up the private Linux (no account or password prompts)...'
         # Microsoft's --import deliberately sets NO_OOBE. It works with this gzip
         # tar image and avoids the newer --install --from-file first-run wizard.
@@ -80,17 +97,21 @@ function Install-PrivateDistribution([string]$Root) {
         Native -Arguments @('--import', $name, $install, $download, '--version', '2') | Out-Host
         $imported = $true
         $linuxProvision = Native -Arguments @('--distribution', $name, '--user', 'root', '--exec', 'wslpath', '-u', '--', $provision)
+        Set-ToolkitStep 'Preparing Linux'
         Native -Arguments @('--distribution', $name, '--user', 'root', '--exec', 'bash', $linuxProvision) | Out-Host
         Native -Arguments @('--terminate', $name) | Out-Null
+        Set-ToolkitStep 'Starting Linux'
         if ((Native -Arguments @('--distribution', $name, '--exec', 'id', '-un')) -cne 'jibo') { throw 'Private Linux did not start as the toolkit user.' }
         if (-not (Get-DistributionRuntime $name -RequireUbuntu)) { throw 'Private Linux compatibility check failed.' }
         Write-Host 'Private Linux is ready. Future launches need no setup download.'
         return $name
     } catch {
+        $failureCode = if ($_.Exception.Data['ToolkitExitCode']) { [int]$_.Exception.Data['ToolkitExitCode'] } else { 1 }
+        Complete-ToolkitStep -Result failed -ExitCode $failureCode -ErrorText $_.Exception.Message
         # Only a distro successfully imported by THIS attempt may be removed.
         # Never unregister an existing distro or one whose import failed/conflicted.
         if ($imported) {
-            try { Native -Arguments @('--unregister', $name) | Out-Null }
+            try { Native -Arguments @('--unregister', $name) -TimeoutSeconds 30 | Out-Null }
             catch { Write-Warning 'Could not remove the failed private Linux. Run: wsl --unregister Jibo-DFU-Toolkit' }
         }
         throw
@@ -98,7 +119,7 @@ function Install-PrivateDistribution([string]$Root) {
         if (Test-Path $download) { Remove-Item -LiteralPath $download -Force }
     }
 }
-function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session, $Permissions, $Monitor, [switch]$ShowConsole) {
+function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session, $Permissions, $Monitor, [switch]$ShowConsole, [double]$ReadyTimeoutSeconds = 120) {
     # Supervise readiness and USB support without ever allocating a console.
     if (-not (Test-WslDistributionName $Name) -or $User -notmatch '^[^\s"]+$') { throw 'Invalid WSL GUI identity.' }
     $run = Join-Path ([IO.Path]::GetTempPath()) ('jibo-dfu-' + [guid]::NewGuid().ToString('N'))
@@ -112,6 +133,7 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
         $line = '--distribution {0} --user {1} --exec {2}' -f $Name, $User, $command
         $gui = Start-ToolkitProcess -FilePath "$env:SystemRoot\System32\wsl.exe" -ArgumentList $line
         $null = $gui.Handle # Retain ExitCode when using WaitForExit instead of -Wait.
+        $readyTimer = [Diagnostics.Stopwatch]::StartNew()
         while (-not $gui.WaitForExit(100)) {
             if (-not $supportFailed -and (($Permissions -and $Permissions.HasExited) -or ($Monitor -and $Monitor.HasExited))) {
                 # The wrapper removes its session at normal exit; allow wsl.exe
@@ -121,8 +143,16 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
                 Show-ToolkitFailure 'USB support stopped unexpectedly. Close the GUI when safe, then reopen the toolkit.'
             }
             if (-not $setupStopped -and (Test-Path -LiteralPath $readyFile)) {
+                Complete-ToolkitStep
+                Write-ToolkitLog 'gui-ready' @{ step='Opening the toolkit' }
                 Stop-ToolkitSetup
                 $setupStopped = $true
+            }
+            if (-not $setupStopped -and (Test-ToolkitStall -ElapsedSeconds $readyTimer.Elapsed.TotalSeconds -LimitSeconds $ReadyTimeoutSeconds)) {
+                $message = "Opening the toolkit stalled: its window did not appear within $ReadyTimeoutSeconds seconds. Close other WSL work, run wsl --shutdown, then reopen."
+                Write-ToolkitLog 'stall' @{ step='Opening the toolkit'; error=$message }
+                if (Show-ToolkitSupportDialog $message -AllowWait) { Write-ToolkitLog 'keep-waiting' @{step='Opening the toolkit'}; $readyTimer.Restart() }
+                else { $error = New-Object TimeoutException $message; $error.Data['ToolkitStall'] = $true; throw $error }
             }
         }
         # A helper can fail in the same polling interval as a normal GUI close.
@@ -132,7 +162,11 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
         if ($gui.ExitCode -ne 0) { return $gui.ExitCode }
         if ($supportFailed) { return 1 }
         return 0
+    } catch {
+        Complete-ToolkitStep -Result failed -ExitCode 1 -ErrorText $_.Exception.Message
+        throw
     } finally {
+        if (-not $setupStopped -and $gui -and -not $gui.WaitForExit(0)) { Stop-ToolkitProcess $gui }
         Remove-Item -LiteralPath $run -Recurse -Force
     }
 }
@@ -141,12 +175,13 @@ function Test-CompatibleDistribution([string]$Name) {
         $libc = Native -Arguments @('--distribution', $Name, '--exec', 'getconf', 'GNU_LIBC_VERSION')
         if ($libc -notmatch '^glibc\s+(\d+\.\d+)$') { return $false }
         return ([version]$Matches[1] -ge [version]'2.35')
-    } catch { return $false }
+    } catch { if ($_.Exception.Data['ToolkitStall']) { throw }; return $false }
 }
 function Get-DistributionRuntime([string]$Name, [switch]$RequireUbuntu) {
     # No shell interpolation: read distro metadata as data, not executable code.
     if (-not (Test-WslDistributionName $Name)) { return $null }
     try {
+        Set-ToolkitStep 'Starting Linux'
         if (-not (Test-CompatibleDistribution $Name)) { return $null }
         if ((Native -Arguments @('--distribution', $Name, '--exec', 'uname', '-m')) -ne 'x86_64') { return $null }
         $uid = Native -Arguments @('--distribution', $Name, '--exec', 'id', '-u')
@@ -160,7 +195,7 @@ function Get-DistributionRuntime([string]$Name, [switch]$RequireUbuntu) {
         }
         if ($RequireUbuntu -and ($os -cne 'ubuntu' -or $version -lt [version]'22.04')) { return $null }
         return [pscustomobject]@{ Name=$Name; OsVersion=$version }
-    } catch { return $null }
+    } catch { if ($_.Exception.Data['ToolkitStall']) { throw }; return $null }
 }
 function Select-ToolkitDistribution($Rows, [string]$Requested, [string]$Root) {
     if ($Requested) {
@@ -190,23 +225,41 @@ function Select-ToolkitDistribution($Rows, [string]$Requested, [string]$Root) {
 }
 try {
     . (Join-Path $PSScriptRoot 'console.ps1')
+    Initialize-ToolkitLog
+    Set-ToolkitStep 'Checking embedded files'
+    $revision = (Get-Content (Join-Path $PayloadRoot 'revision.txt') -Raw).Trim()
+    if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid embedded revision.' }
+    $script:ToolkitBuild = $revision
+    Write-ToolkitLog 'build' @{ build=$revision }
     $archive = Join-Path $PayloadRoot 'payload.tar.gz'
     $usbScript = Join-Path $PayloadRoot 'run.ps1'
     if (-not (Test-Path $archive) -or -not (Test-Path $usbScript)) { throw 'Embedded payload is incomplete.' }
-    if ($SelfCheck) { Write-Output 'Bootstrap scripts and Linux payload are present; WSL setup not attempted.'; exit 0 }
+    if ($SelfCheck) { Complete-ToolkitStep; Write-ToolkitLog 'setup-end' @{result='ok'; exit_code=0}; Write-Output 'Bootstrap scripts and Linux payload are present; WSL setup not attempted.'; exit 0 }
     Start-ToolkitSetup
+    Set-ToolkitStep 'Checking Windows and WSL'
     Write-Host 'Jibo DFU Toolkit: Windows uses WSL 2 + WSLg and usbipd-win. Setup requires internet only if these are missing.'
     $ready = $false
-    try { $version = Native -Arguments @('--version'); $ready = ($version -match 'WSLg') } catch { $ready = $false }
+    try {
+        $version = Native -Arguments @('--version')
+        $script:ToolkitWslVersion = Protect-ToolkitText $version
+        Write-ToolkitLog 'wsl-version' @{ version=$script:ToolkitWslVersion }
+        $ready = ($version -match 'WSLg')
+    } catch {
+        $script:ToolkitWslVersion = 'unavailable (see command failure in log)'
+        if ($_.Exception.Data['ToolkitStall']) { throw }
+        $ready = $false
+    }
     if (-not $ready) {
         if (-not (Confirm-Setup 'Install/update WSL 2 and WSLg? Windows will ask for administrator approval.')) { throw 'WSL setup declined. No setup changes were made.' }
+        Set-ToolkitStep 'Installing Windows components'
         Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --no-distribution'
         Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--update'
         throw 'WSL setup requested. Reboot if Windows requests it, then run this download again.'
     }
     $rows = @()
+    Set-ToolkitStep 'Finding Linux'
     try { $listing = Native -Arguments @('--list', '--verbose') }
-    catch { $listing = '' }
+    catch { if ($_.Exception.Data['ToolkitStall']) { throw }; $listing = '' }
     foreach ($line in ($listing -split "`n")) {
         if ($line -match '^\s*(?<default>\*)?\s*(?<name>.+?)\s+\S+\s+(?<version>[12])\s*$') {
             $rows += [pscustomobject]@{Name=$Matches['name'].Trim(); Version=[int]$Matches['version']; Default=($Matches['default'] -eq '*')}
@@ -220,6 +273,7 @@ try {
         if (-not (Confirm-Setup 'Install usbipd-win using the interactive Windows installer?')) { throw 'USB setup declined.' }
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
         if (-not $winget) { throw 'Install Microsoft App Installer (winget) or usbipd-win from https://github.com/dorssel/usbipd-win/releases, then reopen this app.' }
+        Set-ToolkitStep 'Installing Windows components'
         Invoke-ApprovedAdmin $winget.Source 'install --interactive --exact --id dorssel.usbipd-win'
         throw 'usbipd-win setup finished. Reopen this app so Windows refreshes PATH.'
     }
@@ -231,8 +285,7 @@ try {
     }
     $linuxHome = Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'printenv', 'HOME')
     if (-not $linuxHome.StartsWith('/') -or $linuxHome -match '[\r\n]') { throw 'Invalid WSL home directory.' }
-    $revision = (Get-Content (Join-Path $PayloadRoot 'revision.txt') -Raw).Trim()
-    if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid embedded revision.' }
+    Set-ToolkitStep 'Unpacking the toolkit'
     $target = "$linuxHome/.local/share/jibo-dfu/$revision"
     $linuxArchive = Native -Arguments @('--distribution', $Distro, '--exec', 'wslpath', '-u', '--', $archive)
     Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'mkdir', '-p', '--', $target) | Out-Null
@@ -244,6 +297,7 @@ try {
         Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'cp', '--', $linuxSource, "$target/$helper") | Out-Null
     }
     # The receipt is for diagnostics; Native still throws with the full output on failure.
+    Set-ToolkitStep 'Checking the toolkit'
     Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', "$target/jibo-dfu", '--self-check') | Out-Null
     Write-Host 'Toolkit self-check passed.'
     $session = "$target/.usb-$([guid]::NewGuid().ToString('N'))"
@@ -251,32 +305,54 @@ try {
     $monitor = $null
     try {
         # Existing validated bind/attach/reattach logic retains usbipd's UAC prompt.
+        Set-ToolkitStep 'Connecting USB'
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
-        $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper)
-        if ($usbResult.ExitCode -ne 0) { throw 'USB handoff failed or administrator approval was declined. No GUI was started.' }
+        $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper) -TimeoutSeconds 180 -AllowWait
+        if ($usbResult.ExitCode -ne 0) {
+            $error = New-Object Exception "USB handoff failed or administrator approval was declined. No GUI was started. $($usbResult.StartError) $($usbResult.Output -join ' ')"
+            $error.Data['ToolkitExitCode'] = $usbResult.ExitCode
+            if ($usbResult.TimedOut) { $error.Data['ToolkitStall'] = $true }
+            throw $error
+        }
         $permissions = Start-WslUsbAccess -Name $Distro -User $linuxUser -Uid $linuxUid -Gid $linuxGid -Helper "$target/wsl-usb-permissions.sh" -Session $session
         if ($permissions.WaitForExit(200)) { throw 'The WSL USB permission watcher failed to start.' }
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
         $monitorArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}"' -f $usbScript, $Distro, $consoleHelper
         $monitor = Start-ToolkitProcess -FilePath powershell.exe -ArgumentList $monitorArgs
-        $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole
-        if ($code -ne 0) { $launcherExitCode = $code }
+        Set-ToolkitStep 'Opening the toolkit'
+        $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole -ReadyTimeoutSeconds $script:ToolkitPolicy.Seconds
+        if ($code -ne 0) { $launcherExitCode = $code; Complete-ToolkitStep -Result failed -ExitCode $code -ErrorText "GUI or USB support exited with code $code." }
+    } catch {
+        $failureCode = if ($_.Exception.Data['ToolkitExitCode']) { [int]$_.Exception.Data['ToolkitExitCode'] } else { 1 }
+        Complete-ToolkitStep -Result failed -ExitCode $failureCode -ErrorText $_.Exception.Message
+        throw
     } finally {
         # Removing the user-owned session makes the root watcher exit itself.
+        Set-ToolkitStep 'Cleaning up USB support'
         $cleanupError = $null
-        try { Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'rm', '-f', '--', $session) | Out-Null }
+        try { Native -Arguments @('--distribution', $Distro, '--user', $linuxUser, '--exec', 'rm', '-f', '--', $session) -TimeoutSeconds 30 | Out-Null }
         catch { $cleanupError = $_ }
         if ($permissions -and -not $permissions.HasExited) {
-            if (-not $permissions.WaitForExit(2000)) { Stop-Process -Id $permissions.Id; $permissions.WaitForExit() }
+            if (-not $permissions.WaitForExit(2000)) { Stop-Process -Id $permissions.Id; $null = $permissions.WaitForExit(5000) }
         }
-        if ($monitor -and -not $monitor.HasExited) { Stop-Process -Id $monitor.Id; $monitor.WaitForExit() }
-        if ($cleanupError) { throw $cleanupError }
+        if ($monitor -and -not $monitor.HasExited) { Stop-Process -Id $monitor.Id; $null = $monitor.WaitForExit(5000) }
+        if ($cleanupError -and -not $script:ToolkitFailedStep) { throw $cleanupError }
+        if ($cleanupError) {
+            Write-ToolkitLog 'cleanup-failed' @{ error=$cleanupError.Exception.Message }
+            Complete-ToolkitStep -Result failed -ExitCode 1 -ErrorText $cleanupError.Exception.Message
+        } else { Complete-ToolkitStep }
     }
     if ($code -ne 0) { throw "GUI or USB support exited with code $code." }
+    Complete-ToolkitStep
+    Write-ToolkitLog 'setup-end' @{ result='ok'; exit_code=0 }
     exit $code
 } catch {
-    if (Get-Command Show-ToolkitFailure -ErrorAction SilentlyContinue) { Show-ToolkitFailure $_.Exception.Message }
-    else { Write-Host "Launcher: $($_.Exception.Message)" -ForegroundColor Red }
+    $failure = $_.Exception
+    $failureCode = if ($failure.Data['ToolkitExitCode']) { [int]$failure.Data['ToolkitExitCode'] } else { $launcherExitCode }
+    Complete-ToolkitStep -Result failed -ExitCode $failureCode -ErrorText $failure.Message
+    Write-ToolkitLog 'setup-end' @{ result='failed'; exit_code=$failureCode; step=$script:ToolkitFailedStep; error=$failure.Message; build=$script:ToolkitBuild; windows=$script:ToolkitWindowsVersion; wsl=$script:ToolkitWslVersion }
+    if (Get-Command Show-ToolkitFailure -ErrorAction SilentlyContinue) { Show-ToolkitFailure $failure.Message }
+    else { Write-Host "Launcher: $($failure.Message)" -ForegroundColor Red }
     exit $launcherExitCode
 } finally {
     Stop-ToolkitSetup

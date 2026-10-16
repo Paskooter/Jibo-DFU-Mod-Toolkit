@@ -23,10 +23,23 @@ has() { command -v "$1" >/dev/null 2>&1; }
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] ||
   die 'This package requires Linux x86_64 (including x86_64 WSL).'
 
+# The downloaded EXE deliberately gives this account no password or sudo.
+# Refuse source builds before package installation or any password prompt.
+if [[ ${WSL_DISTRO_NAME:-} == Jibo-DFU-Toolkit ]]; then
+  die 'Jibo-DFU-Toolkit is the EXE private Linux, with no Linux password or sudo access. Open Jibo-DFU-Windows-x64.exe instead. For source builds, use your own Ubuntu with a sudo-enabled user and select it with .\run.ps1 -Gui -Distro Ubuntu-22.04.'
+fi
+
+sudo_failure() {
+  if [[ -n ${WSL_DISTRO_NAME:-} ]]; then
+    die "WSL distro '$WSL_DISTRO_NAME' did not grant Linux administrator access. Open Jibo-DFU-Windows-x64.exe instead, or use your own Ubuntu account with sudo access. Running Windows as administrator does not change the Linux user."
+  fi
+  die 'Linux administrator authorization was not granted. Use an account with sudo access, or ask the computer owner to install the missing packages and grant USB access.'
+}
+
 need_sudo() {
   if (( EUID != 0 )); then
-    command -v sudo >/dev/null 2>&1 || die 'sudo is needed for USB access and package installation.'
-    sudo -v || die 'Administrator authorization was not granted.'
+    command -v sudo >/dev/null 2>&1 || sudo_failure
+    sudo -v || sudo_failure
   fi
 }
 

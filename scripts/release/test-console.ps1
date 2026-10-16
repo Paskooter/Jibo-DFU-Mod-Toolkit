@@ -27,6 +27,30 @@ if ($Case -eq 'setup-feedback') {
     } finally { Stop-ToolkitSetup; if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp } }
     exit 0
 }
+if ($Case -eq 'setup-stalls') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-stalls-' + [guid]::NewGuid().ToString('N'))
+    try {
+        Initialize-ToolkitLog -Root $tmp -Build ('c' * 40)
+        Set-ToolkitStep 'Checking the toolkit'
+        $binary = (Get-Process -Id $PID).Path
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $result = Invoke-ToolkitNative -File $binary -Arguments @('-NoProfile','-Command','Start-Sleep 60') -TimeoutSeconds 0.3
+        if (-not $result.TimedOut -or $result.ExitCode -ne 124 -or $timer.Elapsed.TotalSeconds -gt 8) { throw 'Native stall was not killed within its deadline' }
+        if (Test-ToolkitStall -ElapsedSeconds 9000 -IdleSeconds 1 -LimitSeconds 120 -ActivityBased) { throw 'Active download expired by total time' }
+        if (-not (Test-ToolkitStall -ElapsedSeconds 121 -IdleSeconds 121 -LimitSeconds 120 -ActivityBased)) { throw 'Idle download not detected' }
+        Write-ToolkitLog 'diagnostic' @{output='password=synthetic-password; ssid=synthetic-network'; error='Authorization: Bearer synthetic-token'}
+        Complete-ToolkitStep failed 124 'Synthetic command stalled'
+        $summary = Get-ToolkitSupportDetails 'Synthetic command stalled'
+        $raw = [IO.File]::ReadAllText($script:ToolkitLogPath)
+        if (($summary + $raw) -match 'synthetic-password|synthetic-network|synthetic-token') { throw 'Secret appeared in logs or copy text' }
+        $rows = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json })
+        $end = @($rows | Where-Object event -eq 'command-end')[-1]
+        if ($end.exit_code -ne 124 -or $end.result -ne 'stalled' -or -not $end.start_utc -or -not $end.end_utc -or $summary -notmatch 'Checking the toolkit') { throw 'Command receipt/support text incomplete' }
+        Write-Output "PASS console: $Case"
+    } finally { Remove-Item -Recurse -Force $tmp }
+    exit 0
+}
 if ($Case -eq 'native-status') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     if ($env:OS -eq 'Windows_NT') {
@@ -133,6 +157,7 @@ esac
         $script:UsbipdPath = $fake
         $distros = Get-Wsl2Distributions
         if ($distros.Count -ne 2) { throw "Expected 2 parsed WSL distro rows, got $($distros.Count)" }
+        $UsbOnly = $true  # Release USB path, not a source build.
         $selected = Select-Distribution -Distributions $distros -Requested 'Jibo-DFU-Toolkit'
         if ($selected -ne 'Jibo-DFU-Toolkit') { throw "Select-Distribution returned '$selected', expected 'Jibo-DFU-Toolkit'" }
         $state = Get-UsbipdState
@@ -148,7 +173,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
+    foreach ($scenario in @('setup-feedback','setup-stalls','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
@@ -162,6 +187,7 @@ if ($Case -eq 'all') {
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-console-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory $fixture | Out-Null
 try {
+    $env:LOCALAPPDATA = $fixture
     $trace = Join-Path $fixture 'trace.jsonl'
     $global:ConsoleFixtureTrace = $trace
     $env:DFU_CONSOLE_TEST_TRACE = $trace
@@ -197,7 +223,7 @@ public class ToolkitConsoleNative {
         if (Show-ToolkitQuestion 'Setup?') { throw 'Dialog default must be No' }
         Show-ToolkitFailure 'Synthetic failure'
         $events = @(Get-Content $trace | ForEach-Object { $_ | ConvertFrom-Json })
-        if ($events.Count -ne 2 -or $events[0].Values[0] -ne 0x00010124 -or $events[1].Values[0] -ne 0x00010010) { throw 'Wrong question/error dialog flags or unexpected console operations' }
+        if ($events.Count -ne 2 -or $events[0].Values[0] -ne 0x00051124 -or $events[1].Values[0] -ne 0x00010010) { throw 'Wrong question/error dialog flags or unexpected console operations' }
         Write-Output "PASS console: $Case"
         exit 0
     }
@@ -221,7 +247,9 @@ public class ToolkitConsoleNative {
             param($FilePath,$ArgumentList,$Verb,[switch]$Wait,[switch]$PassThru,$WorkingDirectory,$WindowStyle)
             if ($WindowStyle -ne 'Hidden') { throw 'Elevated USB helper is visible' }
             Record 'admin' @($Verb)
-            return [pscustomobject]@{ExitCode=0}
+            $p = [pscustomobject]@{ExitCode=0; Handle=1}
+            $p | Add-Member ScriptMethod WaitForExit { param($ms); return $true }
+            return $p
         }
         if (-not (Invoke-UacBind '1-2')) { throw 'USB bind failed' }
         $events = @(Get-Content $trace | ForEach-Object { $_ | ConvertFrom-Json })
@@ -316,6 +344,7 @@ function Invoke-ToolkitNative {
 function Show-ToolkitQuestion { param($Question); Record 'question' @($Question); return $false }
 function Start-ToolkitSetup { Record 'setup-start' @() }
 function Stop-ToolkitSetup { Record 'setup-stop' @() }
+function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); [ToolkitConsoleNative]::MessageBox([IntPtr]::Zero, $Message, 'Support details', 0x00010010) | Out-Null; return $false }
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     Copy-Item $BootstrapPath (Join-Path $fixture 'bootstrap.ps1')

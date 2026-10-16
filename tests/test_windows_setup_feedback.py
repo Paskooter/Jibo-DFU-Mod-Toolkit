@@ -75,7 +75,7 @@ Write-Output 'PASS native receipts/wait'
 @pytest.mark.parametrize('mode', ['active', 'idle', 'headers'])
 def test_real_download_reports_bytes_and_times_out_only_when_idle(tmp_path, mode):
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_):
+        def log_message(self, format, *args):
             pass
 
         def do_GET(self):
@@ -136,6 +136,41 @@ Write-Output 'PASS GUI ready deadline'
         result = run_ps(code, tmp_path, timeout=8)
     except subprocess.TimeoutExpired:
         pytest.fail('old GUI readiness wait exceeded independent 8-second safety bound')
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_elevated_setup_has_a_bounded_wait_without_changing_uac_scope(tmp_path):
+    result = run_ps("""
+Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('f' * 40)
+Set-ToolkitStep 'Connecting USB'
+$script:stopped = $false
+function Start-Process { param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$PassThru); if ($Verb -ne 'RunAs' -or $WindowStyle -ne 'Hidden') { throw 'UAC scope changed' }; $p=[pscustomobject]@{HasExited=$false; Handle=1; Id=1}; $p | Add-Member ScriptMethod WaitForExit {param($ms); Start-Sleep -Milliseconds 50; return $false}; return $p }
+function Stop-ToolkitProcess {param($Process); $script:stopped=$true}
+function Show-ToolkitSupportDialog {param($Message,[switch]$AllowWait); return $false}
+$failed=$false
+try { Invoke-ToolkitElevated -File fixture -Arguments 'bind --busid 1-2' -TimeoutSeconds 0.2 | Out-Null } catch { $failed=$_.Exception.Message -match 'stalled' }
+if (-not $failed -or -not $script:stopped) { throw 'Elevated hang was not stopped' }
+Write-Output 'PASS elevated deadline'
+""", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('requested', ['', 'Jibo-DFU-Toolkit'])
+def test_source_selection_does_not_use_exe_private_no_sudo_distro(tmp_path, requested):
+    code = """
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('RUNSCRIPT', [ref]$tokens, [ref]$errors)
+foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]}, $true)) { Invoke-Expression $f.Extent.Text }
+$UsbOnly=$false
+$rows=@([pscustomobject]@{Name='Jibo-DFU-Toolkit'; Version=2; IsDefault=$true})
+$failed=$false
+try { Select-Distribution -Distributions $rows -Requested 'REQUESTED' | Out-Null } catch { if ($_.Exception.Message -notmatch 'Jibo-DFU-Windows-x64.exe') { throw }; $failed=$true }
+if (-not $failed) { throw 'Source route selected the private no-sudo Linux and would dead-end at sudo' }
+$UsbOnly=$true
+if ((Select-Distribution -Distributions $rows -Requested 'Jibo-DFU-Toolkit') -ne 'Jibo-DFU-Toolkit') { throw 'EXE USB route lost its own distro' }
+Write-Output 'PASS private source guard'
+""".replace('RUNSCRIPT', str(ROOT / 'run.ps1')).replace('REQUESTED', requested)
+    result = run_ps(code, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
