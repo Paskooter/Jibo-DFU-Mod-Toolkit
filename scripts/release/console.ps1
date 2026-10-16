@@ -264,6 +264,233 @@ public class ToolkitInteractionEvent {
         Kind = kind; Message = message; Utc = System.DateTime.UtcNow.ToString("o");
     }
 }
+// Plain-language presentation only. Keys are the exact logged strings (step names,
+// question prompts, user-wait instructions, failure messages); the log and Copy
+// details keep the original technical text. Unknown keys fall back to that text.
+public sealed class ToolkitStepText {
+    public string Title, Description;
+    public int Phase;
+}
+public sealed class ToolkitQuestionText {
+    public string Id, Title, Body, WhatHappens, HowLong, YesLabel, NoLabel, YesHelp, Footnote;
+}
+public sealed class ToolkitWaitText {
+    public string Kind, Title, Hint;
+    public string[] Steps;
+}
+public sealed class ToolkitFailureText {
+    public string Tone, Headline, Step, What, Try;
+}
+public static class ToolkitSetupText {
+    public const string Product = "Jibo DFU Toolkit";
+    public const string Exe = "Jibo-DFU-Windows-x64.exe";
+    public static readonly string[] Phases = { "Check Windows", "Set up Linux", "Prepare the toolkit", "Connect USB", "Open the toolkit" };
+    public const string WorkingStatus = "Working \u2013 nothing for you to do right now";
+    public const string QuestionStatus = "Your answer is needed";
+    public const string ReminderStatus = "Still waiting for your answer";
+    public const string WaitStatus = "Waiting for you";
+    public const string WaitPaused = "Setup is paused until you do this. It has not stalled.";
+    public const string ClosesItself = "This window closes by itself when the toolkit opens.";
+    public const string HelpLine = "Copy the details and paste them in the #help channel on the Phoenix Discord. Please look them over before posting.";
+    public const string CopiedLine = "Copied. Paste it in #help with Ctrl+V.";
+    public const string CopyFailedLine = "Could not copy. Select the text below, then press Ctrl+C.";
+    static ToolkitStepText S(string title, string description, int phase) {
+        var s = new ToolkitStepText(); s.Title = title; s.Description = description; s.Phase = phase; return s;
+    }
+    public static ToolkitStepText Step(string key, string questionId) {
+        switch (key ?? "") {
+            case "Starting setup": case "Checking embedded files": return S("Starting setup", "Checking the toolkit\u2019s own files.", 0);
+            case "Checking Windows and WSL": return S("Checking Windows", "Making sure Windows has what the toolkit needs to run.", 0);
+            case "Installing Windows components":
+                if (questionId == "usb") return S("Installing USB support", "Installing usbipd-win, the free Windows tool that lets the toolkit talk to Jibo over USB.", 2);
+                if (questionId == "wsl") return S("Installing Windows\u2019 Linux support", "Windows is installing its Linux feature (WSL) from Microsoft. This can take several minutes.", 0);
+                return S("Installing Windows components", "Windows is installing what the toolkit needs. This can take several minutes.", 0);
+            case "Finding Linux": return S("Looking for Linux on this PC", "Checking whether this PC already has a Linux the toolkit can use.", 1);
+            case "Starting Linux": return S("Starting the toolkit\u2019s Linux", "Starting Linux and checking that the toolkit can use it.", 1);
+            case "Downloading Ubuntu": return S("Downloading the toolkit\u2019s Linux", "A one-time download of Ubuntu Linux from Ubuntu\u2019s official site.", 1);
+            case "Checking the Ubuntu image": return S("Checking the download", "Making sure the download is complete and is the official Ubuntu file.", 1);
+            case "Installing the toolkit's Linux": return S("Installing the toolkit\u2019s Linux", "Setting up a private Linux just for the toolkit. This can take a few minutes.", 1);
+            case "Preparing Linux": return S("Preparing the toolkit\u2019s Linux", "Finishing the Linux setup. No account or password is needed.", 1);
+            case "Unpacking the toolkit": return S("Unpacking the toolkit", "Copying the toolkit into its Linux. This can take a few minutes.", 2);
+            case "Checking the toolkit": return S("Checking the toolkit", "Making sure the toolkit starts correctly.", 2);
+            case "Connecting USB": return S("Connecting USB", "Letting the toolkit use USB so it can talk to Jibo.", 3);
+            case "Opening the toolkit": return S("Opening the toolkit", "The toolkit window appears in a moment.", 4);
+            case "Cleaning up USB support": return S("Closing USB support", "Releasing the USB connection.", 4);
+        }
+        return null;
+    }
+    public static string QuestionId(string prompt) {
+        switch (prompt ?? "") {
+            case "Install/update WSL 2 and WSLg? Windows will ask for administrator approval.": return "wsl";
+            case "Set up a private Linux for the toolkit? One-time download of about 345 MB. No Linux account or password needed.": return "linux";
+            case "Install usbipd-win using the interactive Windows installer?": return "usb";
+        }
+        return "";
+    }
+    static ToolkitQuestionText Q(string id, string title, string body, string what, string howLong, string yes, string yesHelp) {
+        var q = new ToolkitQuestionText(); q.Id = id; q.Title = title; q.Body = body; q.WhatHappens = what; q.HowLong = howLong;
+        q.YesLabel = yes; q.NoLabel = "Not now"; q.YesHelp = yesHelp;
+        q.Footnote = "Not now stops setup here and installs nothing. Closing this window also counts as Not now.";
+        return q;
+    }
+    public static ToolkitQuestionText Question(string prompt) {
+        switch (QuestionId(prompt)) {
+            case "wsl": return Q("wsl", "Install Windows\u2019 Linux support?",
+                "The toolkit runs on Linux inside Windows. Windows needs its Linux feature (WSL) installed or updated first.",
+                "Windows installs it from Microsoft. Windows will ask for permission, and may ask you to restart.",
+                "Several minutes, depending on your internet speed.", "Install", "Installs Windows\u2019 Linux feature from Microsoft");
+            case "linux": return Q("linux", "Set up the toolkit\u2019s Linux?",
+                "The toolkit runs in its own private copy of Ubuntu Linux, kept separate from the rest of this PC.",
+                "A one-time download of about 345 MB from Ubuntu\u2019s official site. No Linux account or password needed.",
+                "Usually several minutes, depending on your internet speed.", "Set it up", "Downloads about 345 MB and sets up the toolkit\u2019s Linux");
+            case "usb": return Q("usb", "Install USB support?",
+                "To talk to Jibo over USB, the toolkit needs usbipd-win, a free Windows tool.",
+                "Its installer opens. Follow its steps and choose Yes if Windows asks for permission. Then open the toolkit again.",
+                "Usually a minute or two.", "Install", "Opens the usbipd-win installer");
+        }
+        var other = new ToolkitQuestionText(); other.Id = ""; other.Title = prompt; other.YesLabel = "Yes"; other.NoLabel = "No";
+        other.YesHelp = ""; other.Footnote = "No stops setup here. Closing this window also counts as No.";
+        return other;
+    }
+    static ToolkitWaitText W(string kind, string title, string hint, params string[] steps) {
+        var w = new ToolkitWaitText(); w.Kind = kind; w.Title = title; w.Hint = hint; w.Steps = steps; return w;
+    }
+    public static ToolkitWaitText Wait(string instructions) {
+        switch (instructions ?? "") {
+            case "Waiting for you: approve the Windows administrator prompt. If you do not see it, look for a flashing shield icon on the taskbar.":
+                return W("admin", "Approve the Windows prompt", "Don\u2019t see it? Click the flashing shield icon on the taskbar.",
+                    "Windows is asking: \u201cDo you want to allow this app to make changes to your device?\u201d", "Choose Yes to continue setup.");
+            case "Waiting for you: finish the usbipd-win installer. Look for its installer window or a flashing shield icon on the taskbar. Restart Windows if the installer asks.":
+                return W("installer", "Finish the USB support installer", "Can\u2019t find it? Look for the installer or a flashing shield icon on the taskbar.",
+                    "Find the usbipd-win installer window and follow its steps.", "If Windows asks for permission, choose Yes.", "Restart Windows only if the installer asks you to.");
+            case "Waiting for you: restart Windows if the WSL installer requested it, then reopen Jibo-DFU-Windows-x64.exe. Check the installer window or flashing shield icon on the taskbar.":
+                return W("restart", "Restart Windows, then open the toolkit again", "Not sure? Check the installer window or a flashing shield icon on the taskbar.",
+                    "Restart Windows if the installer asked you to.", "Then open " + Exe + " again to finish setup.");
+            case "Waiting for you: finish any usbipd-win installer window, restart Windows if requested, then reopen the EXE. Look for its installer window or flashing shield icon on the taskbar.":
+                return W("restart", "Finish installing USB support, then open the toolkit again", "Not sure? Check the installer window or a flashing shield icon on the taskbar.",
+                    "Finish the usbipd-win installer, if it is still open.", "Restart Windows if it asks you to.", "Then open " + Exe + " again.");
+            case "Waiting for you: approve USB sharing at the Windows administrator prompt. If it is hidden, look for a flashing shield icon on the taskbar.":
+                return W("admin", "Approve USB sharing if Windows asks", "Don\u2019t see a prompt? Check the taskbar for a flashing shield icon. If there is none, setup continues by itself.",
+                    "Windows may ask for permission to share USB with the toolkit.", "If it does, choose Yes.");
+        }
+        string text = instructions ?? "";
+        if (text.StartsWith("Waiting for you: ")) text = text.Substring(17);
+        return W("other", WaitStatus, "", text);
+    }
+    public static string Duration(double seconds) {
+        int s = (int)System.Math.Round(System.Math.Max(0, seconds));
+        if (s < 90) return s == 1 ? "1 second" : s + " seconds";
+        int m = (int)System.Math.Round(s / 60.0);
+        return m + " minutes";
+    }
+    public static string Clock(double seconds) {
+        int s = (int)System.Math.Max(0, seconds);
+        if (s >= 3600) return (s / 3600) + ":" + (s / 60 % 60).ToString("00") + ":" + (s % 60).ToString("00");
+        return (s / 60) + ":" + (s % 60).ToString("00");
+    }
+    static string PlainTry(string hint) {
+        switch ((hint ?? "").Trim()) {
+            case "": return null;
+            case "Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.":
+            case "Restart Windows after installing WSL, then reopen the toolkit.":
+                return "Restart Windows, then open the toolkit again.";
+            case "No download bytes arrived. Check your internet connection, then reopen the toolkit.":
+                return "Check your internet connection, then open the toolkit again.";
+            case "Check for an installer or Windows administrator approval prompt. Restart Windows if requested.":
+                return "Look for an installer window or a Windows prompt and finish it. Restart Windows if it asks you to.";
+            case "Check for a Windows administrator approval prompt. Reconnect the USB cable and reopen the toolkit.":
+                return "Look for a Windows prompt and choose Yes. Then unplug Jibo\u2019s USB cable, plug it back in and open the toolkit again.";
+        }
+        return hint.Trim();
+    }
+    static readonly string[] KnownHints = {
+        "Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.",
+        "Restart Windows after installing WSL, then reopen the toolkit.",
+        "No download bytes arrived. Check your internet connection, then reopen the toolkit.",
+        "Check for an installer or Windows administrator approval prompt. Restart Windows if requested.",
+        "Check for a Windows administrator approval prompt. Reconnect the USB cable and reopen the toolkit." };
+    static ToolkitFailureText F(string tone, string headline, string what, string tryText) {
+        var f = new ToolkitFailureText(); f.Tone = tone; f.Headline = headline; f.What = what; f.Try = tryText; return f;
+    }
+    static string StepTitle(string step) {
+        var known = Step(step, "");
+        return known == null ? step : known.Title;
+    }
+    // message: the exact text given to the support dialog; allowWait: stall with Keep waiting.
+    public static ToolkitFailureText Failure(string message, bool allowWait) {
+        string text = (message ?? "").Replace("\r\n", "\n");
+        bool closed = false;
+        const string closedPrefix = "You closed the question. This counts as No; no approval was given.\n";
+        if (text.StartsWith(closedPrefix)) { closed = true; text = text.Substring(closedPrefix.Length); }
+        string step = null, hint = null;
+        if (text.StartsWith("Step: ")) {
+            int end = text.IndexOf('\n');
+            if (end > 0) { step = text.Substring(6, end - 6); text = text.Substring(end + 1); }
+        }
+        int tryAt = text.LastIndexOf("\nTry: ");
+        if (tryAt >= 0) { hint = text.Substring(tryAt + 6); text = text.Substring(0, tryAt); }
+        text = text.Trim();
+        var stall = System.Text.RegularExpressions.Regex.Match(text, "^(.+?) stalled(?::| after)");
+        if (step == null && stall.Success) step = stall.Groups[1].Value;
+        var seconds = System.Text.RegularExpressions.Regex.Match(text, "(?:for|after|within) ([0-9.]+) seconds");
+        string waited = seconds.Success ? Duration(double.Parse(seconds.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)) : null;
+        foreach (string known in KnownHints) if (hint == null && text.EndsWith(known)) hint = known;
+        string plainTry = PlainTry(hint);
+        string declined = closed ? "You closed the question, which counts as Not now." : "You chose Not now.";
+        string keepWaiting = "Choose Keep waiting to give it more time, or Stop setup to end setup now.";
+        ToolkitFailureText f;
+        if (text.StartsWith("WSL setup declined."))
+            f = F("info", "Setup stopped", declined + " Windows\u2019 Linux support was not installed, and nothing was changed.", "Open the toolkit again when you are ready to install it.");
+        else if (text.StartsWith("Distribution setup declined."))
+            f = F("info", "Setup stopped", declined + " Nothing was downloaded or installed.", "Open the toolkit again when you are ready to set up its Linux.");
+        else if (text.StartsWith("USB setup declined."))
+            f = F("info", "Setup stopped", declined + " USB support was not installed.", "The toolkit needs USB support to talk to Jibo. Open the toolkit again when you are ready to install it.");
+        else if (text.StartsWith("WSL setup requested."))
+            f = F("info", "Restart Windows to finish setup", "Windows finished installing its Linux support.", "Restart Windows if it asked you to. Then open " + Exe + " again to continue setup.");
+        else if (text.StartsWith("usbipd-win setup finished."))
+            f = F("info", "Open the toolkit again to finish setup", "USB support (usbipd-win) was installed.", "Close this message, then open " + Exe + " again. Restart Windows first if the installer asked you to.");
+        else if (text.IndexOf("canceled by the user", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            f = F("info", "Setup stopped", "The Windows permission prompt was declined, so nothing was installed.", "Open the toolkit again and choose Yes when Windows asks for permission.");
+        else if (text.StartsWith("Downloading Ubuntu stalled"))
+            f = F("stall", "The download stopped", "No data has arrived for " + (waited ?? "a while") + ". The internet connection may have dropped.",
+                allowWait ? "Check your internet connection. " + keepWaiting : "Check your internet connection, then open the toolkit again.");
+        else if (text.StartsWith("Opening the toolkit stalled"))
+            f = F("stall", "The toolkit window did not appear", "The toolkit has not opened after " + (waited ?? "a while") + ".",
+                allowWait ? keepWaiting + " If you stop, restart Windows before opening the toolkit again." : "Restart Windows, then open the toolkit again.");
+        else if (text.IndexOf("administrator command did not finish", System.StringComparison.Ordinal) >= 0)
+            f = F("stall", "A Windows installer did not finish", "A Windows installer or permission prompt did not finish.", "Look for an installer window or a Windows prompt and finish it. If there is none, restart Windows and open the toolkit again.");
+        else if (stall.Success)
+            f = F("stall", "Setup is taking longer than expected", StepTitle(step) + " has not finished" + (waited == null ? "." : " after " + waited + "."),
+                allowWait ? keepWaiting + (plainTry == null ? "" : " If you stop: " + LowerFirst(plainTry)) : (plainTry ?? "Restart Windows, then open the toolkit again."));
+        else if (text.StartsWith("Ubuntu image checksum mismatch") || text.StartsWith("Ubuntu image size mismatch") || text.StartsWith("Ubuntu download exceeded"))
+            f = F("error", "The download was damaged", "The downloaded Ubuntu file did not match the official one, so it was not used. Nothing was installed.", "Open the toolkit again to download it again.");
+        else if (text.StartsWith("Ubuntu download failed"))
+            f = F("error", "The download failed", "The Ubuntu download did not finish.", "Check your internet connection, then open the toolkit again.");
+        else if (text.StartsWith("The private Linux is not ready."))
+            f = F("error", "The toolkit\u2019s Linux is not working", "The toolkit\u2019s private Linux is installed but did not start correctly.",
+                "To set it up again, run wsl --unregister Jibo-DFU-Toolkit in PowerShell, then open the toolkit again. This deletes all files inside that Linux, including any backups saved there.");
+        else if (text.StartsWith("Private Linux storage already exists"))
+            f = F("error", "An old toolkit Linux folder is in the way", "A folder from an earlier toolkit Linux already exists, so setup stopped instead of replacing it.",
+                "If you no longer need the files in it, move that folder somewhere else (its location is in the details), then open the toolkit again.");
+        else if (text.StartsWith("USB handoff failed"))
+            f = F("error", "USB could not be connected", "Sharing USB with the toolkit failed, or the Windows permission prompt was declined.", "Open the toolkit again and choose Yes when Windows asks for permission. Unplugging Jibo\u2019s USB cable and plugging it back in can also help.");
+        else if (text.StartsWith("USB support stopped unexpectedly"))
+            f = F("error", "USB support stopped", "The toolkit\u2019s USB connection stopped unexpectedly.", "When nothing is being written to Jibo, close the toolkit window, then open the toolkit again.");
+        else if (text.StartsWith("Install Microsoft App Installer"))
+            f = F("error", "USB support cannot be installed automatically", "This PC is missing Microsoft\u2019s App Installer, which setup uses to install USB support.", "Install App Installer from the Microsoft Store, or install usbipd-win from its GitHub releases page. Then open the toolkit again.");
+        else if (text.StartsWith("Setup exited with code"))
+            f = F("error", "A Windows installer reported a problem", "The installer stopped with an error.", "Restart Windows if it asked you to, then open the toolkit again.");
+        else if (text.StartsWith("GUI or USB support exited with code"))
+            f = F("error", "The toolkit closed with an error", "The toolkit or its USB support stopped with an error.", "Open the toolkit again.");
+        else if (text.StartsWith("Cannot create a setup log"))
+            f = F("error", "Setup could not start", "The toolkit could not save its setup log.", "Make sure the drive has free space, then open the toolkit again.");
+        else
+            f = F(allowWait ? "stall" : "error", allowWait ? "Setup is taking longer than expected" : "Setup stopped", text, allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, ask for help in #help."));
+        f.Step = step == null ? null : StepTitle(step);
+        return f;
+    }
+    static string LowerFirst(string text) { return text.Length > 1 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text; }
+}
 '@
 function Initialize-ToolkitStatus {
     if ('ToolkitSetupStatus' -as [type]) { return }
