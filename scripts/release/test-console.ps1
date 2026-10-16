@@ -21,9 +21,8 @@ if ($Case -eq 'setup-questions') {
             if (-not [ToolkitSetupStatus]::QuestionPending) { throw 'Real view accepted a key before the guard' }
             $flags = [Reflection.BindingFlags]'Static,NonPublic'
             $window = [ToolkitSetupStatus].GetField('window',$flags).GetValue($null)
-            $label = [ToolkitSetupStatus].GetField('label',$flags).GetValue($null)
-            $detail = [ToolkitSetupStatus].GetField('detail',$flags).GetValue($null)
-            if (-not $window.TopMost -or -not $window.ControlBox -or $window.AcceptButton.Text -ne 'No' -or $label.Text -ne 'Waiting for your answer' -or $detail.Text -notmatch 'Set up Linux.*' -or $detail.Text -notmatch 'Closing.*No') { throw 'Question view state/text/default was not visible' }
+            $view = [ToolkitSetupStatus].GetField('view',$flags).GetValue($null)
+            if (-not $window.TopMost -or -not $window.ControlBox -or $window.AcceptButton -ne $view.No -or $window.CancelButton -ne $view.No -or $view.No.Text -ne 'No' -or $view.Chip.Text -ne 'Your answer is needed' -or $view.Title.Text -notmatch 'Set up Linux.*' -or $view.Footnote.Text -notmatch 'Closing.*No' -or $view.Yes.Enabled) { throw 'Question view state/text/default was not visible' }
             # Advance the real question's own model, not the command/stall clock.
             $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
             $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
@@ -31,9 +30,9 @@ if ($Case -eq 'setup-questions') {
             Start-Sleep -Milliseconds 300
             if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'question-reminder').Count -lt 1) { throw 'Real UI timer did not remind' }
             [ToolkitSetupStatus]::AnswerQuestion('closed')
-            if ([ToolkitSetupStatus]::QuestionPending -or [ToolkitSetupStatus]::LastAnswer -ne 'closed' -or $label.Text -notmatch 'counts as No') { throw 'Closed question state/text was lost' }
+            if ([ToolkitSetupStatus]::QuestionPending -or [ToolkitSetupStatus]::LastAnswer -ne 'closed' -or $view.Title.Text -ne 'You closed the question' -or $view.Description.Text -notmatch 'counts as') { throw 'Closed question state/text was lost' }
             [ToolkitSetupStatus]::UserWait($true, 'Waiting for you: approve Windows. Look for a flashing shield icon on the taskbar.')
-            if ($label.Text -ne 'Waiting for you' -or $detail.Text -notmatch 'shield icon') { throw 'External prompt instructions missing' }
+            if ($view.Chip.Text -ne 'Waiting for you' -or $view.Steps.AccessibleName -notmatch 'shield icon') { throw 'External prompt instructions missing' }
             [ToolkitSetupStatus]::UserWait($false, '')
         } finally { Stop-ToolkitSetup }
     }
@@ -52,12 +51,11 @@ if ($Case -eq 'setup-feedback') {
             Update-ToolkitSetup 'Downloading Ubuntu (120 of 345 MB)' 'Receiving bytes' 34
             Start-Sleep -Milliseconds 300
             $flags = [Reflection.BindingFlags]'Static,NonPublic'
-            $label = [ToolkitSetupStatus].GetField('label', $flags).GetValue($null)
-            $progress = [ToolkitSetupStatus].GetField('progress', $flags).GetValue($null)
-            if ($label.Text -notmatch '120 of 345' -or $progress.Value -ne 34 -or $progress.Style -ne 'Continuous') { throw 'Real progress not painted' }
+            $view = [ToolkitSetupStatus].GetField('view', $flags).GetValue($null)
+            if ($view.Caption.Text -notmatch '120 MB of 345 MB' -or $view.Title.Text -notmatch '^Downloading the toolkit.s Linux$' -or $view.Progress.Value -ne 34 -or $view.Progress.Style -ne 'Continuous') { throw 'Real progress not painted' }
             Update-ToolkitSetup 'Checking the toolkit' 'Please wait'
             Start-Sleep -Milliseconds 300
-            if ($label.Text -ne 'Checking the toolkit' -or $progress.Style -ne 'Marquee') { throw 'Step transition not painted' }
+            if ($view.Title.Text -ne 'Checking the toolkit' -or $view.Progress.Style -ne 'Marquee') { throw 'Step transition not painted' }
         }
         Complete-ToolkitStep failed 124 'Synthetic idle timeout'
         $text = Get-ToolkitSupportDetails 'Synthetic idle timeout'

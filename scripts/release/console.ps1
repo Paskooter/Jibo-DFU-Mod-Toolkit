@@ -279,7 +279,8 @@ public sealed class ToolkitWaitText {
     public string[] Steps;
 }
 public sealed class ToolkitFailureText {
-    public string Tone, Headline, Step, What, Try;
+    public string Tone, Headline, Step, What, Try, Technical;
+    public bool Decision; // Keep waiting / Stop setup is being offered.
 }
 public static class ToolkitSetupText {
     public const string Product = "Jibo DFU Toolkit";
@@ -375,6 +376,7 @@ public static class ToolkitSetupText {
         }
         string text = instructions ?? "";
         if (text.StartsWith("Waiting for you: ")) text = text.Substring(17);
+        if (text.Length > 0) text = char.ToUpperInvariant(text[0]) + text.Substring(1);
         return W("other", WaitStatus, "", text);
     }
     public static string Duration(double seconds) {
@@ -459,14 +461,17 @@ public static class ToolkitSetupText {
                 allowWait ? keepWaiting + " If you stop, restart Windows before opening the toolkit again." : "Restart Windows, then open the toolkit again.");
         else if (text.IndexOf("administrator command did not finish", System.StringComparison.Ordinal) >= 0)
             f = F("stall", "A Windows installer did not finish", "A Windows installer or permission prompt did not finish.", "Look for an installer window or a Windows prompt and finish it. If there is none, restart Windows and open the toolkit again.");
-        else if (stall.Success)
+        else if (stall.Success && allowWait)
             f = F("stall", "Setup is taking longer than expected", StepTitle(step) + " has not finished" + (waited == null ? "." : " after " + waited + "."),
-                allowWait ? keepWaiting + (plainTry == null ? "" : " If you stop: " + LowerFirst(plainTry)) : (plainTry ?? "Restart Windows, then open the toolkit again."));
+                keepWaiting + (plainTry == null ? "" : " If you stop: " + LowerFirst(plainTry)));
+        else if (stall.Success)
+            f = F("stall", "Setup stopped", StepTitle(step) + " did not finish" + (waited == null ? " in time." : " within " + waited + "."),
+                text.IndexOf("Windows could not stop the command", System.StringComparison.Ordinal) >= 0 ? "Close any installer window, or restart Windows, before trying again." : (plainTry ?? "Restart Windows, then open the toolkit again."));
         else if (text.StartsWith("Ubuntu image checksum mismatch") || text.StartsWith("Ubuntu image size mismatch") || text.StartsWith("Ubuntu download exceeded"))
             f = F("error", "The download was damaged", "The downloaded Ubuntu file did not match the official one, so it was not used. Nothing was installed.", "Open the toolkit again to download it again.");
         else if (text.StartsWith("Ubuntu download failed"))
             f = F("error", "The download failed", "The Ubuntu download did not finish.", "Check your internet connection, then open the toolkit again.");
-        else if (text.StartsWith("The private Linux is not ready."))
+        else if (text.StartsWith("The private Linux is not ready.") || text.StartsWith("Private Linux did not start") || text.StartsWith("Private Linux compatibility check failed"))
             f = F("error", "The toolkit\u2019s Linux is not working", "The toolkit\u2019s private Linux is installed but did not start correctly.",
                 "To set it up again, run wsl --unregister Jibo-DFU-Toolkit in PowerShell, then open the toolkit again. This deletes all files inside that Linux, including any backups saved there.");
         else if (text.StartsWith("Private Linux storage already exists"))
@@ -474,7 +479,11 @@ public static class ToolkitSetupText {
                 "If you no longer need the files in it, move that folder somewhere else (its location is in the details), then open the toolkit again.");
         else if (text.StartsWith("USB handoff failed"))
             f = F("error", "USB could not be connected", "Sharing USB with the toolkit failed, or the Windows permission prompt was declined.", "Open the toolkit again and choose Yes when Windows asks for permission. Unplugging Jibo\u2019s USB cable and plugging it back in can also help.");
-        else if (text.StartsWith("USB support stopped unexpectedly"))
+        else if (text.StartsWith("Embedded") || text.StartsWith("Invalid embedded revision"))
+            f = F("error", "The toolkit download looks incomplete", "Some of the toolkit\u2019s own files are missing or damaged.", "Download " + Exe + " again, then open the new copy.");
+        else if (text.StartsWith("The Windows setup question window is unavailable"))
+            f = F("error", "The setup window could not open", "Setup could not show its question, so nothing was approved or installed.", "Restart Windows, then open the toolkit again.");
+        else if (text.StartsWith("USB support stopped unexpectedly") || text.StartsWith("The WSL USB permission watcher"))
             f = F("error", "USB support stopped", "The toolkit\u2019s USB connection stopped unexpectedly.", "When nothing is being written to Jibo, close the toolkit window, then open the toolkit again.");
         else if (text.StartsWith("Install Microsoft App Installer"))
             f = F("error", "USB support cannot be installed automatically", "This PC is missing Microsoft\u2019s App Installer, which setup uses to install USB support.", "Install App Installer from the Microsoft Store, or install usbipd-win from its GitHub releases page. Then open the toolkit again.");
@@ -484,9 +493,14 @@ public static class ToolkitSetupText {
             f = F("error", "The toolkit closed with an error", "The toolkit or its USB support stopped with an error.", "Open the toolkit again.");
         else if (text.StartsWith("Cannot create a setup log"))
             f = F("error", "Setup could not start", "The toolkit could not save its setup log.", "Make sure the drive has free space, then open the toolkit again.");
-        else
-            f = F(allowWait ? "stall" : "error", allowWait ? "Setup is taking longer than expected" : "Setup stopped", text, allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, ask for help in #help."));
+        else {
+            f = F(allowWait ? "stall" : "error", allowWait ? "Setup is taking longer than expected" : "Setup stopped",
+                (step == null ? "Setup" : StepTitle(step)) + (allowWait ? " has not finished yet." : " did not work."),
+                allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, ask for help in #help."));
+            f.Technical = text.Length > 300 ? text.Substring(0, 300) + "\u2026" : text;
+        }
         f.Step = step == null ? null : StepTitle(step);
+        f.Decision = allowWait;
         return f;
     }
     static string LowerFirst(string text) { return text.Length > 1 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text; }
@@ -516,7 +530,8 @@ public static class ToolkitTheme {
     public static Color Canvas { get { return Pick(0xf3f5f8, SystemColors.Window); } }
     public static Color Header { get { return Pick(0x141c26, SystemColors.Window); } }
     public static Color HeaderText { get { return Pick(0xeef2f6, SystemColors.WindowText); } }
-    public static Color HeaderMuted { get { return Pick(0xa9b6c6, SystemColors.WindowText); } }
+    public static Color HeaderMuted { get { return Pick(0x97a5b6, SystemColors.WindowText); } }
+    public static Color HeaderLine { get { return Pick(0x2f3b49, SystemColors.WindowText); } }
     public static Color Text { get { return Pick(0x17202b, SystemColors.WindowText); } }
     public static Color Muted { get { return Pick(0x566273, SystemColors.WindowText); } }
     public static Color Border { get { return Pick(0xd7dde5, SystemColors.WindowText); } }
@@ -548,6 +563,7 @@ public static class ToolkitTheme {
     public static void UsePerMonitorDpi() {
         try { if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) SetThreadDpiAwarenessContext(new IntPtr(-3)); }
         catch (Exception) { }
+        try { Application.EnableVisualStyles(); } catch (Exception) { } // Modern scroll bars and text box.
     }
     public static int DpiOf(Control control) {
         if (ForcedDpi > 0) return ForcedDpi;
@@ -787,7 +803,7 @@ public sealed class ToolkitPhaseRail : Control {
             int cx = slot * i + slot / 2;
             var circle = new Rectangle(cx - d / 2, 0, d, d);
             if (i < n - 1) {
-                using (var pen = new Pen(i < current ? ToolkitTheme.Accent : ToolkitTheme.Border, line))
+                using (var pen = new Pen(i < current ? ToolkitTheme.Accent : ToolkitTheme.HeaderLine, line))
                     g.DrawLine(pen, cx + d / 2 + Fonts.S(6), d / 2, cx + slot - d / 2 - Fonts.S(6), d / 2);
             }
             Color tone = attention ? ToolkitTheme.Attention : ToolkitTheme.Accent;
@@ -796,13 +812,12 @@ public sealed class ToolkitPhaseRail : Control {
                 using (var brush = new SolidBrush(tone)) g.FillEllipse(brush, circle);
                 TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.AccentText, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
             } else {
-                using (var brush = new SolidBrush(ToolkitTheme.Surface)) g.FillEllipse(brush, circle);
-                using (var pen = new Pen(ToolkitTheme.Border, line)) g.DrawEllipse(pen, Rectangle.Inflate(circle, -line / 2 - 1, -line / 2 - 1));
-                TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.Muted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
+                using (var pen = new Pen(ToolkitTheme.HeaderLine, line)) g.DrawEllipse(pen, Rectangle.Inflate(circle, -line / 2 - 1, -line / 2 - 1));
+                TextRenderer.DrawText(g, (i + 1).ToString(), Fonts.SmallBold, circle, ToolkitTheme.HeaderMuted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter);
             }
             var label = new Rectangle(slot * i, d + Fonts.S(6), slot, Height - d - Fonts.S(6));
             TextRenderer.DrawText(g, ToolkitSetupText.Phases[i], i == current ? Fonts.SmallBold : Fonts.Small, label,
-                i <= current ? ToolkitTheme.Text : ToolkitTheme.Muted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
+                i <= current ? ToolkitTheme.HeaderText : ToolkitTheme.HeaderMuted, ToolkitTheme.Line | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
         }
     }
 }
@@ -1004,6 +1019,7 @@ public sealed class ToolkitSetupView : Panel {
     public ToolkitFonts Fonts;
     public readonly Panel Band = new Panel(), Content = new Panel(), Footer = new Panel();
     public readonly ToolkitPhaseRail Rail = new ToolkitPhaseRail();
+    public readonly ToolkitText Brand = new ToolkitText(), StepCount = new ToolkitText();
     public readonly ToolkitChip Chip = new ToolkitChip();
     public readonly ToolkitText Title = new ToolkitText(), Description = new ToolkitText(), Caption = new ToolkitText(),
         Clock = new ToolkitText(), Note = new ToolkitText(), Footnote = new ToolkitText(), FooterText = new ToolkitText();
@@ -1018,10 +1034,12 @@ public sealed class ToolkitSetupView : Panel {
     void Vis(Control c, bool visible) { on.Remove(c); if (visible) on.Add(c); c.Visible = visible; }
     public bool IsOn(Control c) { return on.Contains(c); }
     public const int LogicalWidth = 560;
+    public bool Compact; // Short screens: no phase rail, so the buttons stay on screen.
     static readonly System.Text.RegularExpressions.Regex DownloadCaption = new System.Text.RegularExpressions.Regex("^Downloading Ubuntu \\((.+) of (.+) MB\\)$");
     public ToolkitSetupView() {
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
-        Band.Controls.Add(Rail);
+        Band.Controls.Add(Rail); Band.Controls.Add(Brand); Band.Controls.Add(StepCount);
+        Brand.Text = ToolkitSetupText.Product; Brand.Flags = ToolkitTheme.Line; StepCount.Flags = ToolkitTheme.Line | TextFormatFlags.Right;
         foreach (Control c in new Control[] { Chip, Title, Description, Progress, Caption, Clock, Facts, Steps, Where, Note, Footnote }) Content.Controls.Add(c);
         Footer.Controls.Add(FooterText); Footer.Controls.Add(Yes); Footer.Controls.Add(No);
         Controls.Add(Footer); Controls.Add(Content); Controls.Add(Band);
@@ -1039,6 +1057,7 @@ public sealed class ToolkitSetupView : Panel {
         Fonts = new ToolkitFonts(dpi);
         Rail.Fonts = Chip.Fonts = Facts.Fonts = Steps.Fonts = Where.Fonts = Fonts;
         Font = Fonts.Body;
+        Brand.Font = Fonts.Brand; StepCount.Font = Fonts.Small;
         Title.Font = Fonts.Title; Description.Font = Fonts.Body; Caption.Font = Fonts.SmallBold; Clock.Font = Fonts.Small;
         Note.Font = Fonts.Small; Footnote.Font = Fonts.Small; FooterText.Font = Fonts.Small;
         Yes.Font = No.Font = Fonts.Button; Where.Font = Fonts.Body;
@@ -1046,6 +1065,7 @@ public sealed class ToolkitSetupView : Panel {
         if (old != null) old.Dispose();
     }
     int S(int logical) { return Fonts.S(logical); }
+    public void Restyle() { if (shown != null) Show(shown); }
     public static string StepKey(string step) {
         if (step == "Downloading Ubuntu (complete)" || DownloadCaption.IsMatch(step ?? "")) return "Downloading Ubuntu";
         return step ?? "";
@@ -1081,8 +1101,8 @@ public sealed class ToolkitSetupView : Panel {
         shown = s.Copy();
         SuspendLayout();
         BackColor = ToolkitTheme.Surface;
-        Band.BackColor = Footer.BackColor = ToolkitTheme.Canvas; Content.BackColor = ToolkitTheme.Surface;
-        Rail.BackColor = ToolkitTheme.Canvas;
+        Band.BackColor = Rail.BackColor = ToolkitTheme.Header; Footer.BackColor = ToolkitTheme.Canvas; Content.BackColor = ToolkitTheme.Surface;
+        Brand.ForeColor = ToolkitTheme.HeaderText; StepCount.ForeColor = ToolkitTheme.HeaderMuted;
         Title.ForeColor = ToolkitTheme.Text; Description.ForeColor = s.Mode == "question" ? ToolkitTheme.Text : ToolkitTheme.Muted;
         Caption.ForeColor = ToolkitTheme.Text; Clock.ForeColor = ToolkitTheme.Muted; Note.ForeColor = ToolkitTheme.Muted;
         Footnote.ForeColor = ToolkitTheme.Muted; FooterText.ForeColor = ToolkitTheme.Muted;
@@ -1106,6 +1126,8 @@ public sealed class ToolkitSetupView : Panel {
             Yes.Shield = q.Id == "wsl" || q.Id == "usb";
             Yes.Enabled = No.Enabled = s.KeysEnabled;
             Vis(Yes, true); Vis(No, true);
+            // Once the key guard lifts, keyboard focus rests on the safe answer.
+            if (s.KeysEnabled && !Yes.Focused && !No.Focused) No.Focus();
             Vis(Clock, s.Reminder);
         } else if (s.Mode == "answered") {
             var q = ToolkitSetupText.Question(s.Prompt);
@@ -1127,10 +1149,9 @@ public sealed class ToolkitSetupView : Panel {
             Where.Text = w.Hint; Vis(Where, !String.IsNullOrEmpty(w.Hint));
             footer = ToolkitSetupText.WaitPaused;
             Vis(Clock, true);
-            if (w.Kind == "admin" && step.Phase == 0) phase = 0;
         } else if (s.Mode == "support" && s.Support != null) {
             tone = s.Support.Tone == "info" ? "neutral" : s.Support.Tone; glyph = s.Support.Tone == "info" ? "i" : s.Support.Tone == "error" ? "x" : "!";
-            chip = s.Support.Tone == "stall" ? "Setup needs your decision" : "Setup stopped";
+            chip = s.Support.Decision ? "Setup needs your decision" : "Setup stopped";
             title = s.Support.Headline; description = s.Support.What;
             footer = "The message in front of this window says what to do next.";
         } else {
@@ -1144,6 +1165,8 @@ public sealed class ToolkitSetupView : Panel {
             footer = ToolkitSetupText.ClosesItself;
         }
         Rail.SetPhase(phase, tone == "attention");
+        StepCount.Text = "Step " + (Rail.Current + 1) + " of " + ToolkitSetupText.Phases.Length;
+        StepCount.AccessibleName = Rail.AccessibleName;
         bool chipChanged = Chip.Text != chip || Chip.Tone != tone;
         Chip.Tone = tone; Chip.Glyph = glyph; Chip.Text = chip; Chip.AccessibleName = chip;
         Title.Text = title; Title.AccessibleName = title;
@@ -1158,10 +1181,15 @@ public sealed class ToolkitSetupView : Panel {
     // Layout in device pixels from the current DPI. Returns the full view size.
     void Arrange(ToolkitViewState s) {
         int width = S(LogicalWidth), margin = S(28), inner = width - 2 * margin;
-        // Phase rail band.
+        // Dark header: product name and step count, then the phase rail.
+        int brandHeight = Fonts.Brand.Height + S(4);
+        int countWidth = ToolkitTheme.TextWidth("Step 5 of 5", Fonts.Small) + S(4);
+        Brand.SetBounds(margin, S(14), inner - countWidth - S(8), brandHeight);
+        StepCount.SetBounds(margin + inner - countWidth, S(14), countWidth, brandHeight);
         int railHeight = S(22) + S(6) + RailLabelHeight(inner);
-        Rail.SetBounds(margin - S(10), S(16), inner + S(20), railHeight);
-        Band.SetBounds(0, 0, width, S(16) + railHeight + S(14));
+        Rail.Visible = !Compact;
+        Rail.SetBounds(margin - S(10), Brand.Bottom + S(14), inner + S(20), railHeight);
+        Band.SetBounds(0, 0, width, (Compact ? Brand.Bottom : Rail.Bottom) + S(14));
         // Content.
         int y = S(22);
         y += Chip.Fit(margin, y) + S(14);
@@ -1212,29 +1240,240 @@ public sealed class ToolkitSetupView : Panel {
     }
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e);
-        using (var pen = new Pen(ToolkitTheme.Border)) {
-            e.Graphics.DrawLine(pen, 0, Band.Bottom, Width, Band.Bottom);
-            e.Graphics.DrawLine(pen, 0, Content.Bottom, Width, Content.Bottom);
+        using (var pen = new Pen(ToolkitTheme.Border)) e.Graphics.DrawLine(pen, 0, Content.Bottom, Width, Content.Bottom);
+    }
+}
+// Stall / failure dialog: what happened, what to try, then one obvious Copy details
+// action. The summary text is shown and copied exactly as given (never reworded).
+public sealed class ToolkitSupportForm : Form {
+    public readonly ToolkitButton Copy = new ToolkitButton(), Open = new ToolkitButton(), KeepWaiting = new ToolkitButton(), CloseButton = new ToolkitButton();
+    public readonly ToolkitText StepLine = new ToolkitText(), Headline = new ToolkitText(), What = new ToolkitText(), Technical = new ToolkitText(), TryLabel = new ToolkitText(),
+        TryText = new ToolkitText(), HelpLabel = new ToolkitText(), HelpLine = new ToolkitText(), DetailsLabel = new ToolkitText();
+    public readonly ToolkitPanel TryBox = new ToolkitPanel(), DetailsBox = new ToolkitPanel(), Footer = new ToolkitPanel();
+    public readonly TextBox Details = new TextBox();
+    readonly Panel icon = new Panel();
+    readonly ToolkitFailureText text;
+    readonly string summary;
+    readonly bool allowWait;
+    ToolkitFonts fonts;
+    public string CopyState = ""; // "", "copied", "failed" (previews set it directly)
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    public const int LogicalWidth = 600;
+    public ToolkitSupportForm(ToolkitFailureText text, string summary, string folder, bool allowWait) {
+        this.text = text; this.summary = summary; this.allowWait = allowWait;
+        Text = ToolkitSetupText.Product + (allowWait ? " \u2013 setup needs a decision" : " \u2013 setup stopped");
+        AccessibleName = text.Headline;
+        AccessibleDescription = text.What + " " + text.Try;
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false; TopMost = true; ShowInTaskbar = false;
+        AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
+        icon.Paint += delegate(object sender, PaintEventArgs e) {
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            string tone = text.Tone == "info" ? "accent" : text.Tone;
+            string glyph = text.Tone == "error" ? "x" : text.Tone == "info" ? "i" : "!";
+            ToolkitTheme.Badge(e.Graphics, new Rectangle(0, 0, icon.Width - 1, icon.Height - 1), ToolkitTheme.ToneColor(tone), ToolkitTheme.AccentText, glyph);
+        };
+        foreach (Control c in new Control[] { icon, StepLine, Headline, What, Technical, TryBox, HelpLabel, HelpLine, Copy, Open, DetailsLabel, DetailsBox, Footer }) Controls.Add(c);
+        TryBox.Controls.Add(TryLabel); TryBox.Controls.Add(TryText);
+        DetailsBox.Controls.Add(Details);
+        Footer.Controls.Add(KeepWaiting); Footer.Controls.Add(CloseButton);
+        StepLine.Flags = ToolkitTheme.Line; TryLabel.Flags = HelpLabel.Flags = DetailsLabel.Flags = ToolkitTheme.Line;
+        Headline.AccessibleRole = AccessibleRole.TitleBar;
+        StepLine.Text = text.Step == null ? "" : "While: " + text.Step;
+        Headline.Text = text.Headline; What.Text = text.What;
+        Technical.Text = String.IsNullOrEmpty(text.Technical) ? "" : "Message: " + text.Technical;
+        Technical.Visible = Technical.Text.Length > 0;
+        TryLabel.Text = "WHAT TO TRY"; TryText.Text = text.Try; TryText.AccessibleName = "What to try: " + text.Try;
+        HelpLabel.Text = "GET HELP"; DetailsLabel.Text = "DETAILS FOR SUPPORT (THIS IS WHAT GETS COPIED)";
+        Copy.Text = "Copy details"; Copy.Kind = "primary"; Copy.AccessibleDescription = ToolkitSetupText.HelpLine;
+        Open.Text = "Open log folder"; Open.Enabled = !String.IsNullOrEmpty(folder);
+        KeepWaiting.Text = "Keep waiting"; KeepWaiting.Visible = allowWait; KeepWaiting.AccessibleDescription = "Give this step more time.";
+        CloseButton.Text = allowWait ? "Stop setup" : "Close";
+        if (allowWait) CloseButton.AccessibleDescription = "Stop setup now. You can open the toolkit again later.";
+        Details.Multiline = true; Details.ReadOnly = true; Details.ScrollBars = ScrollBars.Both; Details.WordWrap = false;
+        Details.BorderStyle = BorderStyle.None; Details.Text = summary; Details.AccessibleName = "Details for support";
+        Copy.TabIndex = 0; Open.TabIndex = 1; Details.TabIndex = 2; Footer.TabIndex = 3; KeepWaiting.TabIndex = 0; CloseButton.TabIndex = 1;
+        Copy.Click += delegate { DoCopy(); };
+        Open.Click += delegate {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true }); }
+            catch (Exception) { Open.Text = "Could not open the folder"; Relayout(); }
+        };
+        AcceptButton = Copy; CancelButton = CloseButton;
+        ApplyDpi(96);
+    }
+    void DoCopy() {
+        try { Clipboard.SetText(summary); CopyState = "copied"; }
+        catch (Exception) { CopyState = "failed"; }
+        Relayout();
+        if (CopyState == "failed") { Details.Focus(); Details.SelectAll(); }
+        HelpLine.Announce();
+    }
+    public void ApplyDpi(int dpi) {
+        var old = fonts;
+        fonts = new ToolkitFonts(dpi);
+        Font = fonts.Body;
+        StepLine.Font = fonts.SmallBold; Headline.Font = fonts.Title; What.Font = fonts.Body; Technical.Font = fonts.Small;
+        TryLabel.Font = HelpLabel.Font = DetailsLabel.Font = fonts.Caps; TryText.Font = fonts.Body; HelpLine.Font = fonts.Body;
+        Copy.Font = Open.Font = KeepWaiting.Font = CloseButton.Font = fonts.Button;
+        Details.Font = fonts.Mono;
+        Relayout();
+        if (old != null) old.Dispose();
+    }
+    int S(int logical) { return fonts.S(logical); }
+    public void Relayout() {
+        SuspendLayout();
+        BackColor = ToolkitTheme.Surface;
+        string tone = text.Tone == "info" ? "accent" : text.Tone;
+        StepLine.ForeColor = ToolkitTheme.Muted; Headline.ForeColor = ToolkitTheme.Text; What.ForeColor = ToolkitTheme.Text; Technical.ForeColor = ToolkitTheme.Muted;
+        TryLabel.ForeColor = ToolkitTheme.ToneInk(tone); TryText.ForeColor = ToolkitTheme.Text;
+        HelpLabel.ForeColor = DetailsLabel.ForeColor = ToolkitTheme.Muted;
+        TryBox.Fill = ToolkitTheme.ToneSoft(tone); TryBox.Line = ToolkitTheme.HighContrast ? SystemColors.WindowText : Color.Empty;
+        DetailsBox.Fill = ToolkitTheme.Canvas; DetailsBox.Line = ToolkitTheme.Border;
+        Footer.Fill = ToolkitTheme.Canvas; Footer.Radius = 0;
+        Details.BackColor = ToolkitTheme.Canvas; Details.ForeColor = ToolkitTheme.Text;
+        TryBox.Radius = DetailsBox.Radius = S(6);
+        if (CopyState == "copied") { HelpLine.Text = ToolkitSetupText.CopiedLine; HelpLine.ForeColor = ToolkitTheme.Success; Copy.Text = "Copied \u2713"; }
+        else if (CopyState == "failed") { HelpLine.Text = ToolkitSetupText.CopyFailedLine; HelpLine.ForeColor = ToolkitTheme.DangerInk; Copy.Text = "Copy failed"; }
+        else { HelpLine.Text = ToolkitSetupText.HelpLine; HelpLine.ForeColor = ToolkitTheme.Text; Copy.Text = "Copy details"; }
+        HelpLine.AccessibleName = HelpLine.Text;
+        int width = S(LogicalWidth), margin = S(28), iconSize = S(36), gap = S(16);
+        int textLeft = margin + iconSize + gap, textWidth = width - textLeft - margin, inner = width - 2 * margin;
+        int y = S(24);
+        icon.SetBounds(margin, y + S(2), iconSize, iconSize);
+        if (StepLine.Text.Length > 0) { StepLine.SetBounds(textLeft, y, textWidth, fonts.SmallBold.Height + S(2)); y += fonts.SmallBold.Height + S(6); }
+        y += Headline.Fit(textLeft, y, textWidth) + S(6);
+        y += What.Fit(textLeft, y, textWidth);
+        if (Technical.Text.Length > 0) { y += S(6); y += Technical.Fit(textLeft, y, textWidth); }
+        y = Math.Max(y, icon.Bottom) + S(18);
+        // What to try.
+        int pad = S(14), tryInner = inner - 2 * pad;
+        TryLabel.SetBounds(pad, pad, tryInner, fonts.Caps.Height + S(2));
+        int tryHeight = TryText.Fit(pad, TryLabel.Bottom + S(4), tryInner);
+        TryBox.SetBounds(margin, y, inner, TryLabel.Bottom + S(4) + tryHeight + pad);
+        y = TryBox.Bottom + S(22);
+        // Get help: one line, then Copy details (primary) and Open log folder.
+        HelpLabel.SetBounds(margin, y, inner, fonts.Caps.Height + S(2)); y += fonts.Caps.Height + S(6);
+        y += HelpLine.Fit(margin, y, inner) + S(10);
+        int bh = S(34);
+        int copyWidth = Math.Max(Copy.Measure(fonts.Button, fonts.Dpi), ToolkitTheme.TextWidth("Copy details", fonts.Button) + S(36));
+        Copy.SetBounds(margin, y, copyWidth, bh);
+        Open.SetBounds(Copy.Right + S(10), y, Open.Measure(fonts.Button, fonts.Dpi), bh);
+        y += bh + S(20);
+        // The exact text that is copied, small and scrollable.
+        DetailsLabel.SetBounds(margin, y, inner, fonts.Caps.Height + S(2)); y += fonts.Caps.Height + S(6);
+        int lines = 6;
+        try { if (Screen.FromControl(this).WorkingArea.Height < y + fonts.Mono.Height * 6 + S(150)) lines = 3; } catch (Exception) { }
+        int detailsHeight = fonts.Mono.Height * lines + S(16);
+        DetailsBox.SetBounds(margin, y, inner, detailsHeight);
+        Details.SetBounds(S(8), S(8), inner - S(16), detailsHeight - S(16));
+        y += detailsHeight + S(24);
+        // Decision footer.
+        int footerHeight = bh + 2 * S(16);
+        Footer.SetBounds(0, y, width, footerHeight);
+        int closeWidth = CloseButton.Measure(fonts.Button, fonts.Dpi);
+        CloseButton.SetBounds(width - margin - closeWidth, S(16), closeWidth, bh);
+        if (allowWait) {
+            int waitWidth = KeepWaiting.Measure(fonts.Button, fonts.Dpi);
+            KeepWaiting.SetBounds(CloseButton.Left - S(10) - waitWidth, S(16), waitWidth, bh);
         }
+        var size = new Size(width, Footer.Bottom);
+        ClientSize = size;
+        if (ClientSize != size) Size = new Size(Width + size.Width - ClientSize.Width, Height + size.Height - ClientSize.Height);
+        ResumeLayout(true);
+        Invalidate(true);
+    }
+    protected override void OnLoad(EventArgs e) {
+        ApplyDpi(ToolkitTheme.DpiOf(this));
+        if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        base.OnLoad(e);
+        ActiveControl = Copy;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        base.OnPaint(e);
+        using (var pen = new Pen(ToolkitTheme.Border)) e.Graphics.DrawLine(pen, 0, Footer.Top - 1, Width, Footer.Top - 1);
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x02E0) {
+            var r = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
+            if (ToolkitTheme.ForcedDpi == 0) ApplyDpi((int)((long)m.WParam & 0xffff));
+            Location = new Point(r.Left, r.Top);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
+        if ((m.Msg == 0x0015 || m.Msg == 0x001A) && fonts != null) Relayout();
+    }
+}
+// Window that hosts the setup view: keeps its size in step with the view, follows
+// monitor DPI changes, and repaints when Windows switches high contrast on or off.
+public sealed class ToolkitSetupForm : Form {
+    public readonly ToolkitSetupView View = new ToolkitSetupView();
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    public ToolkitSetupForm() {
+        Text = ToolkitSetupText.Product;
+        AccessibleName = ToolkitSetupText.Product + " setup";
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false;
+        BackColor = ToolkitTheme.Surface;
+        AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
+        Controls.Add(View);
+    }
+    // Client area exactly the view's size. Non-client size can differ per monitor DPI,
+    // so measure the real client area and correct; never leave the work area.
+    public void FitView() {
+        View.Location = Point.Empty;
+        var area = Screen.FromControl(this).WorkingArea;
+        bool compact = View.Height + (Height - ClientSize.Height) > area.Height && !View.Compact;
+        if (compact) { View.Compact = true; View.Restyle(); }
+        if (ClientSize == View.Size) return;
+        int centerX = Left + Width / 2, centerY = Top + Height / 2;
+        ClientSize = View.Size;
+        if (ClientSize != View.Size) Size = new Size(Width + View.Width - ClientSize.Width, Height + View.Height - ClientSize.Height);
+        if (!IsHandleCreated || !Visible) return;
+        int x = Math.Min(Math.Max(area.Left, centerX - Width / 2), Math.Max(area.Left, area.Right - Width));
+        int y = Math.Min(Math.Max(area.Top, centerY - Height / 2), Math.Max(area.Top, area.Bottom - Height));
+        Location = new Point(x, y);
+    }
+    protected override void OnLoad(EventArgs e) {
+        View.ApplyDpi(ToolkitTheme.DpiOf(this));
+        FitView();
+        if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        base.OnLoad(e);
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x02E0) { // WM_DPICHANGED: lay out again for the new monitor.
+            int dpi = (int)((long)m.WParam & 0xffff);
+            var r = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
+            if (ToolkitTheme.ForcedDpi == 0) { View.Compact = false; View.ApplyDpi(dpi); }
+            Location = new Point(r.Left, r.Top);
+            FitView();
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
+        if (m.Msg == 0x0015 || m.Msg == 0x001A) View.Restyle(); // WM_SYSCOLORCHANGE, WM_SETTINGCHANGE
     }
 }
 public class ToolkitSetupStatus {
-    static Form window;
+    static ToolkitSetupForm window;
+    static ToolkitSetupView view;
     static Thread thread;
     static IntPtr ownerHandle;
     public static IntPtr OwnerHandle { get { return ownerHandle; } }
-    static Label label, detail, elapsed;
-    static ProgressBar progress;
-    static Button yes, no;
     static readonly ToolkitQuestionState question = new ToolkitQuestionState();
     static readonly ConcurrentQueue<ToolkitInteractionEvent> events = new ConcurrentQueue<ToolkitInteractionEvent>();
     static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
-    static double stepStart, lastExternalAttention;
-    static bool externalWait, forceClose;
+    static double stepStart, lastExternalAttention, externalStart, questionStart;
+    static bool externalWait, forceClose, reminded;
     static string beforeWaitStep, beforeWaitDetail;
     static int beforeWaitPercent;
     static string currentStep = "Checking Windows and WSL", currentDetail = "Preparing setup log";
     static int currentPercent = -1;
+    // Presentation only: what the window shows besides the logged step text.
+    static string waitInstructions = "", lastPrompt = "", lastQuestionId = "", answered = "";
+    static ToolkitFailureText support;
     static readonly ManualResetEvent ready = new ManualResetEvent(false);
     public static bool QuestionPending { get { return question.Pending; } }
     public static string LastAnswer { get { return question.Answer; } }
@@ -1266,19 +1505,10 @@ public class ToolkitSetupStatus {
         if (thread != null && thread.IsAlive) return;
         ready.Reset(); forceClose = false;
         thread = new Thread(delegate() {
-            window = new Form(); window.Text = "Jibo DFU Toolkit";
-            window.ClientSize = new Size(580, 310);
-            window.StartPosition = FormStartPosition.CenterScreen;
-            window.FormBorderStyle = FormBorderStyle.FixedDialog;
+            ToolkitTheme.UsePerMonitorDpi();
+            window = new ToolkitSetupForm(); view = window.View;
             window.ControlBox = false; window.KeyPreview = true;
-            label = new Label(); label.SetBounds(20, 16, 540, 44); window.Controls.Add(label);
-            progress = new ProgressBar(); progress.SetBounds(20, 70, 540, 20); window.Controls.Add(progress);
-            elapsed = new Label(); elapsed.SetBounds(20, 100, 540, 24); window.Controls.Add(elapsed);
-            detail = new Label(); detail.SetBounds(20, 132, 540, 110); window.Controls.Add(detail);
-            yes = new Button(); yes.Text = "Yes"; yes.SetBounds(340, 260, 100, 30);
-            no = new Button(); no.Text = "No"; no.SetBounds(450, 260, 110, 30);
-            yes.Visible = no.Visible = false; window.Controls.Add(yes); window.Controls.Add(no);
-            yes.Click += delegate { AnswerOnUi("yes"); }; no.Click += delegate { AnswerOnUi("no"); };
+            view.Yes.Click += delegate { AnswerOnUi("yes"); }; view.No.Click += delegate { AnswerOnUi("no"); };
             window.KeyDown += delegate(object sender, KeyEventArgs e) {
                 if (question.Pending && !question.KeysEnabled(clock.Elapsed.TotalSeconds)) { e.SuppressKeyPress = true; e.Handled = true; }
             };
@@ -1291,15 +1521,14 @@ public class ToolkitSetupStatus {
             timer.Tick += delegate {
                 double now = clock.Elapsed.TotalSeconds;
                 if (question.Pending) {
-                    yes.Enabled = no.Enabled = question.KeysEnabled(now);
-                    elapsed.Text = "Waiting for your answer. No is the safe default; closing counts as No.";
-                    if (question.Remind(now)) { events.Enqueue(new ToolkitInteractionEvent("question-reminder", question.Prompt)); Attention(); }
+                    if (question.Remind(now)) { reminded = true; events.Enqueue(new ToolkitInteractionEvent("question-reminder", question.Prompt)); Attention(); }
                 } else if (externalWait) {
-                    elapsed.Text = "Waiting for you - this is not a setup stall.";
                     if (now - lastExternalAttention >= ToolkitQuestionState.ReminderSeconds) {
                         lastExternalAttention = now; events.Enqueue(new ToolkitInteractionEvent("user-wait-reminder", currentDetail)); Attention();
                     }
-                } else { elapsed.Text = "This step: " + (int)(now - stepStart) + " seconds. Setup is supervised for stalls."; }
+                }
+                view.Tick(State(now));
+                window.FitView();
             };
             timer.Start();
             window.FormClosed += delegate { timer.Dispose(); ownerHandle = IntPtr.Zero; };
@@ -1309,35 +1538,47 @@ public class ToolkitSetupStatus {
         thread.IsBackground = true; thread.SetApartmentState(ApartmentState.STA); thread.Start();
         if (!ready.WaitOne(10000)) throw new Exception("Could not show the toolkit setup window.");
     }
+    static ToolkitViewState State(double now) {
+        var s = new ToolkitViewState();
+        s.Step = currentStep; s.Hint = currentDetail; s.Percent = currentPercent; s.QuestionId = lastQuestionId;
+        s.Prompt = lastPrompt; s.Answer = answered; s.Wait = waitInstructions;
+        if (support != null) { s.Mode = "support"; s.Support = support; }
+        else if (question.Pending) {
+            s.Mode = "question"; s.KeysEnabled = question.KeysEnabled(now); s.Reminder = reminded; s.Seconds = now - questionStart;
+        } else if (externalWait) { s.Mode = "waiting"; s.Seconds = now - externalStart; }
+        else if (answered.Length > 0) s.Mode = "answered";
+        else { s.Mode = "working"; s.Seconds = now - stepStart; }
+        return s;
+    }
     static void PaintStatus() {
-        label.Text = currentStep; detail.Text = currentDetail;
-        progress.Visible = !question.Pending;
-        progress.Style = currentPercent < 0 ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
-        if (currentPercent >= 0) progress.Value = Math.Max(0, Math.Min(100, currentPercent));
+        view.Show(State(clock.Elapsed.TotalSeconds));
+        bool asking = question.Pending;
+        view.Yes.Enabled = view.No.Enabled = asking && question.KeysEnabled(clock.Elapsed.TotalSeconds);
+        window.FitView();
     }
     public static void Update(string text, string hint, int percent) {
         if (window != null && window.IsHandleCreated && !window.IsDisposed) {
             OnUi(delegate {
                 if (question.Pending || externalWait) return;
                 if (percent < 0) stepStart = clock.Elapsed.TotalSeconds;
-                currentStep = text; currentDetail = hint; currentPercent = percent; PaintStatus();
+                currentStep = text; currentDetail = hint; currentPercent = percent; answered = ""; PaintStatus();
             });
-        } else { currentStep = text; currentDetail = hint; currentPercent = percent; }
+        } else { currentStep = text; currentDetail = hint; currentPercent = percent; answered = ""; }
     }
     public static void AskQuestion(string prompt) {
         OnUi(delegate {
             question.Begin(prompt, clock.Elapsed.TotalSeconds);
-            currentStep = "Waiting for your answer";
-            currentDetail = prompt + "\r\n\r\nChoose Yes or No. Closing this question counts as No.";
-            window.ControlBox = true; window.AcceptButton = no; window.CancelButton = no;
-            yes.Enabled = no.Enabled = false; yes.Visible = no.Visible = true;
-            PaintStatus(); Attention(); no.Focus();
+            questionStart = clock.Elapsed.TotalSeconds; reminded = false; answered = "";
+            lastPrompt = prompt; lastQuestionId = ToolkitSetupText.QuestionId(prompt);
+            window.ControlBox = true; window.AcceptButton = view.No; window.CancelButton = view.No;
+            PaintStatus(); Attention(); view.No.Focus();
         });
     }
     static void AnswerOnUi(string answer) {
         if (!question.Respond(answer, clock.Elapsed.TotalSeconds)) return;
-        yes.Visible = no.Visible = false; window.AcceptButton = window.CancelButton = null;
+        window.AcceptButton = window.CancelButton = null;
         window.ControlBox = false; window.TopMost = false; Flash(false);
+        answered = answer;
         currentStep = answer == "closed" ? "Question closed - this counts as No" : "Answer received: " + answer;
         currentDetail = answer == "closed" ? "You closed the question. Setup will stop; no approval was given." : "Continuing setup.";
         PaintStatus();
@@ -1346,45 +1587,35 @@ public class ToolkitSetupStatus {
     public static void AnswerQuestion(string answer) { OnUi(delegate { AnswerOnUi(answer); }); }
     public static void UserWait(bool active, string instructions) {
         OnUi(delegate {
-            if (active && !externalWait) { beforeWaitStep = currentStep; beforeWaitDetail = currentDetail; beforeWaitPercent = currentPercent; }
+            if (active && !externalWait) { beforeWaitStep = currentStep; beforeWaitDetail = currentDetail; beforeWaitPercent = currentPercent; externalStart = clock.Elapsed.TotalSeconds; }
             externalWait = active; window.ControlBox = false;
             if (active) {
-                currentStep = "Waiting for you"; currentDetail = instructions;
+                currentStep = "Waiting for you"; currentDetail = instructions; waitInstructions = instructions; answered = "";
                 lastExternalAttention = clock.Elapsed.TotalSeconds; PaintStatus(); Attention();
             } else { currentStep = beforeWaitStep; currentDetail = beforeWaitDetail; currentPercent = beforeWaitPercent; window.TopMost = false; Flash(false); PaintStatus(); }
         });
     }
     sealed class Owner : IWin32Window { readonly IntPtr handle; public Owner(IntPtr h) { handle = h; } public IntPtr Handle { get { return handle; } } }
+    // The setup window behind the dialog says the same thing in one line.
+    static void ShowSupport(ToolkitFailureText text) {
+        try { if (window != null && window.IsHandleCreated && !window.IsDisposed) OnUi(delegate { support = text; PaintStatus(); }); }
+        catch (Exception) { support = text; } // Presentation only; the dialog still appears.
+    }
     public static bool Details(string message, string summary, string folder, bool allowWait) {
         bool keepWaiting = false;
+        var text = ToolkitSetupText.Failure(message, allowWait);
+        ShowSupport(text);
         var dialogThread = new Thread(delegate() {
-            using (var form = new Form()) {
-                form.Text = allowWait ? "Jibo DFU Toolkit - setup stalled" : "Jibo DFU Toolkit - setup stopped";
-                form.ClientSize = new Size(680, 440); form.StartPosition = FormStartPosition.CenterScreen;
-                form.FormBorderStyle = FormBorderStyle.FixedDialog;
-                form.MaximizeBox = false; form.MinimizeBox = false; form.TopMost = true;
-                var explanation = new Label();
-                explanation.Text = message + "\r\nCopy details to paste in Phoenix Discord #help. Review before sharing.";
-                explanation.SetBounds(16, 16, 648, 100); form.Controls.Add(explanation);
-                var text = new TextBox(); text.Multiline = true; text.ReadOnly = true; text.ScrollBars = ScrollBars.Both;
-                text.WordWrap = false; text.Text = summary; text.SetBounds(16, 120, 648, 256); form.Controls.Add(text);
-                var copy = new Button(); copy.Text = "Copy details"; copy.SetBounds(16, 396, 130, 28);
-                copy.Click += delegate { try { Clipboard.SetText(summary); copy.Text = "Copied"; } catch { copy.Text = "Select text above"; } }; form.Controls.Add(copy);
-                var open = new Button(); open.Text = "Open log folder"; open.SetBounds(156, 396, 140, 28);
-                open.Enabled = !String.IsNullOrEmpty(folder);
-                open.Click += delegate { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true }); } catch { open.Text = "Cannot open folder"; } }; form.Controls.Add(open);
-                if (allowWait) {
-                    var wait = new Button(); wait.Text = "Keep waiting"; wait.SetBounds(386, 396, 130, 28);
-                    wait.Click += delegate { keepWaiting = true; form.Close(); }; form.Controls.Add(wait);
-                }
-                var close = new Button(); close.Text = allowWait ? "Stop setup" : "Close";
-                close.SetBounds(526, 396, 138, 28); close.Click += delegate { form.Close(); }; form.Controls.Add(close);
-                form.CancelButton = close; form.AcceptButton = close;
+            ToolkitTheme.UsePerMonitorDpi();
+            using (var form = new ToolkitSupportForm(text, summary, folder, allowWait)) {
+                form.KeepWaiting.Click += delegate { keepWaiting = true; form.Close(); };
+                form.CloseButton.Click += delegate { form.Close(); };
                 form.ShowDialog(new Owner(ownerHandle));
             }
         });
         dialogThread.SetApartmentState(ApartmentState.STA); dialogThread.Start();
         dialogThread.Join(); // An explicit user decision, never a command timeout.
+        ShowSupport(null);
         return keepWaiting;
     }
     public static void Stop() {
