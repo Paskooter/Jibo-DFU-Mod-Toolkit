@@ -198,7 +198,7 @@ public class ToolkitConsoleNative {
     static IntPtr owner;
     public static IntPtr CreateOwner() {
         if (owner == IntPtr.Zero) {
-            owner = CreateWindowEx(0x00040000, "STATIC", "Jibo DFU Toolkit - setup stopped", 0x00C80000, 200, 200, 640, 180, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            owner = CreateWindowEx(0x00040000, "STATIC", "Jibo DFU Toolkit \u2013 setup stopped", 0x00C80000, 200, 200, 640, 180, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (owner == IntPtr.Zero) throw new Exception("Could not create the setup error window.");
             ShowWindow(owner, 5);
         }
@@ -1686,6 +1686,13 @@ function Get-ToolkitDialogOwner {
     if (-not (Initialize-ToolkitConsole)) { throw 'The Windows setup error window is unavailable.' }
     return [ToolkitConsoleNative]::CreateOwner()
 }
+# Last-resort box when the setup window cannot open. Its buttons are Windows' own
+# Yes/No/Cancel, so the text says what each one does. Display only.
+function Get-ToolkitFallbackText([string]$Safe) {
+    $dash = [char]0x2013
+    return "Setup stopped.`r`n`r`n$Safe`r`n`r`nTo get help, copy the details and paste them in the #help channel on the Phoenix Discord.`r`n`r`n    Yes  $dash  Copy details`r`n    No  $dash  Open log folder`r`n    Cancel  $dash  Close"
+}
+function Get-ToolkitFallbackTitle { return "Jibo DFU Toolkit $([char]0x2013) setup stopped" }
 function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
     $safe = Protect-ToolkitText $Message
     $summary = Get-ToolkitSupportDetails $safe
@@ -1698,11 +1705,11 @@ function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
             # Even a missing/broken WinForms runtime must leave an owned, visible
             # recovery dialog. It never turns a question into implicit approval.
             $owner = Get-ToolkitDialogOwner
-            $choice = [ToolkitConsoleNative]::MessageBox($owner, "$safe`r`n`r`nYes: Copy details. No: Open log folder. Cancel: Close.", 'Jibo DFU Toolkit - setup stopped', 0x00050213)
+            $choice = [ToolkitConsoleNative]::MessageBox($owner, (Get-ToolkitFallbackText $safe), (Get-ToolkitFallbackTitle), 0x00050213)
             try {
                 if ($choice -eq 6) { Set-Clipboard -Value $summary }
                 if ($choice -eq 7 -and $folder) { Start-Process -FilePath explorer.exe -ArgumentList ('"' + $folder + '"') | Out-Null }
-            } catch { [ToolkitConsoleNative]::MessageBox($owner, 'Could not copy or open the log folder. Review the setup log before sharing it.', 'Jibo DFU Toolkit', 0x00010010) | Out-Null }
+            } catch { [ToolkitConsoleNative]::MessageBox($owner, 'Could not copy the details or open the log folder. Look in %LOCALAPPDATA%\Jibo-DFU-Toolkit\logs for the setup log, and look it over before sharing it.', 'Jibo DFU Toolkit', 0x00010010) | Out-Null }
             return $false
         }
     }

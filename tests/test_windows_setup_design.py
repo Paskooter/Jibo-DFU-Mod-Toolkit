@@ -99,3 +99,42 @@ def test_failure_wording_states_what_happened_and_what_to_try(tmp_path, message,
         assert 'closed the question' in text['what'] and 'Not now' in text['what']
     for line in (text['headline'], text['what'], text['try']):
         assert 'wsl --shutdown' not in line and not re.search(r'\bstalled\b', line), line
+
+
+def test_early_fallback_box_explains_its_windows_buttons(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('design_launcher', ROOT / 'scripts/release/windows_launcher.py')
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    log = tmp_path / 'setup.log'
+    text = module.error_dialog_text('Embedded Linux payload checksum mismatch', log)
+    # MessageBox buttons stay Yes/No/Cancel, so each one is spelled out.
+    for line in ('Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help', 'Phoenix Discord'):
+        assert line in text
+    assert text.index('checksum mismatch') < text.index('Yes  ')
+    assert str(log.parent) in text and text.rstrip().endswith('File: ' + log.name)
+    assert 'Copy details' not in module.error_dialog_text('Usage: ...')
+    assert module.ERROR_TITLE == 'Jibo DFU Toolkit \u2013 setup stopped'
+
+
+def test_setup_window_fallback_box_explains_its_windows_buttons(tmp_path):
+    if not PWSH:
+        pytest.skip('requires PowerShell (set PWSH for portable installs)')
+    script = tmp_path / 'fallback.ps1'
+    script.write_text("$ErrorActionPreference='Stop'\n. '" + str(CONSOLE) + "'\n"
+                      "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
+                      "Write-Output (Get-ToolkitFallbackTitle)\nWrite-Output (Get-ToolkitFallbackText 'Synthetic failure')\n")
+    result = subprocess.run([PWSH, '-NoProfile', '-File', str(script)], capture_output=True, text=True,
+                            encoding='utf-8', timeout=30, env={**os.environ, 'TMPDIR': str(tmp_path)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[0] == 'Jibo DFU Toolkit \u2013 setup stopped'
+    for line in ('Synthetic failure', 'Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help'):
+        assert line in result.stdout
+
+
+def test_setup_scripts_stay_ascii_for_windows_powershell():
+    # Windows PowerShell 5.1 reads BOM-less scripts as ANSI; visible typography uses escapes.
+    for name in ('console.ps1', 'bootstrap.ps1'):
+        data = (ROOT / 'scripts/release' / name).read_bytes()
+        assert all(byte < 128 for byte in data), name

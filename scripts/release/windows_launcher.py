@@ -123,12 +123,26 @@ def create_error_owner():
                                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     user.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
     user.DestroyWindow.argtypes = [ctypes.c_void_p]
-    owner = user.CreateWindowExW(0x00040000, 'STATIC', 'Jibo DFU Toolkit - setup stopped',
+    owner = user.CreateWindowExW(0x00040000, 'STATIC', ERROR_TITLE,
                                 0x00C80000, 200, 200, 640, 180, None, None, None, None)
     if not owner:
         raise OSError('Could not create the Windows setup error window')
     user.ShowWindow(owner, 5)
     return owner
+
+
+ERROR_TITLE = 'Jibo DFU Toolkit \u2013 setup stopped'
+
+
+def error_dialog_text(safe, log_path=None):
+    """Plain wording for the early fallback box. Its buttons are Windows' own Yes/No/Cancel."""
+    if not log_path:
+        return 'Setup stopped.\n\n' + safe
+    return ('Setup stopped.\n\n' + safe +
+            '\n\nTo get help, copy the details and paste them in the #help channel on the Phoenix Discord.'
+            '\n\n    Yes  \u2013  Copy details\n    No  \u2013  Open log folder\n    Cancel  \u2013  Close'
+            # Folder and file on separate lines: a long path has no place to wrap.
+            '\n\nSetup log folder:\n' + str(Path(log_path).parent) + '\nFile: ' + Path(log_path).name)
 
 
 def show_error(message):
@@ -142,9 +156,7 @@ def show_error(message):
                 details = support_details(_setup_log_path, safe)
                 while True:
                     choice = ctypes.windll.user32.MessageBoxW(
-                        owner, safe + '\n\nSetup log: ' + str(_setup_log_path) +
-                        '\n\nYes: Copy details for Phoenix Discord #help.\nNo: Open log folder.\nCancel: Close.',
-                        "Jibo DFU Toolkit - setup stopped", 0x00050213)
+                        owner, error_dialog_text(safe, _setup_log_path), ERROR_TITLE, 0x00050213)
                     try:
                         if choice == 6:
                             copy_details(details)
@@ -153,10 +165,10 @@ def show_error(message):
                             os.startfile(str(_setup_log_path.parent))
                             continue
                     except OSError:
-                        ctypes.windll.user32.MessageBoxW(owner, 'Could not copy or open the folder. Select and copy the log file from the path shown.', 'Jibo DFU Toolkit', 0x00010010)
+                        ctypes.windll.user32.MessageBoxW(owner, 'Could not copy the details or open the folder. The setup log is at the path shown in the previous message.', 'Jibo DFU Toolkit', 0x00010010)
                         continue
                     return
-            ctypes.windll.user32.MessageBoxW(owner, safe, "Jibo DFU Toolkit", 0x00010010)
+            ctypes.windll.user32.MessageBoxW(owner, error_dialog_text(safe), "Jibo DFU Toolkit", 0x00010010)
         finally:
             ctypes.windll.user32.DestroyWindow(owner)
     else:
