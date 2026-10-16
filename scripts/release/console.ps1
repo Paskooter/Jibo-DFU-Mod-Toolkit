@@ -279,7 +279,7 @@ public sealed class ToolkitWaitText {
     public string[] Steps;
 }
 public sealed class ToolkitFailureText {
-    public string Tone, Headline, Step, What, Try, Technical;
+    public string Tone, Headline, Step, StepKey, What, Try;
     public bool Decision; // Keep waiting / Stop setup is being offered.
 }
 public static class ToolkitSetupText {
@@ -304,7 +304,7 @@ public static class ToolkitSetupText {
             case "Checking Windows and WSL": return S("Checking Windows", "Making sure Windows has what the toolkit needs to run.", 0);
             case "Installing Windows components":
                 if (questionId == "usb") return S("Installing USB support", "Installing usbipd-win, the free Windows tool that lets the toolkit talk to Jibo over USB.", 2);
-                if (questionId == "wsl") return S("Installing Windows\u2019 Linux support", "Windows is installing its Linux feature (WSL) from Microsoft. This can take several minutes.", 0);
+                if (questionId == "wsl") return S("Installing Windows\u2019 Linux support", "Windows is installing its Linux feature (WSL) from Microsoft. This can take several minutes.", 1);
                 return S("Installing Windows components", "Windows is installing what the toolkit needs. This can take several minutes.", 0);
             case "Finding Linux": return S("Looking for Linux on this PC", "Checking whether this PC already has a Linux the toolkit can use.", 1);
             case "Starting Linux": return S("Starting the toolkit\u2019s Linux", "Starting Linux and checking that the toolkit can use it.", 1);
@@ -444,11 +444,11 @@ public static class ToolkitSetupText {
         if (text.StartsWith("WSL setup declined."))
             f = F("info", "Setup stopped", declined + " Windows\u2019 Linux support was not installed, and nothing was changed.", "Open the toolkit again when you are ready to install it.");
         else if (text.StartsWith("Distribution setup declined."))
-            f = F("info", "Setup stopped", declined + " Nothing was downloaded or installed.", "Open the toolkit again when you are ready to set up its Linux.");
+            f = F("info", "Setup stopped", declined + " Nothing was downloaded or installed.", "Open the toolkit again whenever you are ready to set up the toolkit\u2019s Linux.");
         else if (text.StartsWith("USB setup declined."))
             f = F("info", "Setup stopped", declined + " USB support was not installed.", "The toolkit needs USB support to talk to Jibo. Open the toolkit again when you are ready to install it.");
         else if (text.StartsWith("WSL setup requested."))
-            f = F("info", "Restart Windows to finish setup", "Windows finished installing its Linux support.", "Restart Windows if it asked you to. Then open " + Exe + " again to continue setup.");
+            f = F("info", "Open the toolkit again to finish setup", "Windows finished installing its Linux support.", "If Windows asked you to restart, restart first. Then open " + Exe + " again to continue setup.");
         else if (text.StartsWith("usbipd-win setup finished."))
             f = F("info", "Open the toolkit again to finish setup", "USB support (usbipd-win) was installed.", "Close this message, then open " + Exe + " again. Restart Windows first if the installer asked you to.");
         else if (text.IndexOf("canceled by the user", System.StringComparison.OrdinalIgnoreCase) >= 0)
@@ -479,7 +479,7 @@ public static class ToolkitSetupText {
             f = F("error", "An old toolkit Linux folder is in the way", "A folder from an earlier toolkit Linux already exists, so setup stopped instead of replacing it.",
                 "If you no longer need the files in it, move that folder somewhere else (its location is in the details), then open the toolkit again.");
         else if (text.StartsWith("USB handoff failed"))
-            f = F("error", "USB could not be connected", "Sharing USB with the toolkit failed, or the Windows permission prompt was declined.", "Open the toolkit again and choose Yes when Windows asks for permission. Unplugging Jibo\u2019s USB cable and plugging it back in can also help.");
+            f = F("error", "USB could not be connected", "The toolkit could not get access to USB, or the Windows permission prompt was declined.", "Open the toolkit again and choose Yes when Windows asks for permission. Unplugging Jibo\u2019s USB cable and plugging it back in can also help.");
         else if (text.StartsWith("Embedded") || text.StartsWith("Invalid embedded revision"))
             f = F("error", "The toolkit download looks incomplete", "Some of the toolkit\u2019s own files are missing or damaged.", "Download " + Exe + " again, then open the new copy.");
         else if (text.StartsWith("The Windows setup question window is unavailable"))
@@ -498,9 +498,9 @@ public static class ToolkitSetupText {
             f = F(allowWait ? "stall" : "error", allowWait ? "Setup is taking longer than expected" : "Setup stopped",
                 (step == null ? "Setup" : StepTitle(step)) + (allowWait ? " has not finished yet." : " did not work."),
                 allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, ask for help in #help."));
-            f.Technical = text.Length > 300 ? text.Substring(0, 300) + "\u2026" : text;
         }
         f.Step = step == null ? null : StepTitle(step);
+        f.StepKey = step;
         f.Decision = allowWait;
         return f;
     }
@@ -1084,7 +1084,7 @@ public sealed class ToolkitSetupView : Panel {
         if (known != null) return known;
         var other = new ToolkitStepText(); other.Title = s.Step; other.Description = s.Hint; other.Phase = Rail.Current; return other;
     }
-    static int QuestionPhase(string id, int fallback) { return id == "wsl" ? 0 : id == "linux" ? 1 : id == "usb" ? 2 : fallback; }
+    static int QuestionPhase(string id, int fallback) { return id == "wsl" || id == "linux" ? 1 : id == "usb" ? 2 : fallback; }
     // Text that changes every tick (clock, reminder) without a full relayout.
     public void Tick(ToolkitViewState s) {
         if (shown == null || s.Mode != shown.Mode) { Show(s); return; }
@@ -1156,6 +1156,9 @@ public sealed class ToolkitSetupView : Panel {
             tone = s.Support.Tone == "info" ? "neutral" : s.Support.Tone; glyph = s.Support.Tone == "info" ? "i" : s.Support.Tone == "error" ? "x" : "!";
             chip = s.Support.Decision ? "Setup needs your decision" : "Setup stopped";
             title = s.Support.Headline; description = s.Support.What;
+            // The failed step, not the cleanup step that may have started since.
+            var failed = ToolkitSetupText.Step(s.Support.StepKey, s.QuestionId);
+            if (failed != null) phase = failed.Phase;
             footer = "The message in front of this window says what to do next.";
         } else {
             tone = "working"; chip = ToolkitSetupText.WorkingStatus;
@@ -1250,7 +1253,7 @@ public sealed class ToolkitSetupView : Panel {
 // action. The summary text is shown and copied exactly as given (never reworded).
 public sealed class ToolkitSupportForm : Form {
     public readonly ToolkitButton Copy = new ToolkitButton(), Open = new ToolkitButton(), KeepWaiting = new ToolkitButton(), CloseButton = new ToolkitButton();
-    public readonly ToolkitText StepLine = new ToolkitText(), Headline = new ToolkitText(), What = new ToolkitText(), Technical = new ToolkitText(), TryLabel = new ToolkitText(),
+    public readonly ToolkitText StepLine = new ToolkitText(), Headline = new ToolkitText(), What = new ToolkitText(), TryLabel = new ToolkitText(),
         TryText = new ToolkitText(), HelpLabel = new ToolkitText(), HelpLine = new ToolkitText(), DetailsLabel = new ToolkitText();
     public readonly ToolkitPanel TryBox = new ToolkitPanel(), DetailsBox = new ToolkitPanel(), Footer = new ToolkitPanel();
     public readonly TextBox Details = new TextBox();
@@ -1277,7 +1280,7 @@ public sealed class ToolkitSupportForm : Form {
             string glyph = text.Tone == "error" ? "x" : text.Tone == "info" ? "i" : "!";
             ToolkitTheme.Badge(e.Graphics, new Rectangle(0, 0, icon.Width - 1, icon.Height - 1), ToolkitTheme.ToneColor(tone), ToolkitTheme.AccentText, glyph);
         };
-        foreach (Control c in new Control[] { icon, StepLine, Headline, What, Technical, TryBox, HelpLabel, HelpLine, Copy, Open, DetailsLabel, DetailsBox, Footer }) Controls.Add(c);
+        foreach (Control c in new Control[] { icon, StepLine, Headline, What, TryBox, HelpLabel, HelpLine, Copy, Open, DetailsLabel, DetailsBox, Footer }) Controls.Add(c);
         TryBox.Controls.Add(TryLabel); TryBox.Controls.Add(TryText);
         DetailsBox.Controls.Add(Details);
         Footer.Controls.Add(KeepWaiting); Footer.Controls.Add(CloseButton);
@@ -1285,8 +1288,6 @@ public sealed class ToolkitSupportForm : Form {
         Headline.AccessibleRole = AccessibleRole.TitleBar;
         StepLine.Text = ToolkitSetupText.During(text.Step);
         Headline.Text = text.Headline; What.Text = text.What;
-        Technical.Text = String.IsNullOrEmpty(text.Technical) ? "" : "Message: " + text.Technical;
-        Technical.Visible = Technical.Text.Length > 0;
         TryLabel.Text = "WHAT TO TRY"; TryText.Text = text.Try; TryText.AccessibleName = "What to try: " + text.Try;
         HelpLabel.Text = "GET HELP"; DetailsLabel.Text = "DETAILS FOR SUPPORT (THIS IS WHAT GETS COPIED)";
         Copy.Text = "Copy details"; Copy.Kind = "primary"; Copy.AccessibleDescription = ToolkitSetupText.HelpLine;
@@ -1317,7 +1318,7 @@ public sealed class ToolkitSupportForm : Form {
         var old = fonts;
         fonts = new ToolkitFonts(dpi);
         Font = fonts.Body;
-        StepLine.Font = fonts.SmallBold; Headline.Font = fonts.Title; What.Font = fonts.Body; Technical.Font = fonts.Small;
+        StepLine.Font = fonts.SmallBold; Headline.Font = fonts.Title; What.Font = fonts.Body;
         TryLabel.Font = HelpLabel.Font = DetailsLabel.Font = fonts.Caps; TryText.Font = fonts.Body; HelpLine.Font = fonts.Body;
         Copy.Font = Open.Font = KeepWaiting.Font = CloseButton.Font = fonts.Button;
         Details.Font = fonts.Mono;
@@ -1329,7 +1330,7 @@ public sealed class ToolkitSupportForm : Form {
         SuspendLayout();
         BackColor = ToolkitTheme.Surface;
         string tone = text.Tone == "info" ? "accent" : text.Tone;
-        StepLine.ForeColor = ToolkitTheme.Muted; Headline.ForeColor = ToolkitTheme.Text; What.ForeColor = ToolkitTheme.Text; Technical.ForeColor = ToolkitTheme.Muted;
+        StepLine.ForeColor = ToolkitTheme.Muted; Headline.ForeColor = ToolkitTheme.Text; What.ForeColor = ToolkitTheme.Text;
         TryLabel.ForeColor = ToolkitTheme.ToneInk(tone); TryText.ForeColor = ToolkitTheme.Text;
         HelpLabel.ForeColor = DetailsLabel.ForeColor = ToolkitTheme.Muted;
         TryBox.Fill = ToolkitTheme.ToneSoft(tone); TryBox.Line = ToolkitTheme.HighContrast ? SystemColors.WindowText : Color.Empty;
@@ -1338,7 +1339,7 @@ public sealed class ToolkitSupportForm : Form {
         Details.BackColor = ToolkitTheme.Canvas; Details.ForeColor = ToolkitTheme.Text;
         TryBox.Radius = DetailsBox.Radius = S(6);
         if (CopyState == "copied") { HelpLine.Text = ToolkitSetupText.CopiedLine; HelpLine.ForeColor = ToolkitTheme.Success; Copy.Text = "Copied \u2713"; }
-        else if (CopyState == "failed") { HelpLine.Text = ToolkitSetupText.CopyFailedLine; HelpLine.ForeColor = ToolkitTheme.DangerInk; Copy.Text = "Copy failed"; }
+        else if (CopyState == "failed") { HelpLine.Text = ToolkitSetupText.CopyFailedLine; HelpLine.ForeColor = ToolkitTheme.DangerInk; Copy.Text = "Copy again"; }
         else { HelpLine.Text = ToolkitSetupText.HelpLine; HelpLine.ForeColor = ToolkitTheme.Text; Copy.Text = "Copy details"; }
         HelpLine.AccessibleName = HelpLine.Text;
         int width = S(LogicalWidth), margin = S(28), iconSize = S(36), gap = S(16);
@@ -1348,7 +1349,6 @@ public sealed class ToolkitSupportForm : Form {
         if (StepLine.Text.Length > 0) { StepLine.SetBounds(textLeft, y, textWidth, fonts.SmallBold.Height + S(2)); y += fonts.SmallBold.Height + S(6); }
         y += Headline.Fit(textLeft, y, textWidth) + S(6);
         y += What.Fit(textLeft, y, textWidth);
-        if (Technical.Text.Length > 0) { y += S(6); y += Technical.Fit(textLeft, y, textWidth); }
         y = Math.Max(y, icon.Bottom) + S(18);
         // What to try.
         int pad = S(14), tryInner = inner - 2 * pad;
@@ -1476,7 +1476,7 @@ public class ToolkitSetupStatus {
     static string currentStep = "Checking Windows and WSL", currentDetail = "Preparing setup log";
     static int currentPercent = -1;
     // Presentation only: what the window shows besides the logged step text.
-    static string waitInstructions = "", lastPrompt = "", lastQuestionId = "", answered = "";
+    static string waitInstructions = "", lastPrompt = "", lastQuestionId = "", answered = "", questionStep = "";
     static ToolkitFailureText support;
     static readonly ManualResetEvent ready = new ManualResetEvent(false);
     public static bool QuestionPending { get { return question.Pending; } }
@@ -1565,14 +1565,16 @@ public class ToolkitSetupStatus {
             OnUi(delegate {
                 if (question.Pending || externalWait) return;
                 if (percent < 0) stepStart = clock.Elapsed.TotalSeconds;
-                currentStep = text; currentDetail = hint; currentPercent = percent; answered = ""; PaintStatus();
+                // Confirm-Setup refreshes the same step after a No; keep showing that answer.
+                if (!(answered == "no" && text == questionStep)) answered = "";
+                currentStep = text; currentDetail = hint; currentPercent = percent; PaintStatus();
             });
         } else { currentStep = text; currentDetail = hint; currentPercent = percent; answered = ""; }
     }
     public static void AskQuestion(string prompt) {
         OnUi(delegate {
             question.Begin(prompt, clock.Elapsed.TotalSeconds);
-            questionStart = clock.Elapsed.TotalSeconds; reminded = false; answered = "";
+            questionStart = clock.Elapsed.TotalSeconds; reminded = false; answered = ""; questionStep = currentStep;
             lastPrompt = prompt; lastQuestionId = ToolkitSetupText.QuestionId(prompt);
             window.ControlBox = true; window.AcceptButton = view.No; window.CancelButton = view.No;
             PaintStatus(); Attention(); view.No.Focus();
