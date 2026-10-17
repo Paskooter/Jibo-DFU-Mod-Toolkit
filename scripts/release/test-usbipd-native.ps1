@@ -600,11 +600,13 @@ function Run-BoundsCase {
             if ($name -eq 'program64') { $env:ProgramW6432=Join-Path (Split-Path $fixture) $name } else { $env:ProgramFiles=Join-Path (Split-Path $fixture) $name }
         }
     }
+    Save-Json (Join-Path $OutputRoot 'discovery-parent.json') @{program64=$env:ProgramW6432; program=$env:ProgramFiles; process64=[Environment]::Is64BitProcess; expected_program32=(Join-Path (Join-Path (Join-Path (Split-Path $fixture) 'program32') 'usbipd-win') 'usbipd.exe')}
     $before=@([Environment]::GetEnvironmentVariable('Path','Process'),[Environment]::GetEnvironmentVariable('Path','User'),[Environment]::GetEnvironmentVariable('Path','Machine')) | ConvertTo-Json -Compress
     # Only the documented narrow read seams enter the product's private worker.
     function Get-Command {
         param($Name,$CommandType,$ErrorAction)
         if ($CommandType -cne 'Application' -or $Name -notin @('usbipd.exe','usbipd')) { [IO.File]::WriteAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'poison.entered'),'bad lookup'); throw 'Forbidden bounds lookup' }
+        [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'discovery-worker.jsonl'),((@{name=$Name; program64=$env:ProgramW6432; program=$env:ProgramFiles; process64=[Environment]::Is64BitProcess} | ConvertTo-Json -Compress)+"`n"))
         [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'inventory.txt'),('lookup:'+ $Name + "`n"))
         if ($env:USBIPD_BOUNDS_CASE -like 'source-*' -or $env:USBIPD_BOUNDS_CASE -eq 'blocked-discovery') { return $null }
         if ($env:USBIPD_BOUNDS_CASE -like 'shared-*') {
@@ -630,6 +632,14 @@ function Run-BoundsCase {
             return [pscustomobject]@{Path=$value; UninstallString=('"'+(Join-Path $folder 'poison.exe')+'" --version')}
         }
         [IO.File]::WriteAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'poison.entered'),'bad registry'); throw 'Forbidden registry inventory'
+    }
+    if ($case -like 'source-*') {
+        function Test-Path {
+            param($LiteralPath,$PathType)
+            $exists=Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+            [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'discovery-filesystem.jsonl'),((@{path=$LiteralPath; exists=$exists} | ConvertTo-Json -Compress)+"`n"))
+            return $exists
+        }
     }
     if ($case -eq 'blocked-filesystem') {
         function Test-Path {
