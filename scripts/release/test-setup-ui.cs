@@ -33,6 +33,14 @@ public static class ToolkitUiTests {
         var state = ToolkitPreview.SupportStates()[wait ? 0 : 3];
         return new ToolkitSupportForm(ToolkitSetupText.Failure((string)state[1], wait), ToolkitPreview.DetailsFor((string)state[1]), "", wait);
     }
+    static void DpiMessage(Form form, int dpi) {
+        var r = new RECT(); r.Left = form.Left; r.Top = form.Top; r.Right = form.Right; r.Bottom = form.Bottom;
+        IntPtr data = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
+        try {
+            Marshal.StructureToPtr(r, data, false);
+            SendMessageW(form.Handle, 0x02E0, new IntPtr((dpi << 16) | dpi), data);
+        } finally { Marshal.FreeHGlobal(data); }
+    }
     static void NativeOnLoad() {
         ToolkitTheme.ForcedDpi = 0; ToolkitTheme.ForcedWorkArea = Rectangle.Empty;
         using (var form = Support(false)) {
@@ -55,7 +63,8 @@ public static class ToolkitUiTests {
                 form.Show(); Pump(); Fonts(form, "NativeShowOnLoad");
                 foreach (int dpi in new int[] { 96, 144, 144, 192, 96 }) {
                     ToolkitFonts old = Owner(view);
-                    if (support) ((ToolkitSupportView)view).ApplyDpi(dpi); else ((ToolkitSetupView)view).ApplyDpi(dpi);
+                    DpiMessage(form, dpi); // Inject real WM_DPICHANGED, not a monitor-scale claim.
+                    Require(Owner(view).Dpi == dpi, "WM_DPICHANGED did not reach the view");
                     Fonts(form, "DpiSequence");
                     Pump();
                     using (var bitmap = new Bitmap(view.Width, view.Height)) view.DrawToBitmap(bitmap, new Rectangle(Point.Empty, view.Size));

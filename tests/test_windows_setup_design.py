@@ -140,10 +140,12 @@ def test_setup_scripts_stay_ascii_for_windows_powershell():
         assert all(byte < 128 for byte in data), name
 
 
-def test_setup_preview_workflow_is_manual_and_publishes_nothing():
+def test_setup_preview_workflow_is_preview_only_and_publishes_nothing():
     text = (ROOT / '.github/workflows/setup-previews.yml').read_text()
     trigger = text.split('\non:', 1)[1].split('\npermissions:', 1)[0]
-    assert trigger.strip() == 'workflow_dispatch:'
+    assert 'workflow_dispatch:' in trigger
+    assert "branches: ['preview/**']" in trigger
+    assert trigger.count('push:') == 1 and 'pull_request:' not in trigger
     assert 'contents: read' in text and 'write' not in text
     assert 'runs-on: windows-2022' in text
     assert 'scripts/release/render-setup-previews.ps1' in text and 'shell: powershell' in text

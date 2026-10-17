@@ -15,6 +15,9 @@ foreach ($lane in @('standard','high-contrast')) {
     $path = Join-Path (Join-Path $OutDir $lane) 'receipt.json'
     $r = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
     Assert-HealthyReceipt $r $lane
+    $required = @('setup-96','support-96','fallback-setup','launcher-text','fallback-launcher','clipboard','font-control')
+    if ($lane -eq 'standard') { $required += @('setup-144','setup-192','support-144','support-192','simulated-hc','scaled-forms','live') }
+    foreach ($phase in $required) { if ($r.phases.PSObject.Properties.Name -notcontains $phase) { throw "$lane missing phase $phase" } }
     if ($r.font_lifetime_control -ne 'ok') { throw "$lane native font lifecycle failed or missing" }
     if ($r.clipboard -ne 'ok' -or $r.fallback.setup_window -ne 'ok' -or $r.fallback.launcher -ne 'ok') { throw "$lane clipboard/fallback check failed" }
     foreach ($entry in $r.files) {
