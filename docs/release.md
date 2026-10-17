@@ -71,10 +71,14 @@ Linux password and ran the GUI as root. The EXE now uses this separate path:
 The only Windows approval prompt in a normal launch is usbipd's existing bind
 approval, the first time a robot's USB port is shared. No administrator prompt
 authorizes a robot write; the existing per-write reviews remain mandatory.
-When no matching Ubuntu exists, setup asks:
+When no matching Ubuntu exists, the setup window asks:
 
-> Set up a private Linux for the toolkit? One-time download of about 345 MB.
-> No Linux account or password needed. [y/N]
+> Set up the toolkit’s Linux?
+
+It explains the one-time download of about 345 MB from Ubuntu's official site,
+with no Linux account or password needed. The buttons are **Set it up** and
+**Not now** (the safe default). Closing the question also counts as **Not now**:
+setup stops without approval.
 
 Declining performs no download or import. Approval downloads the official
 [Ubuntu 22.04.5 x64 WSL image](https://releases.ubuntu.com/jammy/ubuntu-22.04.5-wsl-amd64.wsl),
@@ -102,8 +106,12 @@ no Linux account/password wizard. Once Windows prerequisites and Linux are set
 up, first-window startup and self-check work offline. Firmware downloads still
 require internet. Installing WSL/WSLg or usbipd, when missing, retains explicit
 approval/UAC; importing/provisioning private Linux itself needs neither UAC nor a
-Linux password. Source `run.ps1`/`run-gui.cmd` still use `run.sh` and its existing
-Linux sudo behavior; these instructions concern the EXE.
+Linux password. Source `run.ps1`/`run-gui.cmd` refuse to use `Jibo-DFU-Toolkit`,
+which has no Linux password or sudo access; `run.sh` also refuses inside it before
+any build or package installation. Open `Jibo-DFU-Windows-x64.exe` for that private
+Linux. For source builds, use your own Ubuntu with a sudo-enabled user and select
+it with `.\run.ps1 -Gui -Distro Ubuntu-22.04`. Running Windows as administrator
+does not change the Linux user.
 
 The GUI banner and captured EXE diagnostics identify the download as
 `Jibo DFU Toolkit (build <revision>)`.
@@ -113,10 +121,28 @@ The GUI banner and captured EXE diagnostics identify the download as
 The Windows EXE uses the GUI subsystem (PE Subsystem 2). It does not allocate a
 console or Terminal tab on its normal path. PowerShell, WSL and USB helpers start
 windowless, including elevated helpers; Windows UAC approval remains visible.
-Setup consent uses Yes/No dialogs defaulting to No. Failures use a native error
-dialog, never an invisible input prompt. A responsive “Setting up Jibo DFU Toolkit…”
-status window runs on its own UI thread during downloads, import and payload setup;
-it closes when the actual Tk main window reports readiness, or an error replaces it.
+The responsive **Jibo DFU Toolkit** setup window runs on its own UI thread. Its
+five stages are **Check Windows**, **Set up Linux**, **Prepare toolkit**,
+**Connect USB** and **Open toolkit**. It names the current step and shows elapsed
+time. Downloads show received MB, total MB and a real percentage; other work uses
+an activity indicator. It closes when the actual Tk main window reports readiness.
+
+Consent questions are embedded in that same window, with **What happens** and
+**How long** explanations. Private Linux uses **Set it up** / **Not now**; Windows
+Linux-support and USB-support installation use **Install** / **Not now**. The safe
+default is **Not now**, and closing a question is a refusal, never approval. A
+pending question restores the window, keeps it on top, flashes the taskbar button
+when unfocused and sounds a reminder about once a minute. **Waiting for you**
+instead explains a Windows permission prompt, installer or requested restart;
+waiting for a person is not a setup stall.
+
+Stalls and failures open a support dialog explaining what happened and what to
+try. **Copy details** copies the build, Windows/WSL versions, failed step, error
+and recent log lines; **Open log folder** opens the setup logs. Review details
+before sharing them in #help. A stall that allows more time offers **Keep waiting**
+and **Stop setup**; closing that dialog stops setup rather than silently continuing.
+Other failures offer **Close**. If the setup UI cannot start, a native fallback
+explains its Windows buttons for copying details or opening the log folder.
 
 For troubleshooting only, run:
 
@@ -167,8 +193,8 @@ Windows-build input, not a user download.
    hosts and a Jibo. CI is not a USB acceptance test. Do not ship a known-broken platform.
 2. Pick the version, then from your reviewed clean checkout:
    ```sh
-   git tag -a v1.0.0 -m 'Jibo DFU Toolkit v1.0.0'
-   git push origin v1.0.0
+   git tag -a v1.0.1 -m 'Jibo DFU Toolkit v1.0.1'
+   git push origin v1.0.1
    ```
    Only maintainers perform these commands; the build agent must not create tags.
 3. Wait for every build and the aggregate job to pass. The tag job creates a

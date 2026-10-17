@@ -17,16 +17,21 @@ Get the single file for your computer from [GitHub Releases](https://github.com/
 
 Linux and Mac downloads include Python/Tk and all toolkit tools: no clone, compiler, Git, Homebrew or internet needed for first launch. Windows includes the prebuilt Linux payload. It reuses its own **Jibo-DFU-Toolkit** Linux, or a standard **Ubuntu 22.04+** WSL 2 distribution with a normal user and WSLg. It never automatically uses Linux belonging to NVIDIA Workbench, Docker, Podman, Rancher or another tool. If no Ubuntu matches, it asks once to download a verified official Ubuntu image (about 345 MB) and create its own private Linux; no Linux username or password is needed. Internet and a reboot may be needed to install missing Windows/WSL prerequisites. Existing source launchers remain available below. Downloading firmware updates still needs internet. The downloadable Mac apps require macOS 15 or later; Apple silicon USB operation remains experimental.
 
-**Windows command window:** the EXE is a Windows GUI application: no command
-window or Terminal tab is created, even at startup. Setup questions and failures
-use native dialogs; a small setup window names the current step and elapsed time.
-The Ubuntu download shows received MB and real progress. Setup warns if a step
-stalls, with **Keep waiting** where appropriate, rather than waiting forever.
-Questions appear inside that same window with **Yes / No** (default **No**).
-While waiting for you it stays on top, restores itself, flashes its taskbar button
-and sounds a reminder about once a minute. Closing a question means **No**.
-Windows may still request UAC approval; the window tells you to look for the
-flashing shield icon or installer. Waiting for your answer is not a setup stall. Run
+**Windows setup window:** the EXE is a Windows GUI application: no command
+window or Terminal tab is created, even at startup. The setup window shows five
+named stages, the current step and elapsed time. The Ubuntu download shows received
+MB, total MB and a percentage; other steps show activity, not a made-up percentage.
+Questions appear inside that same window. **Set up the toolkit’s Linux?** offers
+**Set it up** / **Not now**; the Windows Linux-support and USB-support questions
+offer **Install** / **Not now**. The safe default is **Not now**. Closing a question
+also counts as **Not now**: no approval is given and setup stops there. While waiting
+for you the window stays on top, restores itself, flashes its taskbar button when
+unfocused and sounds a reminder about once a minute.
+Windows may still request UAC approval; **Waiting for you** explains how to find
+the flashing shield icon or installer. Waiting for your answer or a Windows prompt
+is not a setup stall. A stall or failure explains what happened and what to try,
+with **Copy details** and **Open log folder** for support. Where more time is safe,
+choose **Keep waiting** or **Stop setup**; closing that decision stops setup. Run
 `Jibo-DFU-Windows-x64.exe -ShowConsole` only when troubleshooting; this can be
 combined with `-Distro NAME`. Source launchers keep their terminal.
 

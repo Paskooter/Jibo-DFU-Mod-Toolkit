@@ -68,7 +68,10 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(public).hexdigest(),
                          'e4af88d9b3fda8533f167c6b66dfd591cf0c8ba0b7885de84082baa575eaca53')
         self.assertEqual(c.CONTRACT['public_key'].encode('ascii'), public)
-        self.assertEqual(c.TOOLKIT_VERSION, '1.0.0')
+
+    def test_shipped_toolkit_version_is_1_0_1(self):
+        import jibo_flash_contract as c
+        self.assertEqual(c.TOOLKIT_VERSION, '1.0.1')
 
     def test_release_build_refuses_a_test_signed_index(self):
         import jibo_flash_contract as c

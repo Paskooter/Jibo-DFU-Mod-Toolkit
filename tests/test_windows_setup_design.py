@@ -140,18 +140,40 @@ def test_setup_scripts_stay_ascii_for_windows_powershell():
         assert all(byte < 128 for byte in data), name
 
 
-def test_setup_preview_workflow_is_preview_only_and_publishes_nothing():
+def test_setup_preview_workflow_is_manual_only_and_publishes_nothing():
     text = (ROOT / '.github/workflows/setup-previews.yml').read_text()
     trigger = text.split('\non:', 1)[1].split('\npermissions:', 1)[0]
-    assert 'workflow_dispatch:' in trigger
-    assert "branches: ['preview/**']" in trigger
-    assert trigger.count('push:') == 1 and 'pull_request:' not in trigger
+    events = [line.strip() for line in trigger.splitlines()
+              if line.strip() and not line.lstrip().startswith('#')]
+    assert events == ['workflow_dispatch:']
     assert 'contents: read' in text and 'write' not in text
     assert 'runs-on: windows-2022' in text
     assert 'scripts/release/render-setup-previews.ps1' in text and 'shell: powershell' in text
     assert 'actions/upload-artifact@v4' in text
     for forbidden in ('build.py', 'pyinstaller', 'gh release', 'git tag', 'git push', 'softprops', '--draft', 'secrets.'):
         assert forbidden not in text.lower(), forbidden
+
+
+@pytest.mark.parametrize('document', ['README.md', 'docs/release.md'])
+def test_setup_docs_quote_embedded_questions_and_support_actions(tmp_path, document):
+    questions = ps_strings(QUESTION_CALL, BOOTSTRAP)
+    data = catalogue(tmp_path, [], questions, [], [])
+    linux = next(q for q in data['questions'].values() if q['id'] == 'linux')
+    text = (ROOT / document).read_text()
+    assert linux['title'] in text
+    for label in (linux['yes'], linux['no'], 'Keep waiting', 'Stop setup',
+                  'Copy details', 'Open log folder', 'Waiting for you'):
+        assert '**' + label + '**' in text
+    for obsolete in ('**Yes / No**', 'Setup consent uses Yes/No dialogs', '[y/N]'):
+        assert obsolete not in text
+
+
+def test_release_docs_direct_source_builds_away_from_private_linux():
+    text = (ROOT / 'docs/release.md').read_text()
+    source = text.split('Source `run.ps1`/`run-gui.cmd`', 1)[1].split('\n\n', 1)[0]
+    assert 'refuse' in source and '`Jibo-DFU-Toolkit`' in source
+    assert 'no Linux password or sudo access' in source
+    assert 'sudo-enabled user' in source and 'Jibo-DFU-Windows-x64.exe' in source
 
 
 def test_preview_renderer_uses_the_shipped_setup_window_source():

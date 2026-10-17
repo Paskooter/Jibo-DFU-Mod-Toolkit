@@ -1,13 +1,10 @@
 name: Setup window previews
 
 # Renders the Windows setup window and its support dialog to PNG with the real
-# Windows WinForms runtime, for design review. Preview branches/manual only: it never builds,
+# Windows WinForms runtime, for design review. Manual only: it never builds,
 # tags, releases or publishes anything, and never runs setup, WSL or USB.
 on:
   workflow_dispatch:
-  # Throwaway preview branches only (GitHub cannot dispatch a workflow that is not on main yet).
-  push:
-    branches: ['preview/**']
 
 permissions:
   contents: read
