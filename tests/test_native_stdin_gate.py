@@ -2,6 +2,7 @@
 import base64
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -61,6 +62,64 @@ $writer.Dispose(); $stream.Dispose()
     assert result.returncode == 0, result.stdout + result.stderr
     actual = base64.b64decode(result.stdout.strip())
     assert actual == expected.rstrip(b'\n'), f'Encoding marker corrupted the exact gate nonce: {actual!r}'
+
+
+def _gate_receiver(script):
+    """Return the runner's verbatim gate receiver statements."""
+    text = (ROOT / 'scripts/release' / script).read_text()
+    if script == 'test-support-native.ps1':
+        region = text.split("$template=@'\n", 1)[1].split("\n'@", 1)[0]
+    else:
+        region = text.split('function Run-Phase {', 1)[1].split('\nfunction ', 1)[0]
+        region = region.split("if ($PhaseName -like 'bounds-*') {", 1)[1].split('\n    }', 1)[0]
+    check = {'test-usbipd-native.ps1': r"Assert-True \(\[Console\]::In\.ReadLine\(\)[^\n]*?'Bounds outer Job gate missing'",
+             'test-support-native.ps1': r"if \(\[Console\]::In\.ReadLine\(\)[^\n]*?\{ exit 121 \}"}[script]
+    statement = re.search(check, region)
+    assert statement is not None, 'Gate receiver absent'
+    before = region[:statement.start()]
+    return [line.strip() for line in before.splitlines()
+            if re.match(r'^\s*\[Console\]::InputEncoding\s*=', line)] + [statement.group()]
+
+
+@pytest.mark.parametrize('script,payload', [
+    ('test-usbipd-native.ps1', 'outer-job:71d1cbc6eba6455f8c57dda4e6defab7'),
+    ('test-support-native.ps1', '0009f524f44542e3b1c44272ccb334d7'),
+])
+def test_native_gate_receiver_declares_utf8_under_oem_console_code_page(tmp_path, script, payload):
+    """Replay the gate bytes measured on the Windows PowerShell 5.1 runner.
+
+    The Framework sender's StandardInput is UTF-8 with a BOM (EF BB BF) and
+    CRLF. The windowless receiver's Console.InputEncoding was IBM437, which
+    decodes the BOM as U+2229 U+2557 U+2510, so TrimStart(U+FEFF) cannot
+    remove it. The receiver must declare its UTF-8 protocol encoding.
+    """
+    if not PWSH:
+        pytest.skip('PowerShell required for code-page gate control')
+    receiver = _gate_receiver(script)
+    wire = b'\xef\xbb\xbf' + payload.encode('ascii') + b'\r\n'
+    nonce = payload.split(':', 1)[-1]
+    prelude = ("$ErrorActionPreference='Stop'\n"
+               "function Assert-True($Value,[string]$Message) { if (-not $Value) { throw $Message } }\n"
+               "$RunId='" + nonce + "'; $r=[pscustomobject]@{nonce='" + nonce + "'}\n"
+               "# The measured receiver condition: OEM console input code page.\n"
+               "[Console]::InputEncoding=[Text.Encoding]::GetEncoding(437)\n")
+
+    def run(lines, data):
+        driver = tmp_path / 'receiver.ps1'
+        driver.write_text(prelude + '\n'.join(lines) + "\n[Console]::Out.WriteLine('GATE-ACCEPTED')\nexit 0\n")
+        return subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-File', str(driver)],
+                              input=data, capture_output=True, timeout=20)
+
+    accepted = run(receiver, wire)
+    assert accepted.returncode == 0 and b'GATE-ACCEPTED' in accepted.stdout, accepted.stdout + accepted.stderr
+    # Condition control: without the declared encoding, the same bytes are rejected.
+    legacy = [line for line in receiver if not line.startswith('[Console]::InputEncoding')]
+    assert legacy != receiver, 'Receiver does not declare its protocol encoding'
+    rejected = run(legacy, wire)
+    assert rejected.returncode != 0 and b'GATE-ACCEPTED' not in rejected.stdout, 'OEM decoding condition not reproduced'
+    # Exact-nonce checking is retained after the transport fix.
+    wrong = run(receiver, b'\xef\xbb\xbf' + payload[:-1].encode('ascii') + b'X\r\n')
+    assert wrong.returncode != 0 and b'GATE-ACCEPTED' not in wrong.stdout, 'Wrong nonce accepted'
 
 
 @pytest.mark.parametrize('prefix', ['', '\ufeff'])

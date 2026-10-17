@@ -249,8 +249,6 @@ function Invoke-OwnedPhase([string]$Name, [int]$Seconds, [string]$Root) {
             $outer.Assign($process)
             $receipt.outer_assigned_before_gate=$true
             $process.StandardInput.WriteLine('outer-job:'+$RunId); $process.StandardInput.Flush()
-            $gateSentEncoding=$process.StandardInput.Encoding
-            Save-Json (Join-Path $Root 'gate-sent.json') ([ordered]@{text=('outer-job:'+$RunId); writer_web_name=$gateSentEncoding.WebName; writer_code_page=$gateSentEncoding.CodePage; writer_preamble_hex=[BitConverter]::ToString($gateSentEncoding.GetPreamble()); writer_newline_hex=[BitConverter]::ToString($gateSentEncoding.GetBytes($process.StandardInput.NewLine)); payload_hex=[BitConverter]::ToString($gateSentEncoding.GetBytes('outer-job:'+$RunId)); supervisor_input_code_page=[Console]::InputEncoding.CodePage; supervisor_output_code_page=[Console]::OutputEncoding.CodePage})
         }
         $out=$process.StandardOutput.ReadToEndAsync(); $err=$process.StandardError.ReadToEndAsync()
         $receipt.pid=$process.Id
@@ -818,18 +816,12 @@ function Run-Phase {
     if ($PhaseName -eq 'local-hang') { [IO.File]::WriteAllText((Join-Path $OutputRoot 'entered.txt'), 'owned local hang entered'); Start-Sleep -Seconds 60; exit 89 }
     if ($PhaseName -eq 'local-after') { Write-Output 'owned local guard recovery'; exit 0 }
     if ($PhaseName -like 'bounds-*') {
-        # TEMPORARY WIRE DIAGNOSTIC: capture the exact gate bytes, then decode
-        # them as Framework Console.In does (InputEncoding without preamble
-        # stripping) and evaluate the unchanged receiver expression on them.
-        $gateStdin=[Console]::OpenStandardInput(); $gateRaw=New-Object 'Collections.Generic.List[byte]'
-        $gateClock=[Diagnostics.Stopwatch]::StartNew(); $gateBuffer=New-Object byte[] 4096; $gateEof=$false
-        while (-not $gateRaw.Contains([byte]10) -and $gateRaw.Count -lt 4096 -and $gateClock.ElapsedMilliseconds -lt 8000) { $gateTask=$gateStdin.ReadAsync($gateBuffer,0,4096); if (-not $gateTask.Wait([int][Math]::Max(1,8000-$gateClock.ElapsedMilliseconds))) { break }; if ($gateTask.Result -le 0) { $gateEof=$true; break }; for ($gateIndex=0; $gateIndex -lt $gateTask.Result; $gateIndex++) { $gateRaw.Add($gateBuffer[$gateIndex]) } }
-        $gateEncoding=[Console]::InputEncoding; $gateDecoded=$gateEncoding.GetString($gateRaw.ToArray())
-        [Console]::SetIn((New-Object IO.StringReader($gateDecoded)))
-        $gateLine=[Console]::In.ReadLine().TrimStart([char]0xFEFF)
-        $gateHex={ param([string]$s) if ($null -eq $s) { return $null }; return (($s.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' ') }
-        Save-Json (Join-Path $OutputRoot 'gate-received.json') ([ordered]@{raw_hex=[BitConverter]::ToString($gateRaw.ToArray()); raw_count=$gateRaw.Count; eof=$gateEof; elapsed_ms=$gateClock.ElapsedMilliseconds; input_code_page=$gateEncoding.CodePage; input_web_name=$gateEncoding.WebName; input_redirected=[Console]::IsInputRedirected; decoded_utf16=(& $gateHex $gateDecoded); received_utf16=(& $gateHex $gateLine); expected_utf16=(& $gateHex ('outer-job:'+$RunId)); matches=($gateLine -ceq ('outer-job:'+$RunId))})
-        Assert-True ($gateLine -ceq ('outer-job:'+$RunId)) 'Bounds outer Job gate missing'
+        # The gate is UTF-8 (Framework writer, BOM included). This windowless
+        # child's console input code page is the OEM default (e.g. 437), which
+        # would decode the BOM as three text characters; declare the protocol
+        # encoding first, as usbipd.ps1's worker does, then drop only U+FEFF.
+        [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
+        Assert-True ([Console]::In.ReadLine().TrimStart([char]0xFEFF) -ceq ('outer-job:'+$RunId)) 'Bounds outer Job gate missing'
     }
     Assert-WindowsIdentity (Runtime-Identity)
     Assert-True (@(Get-Specs | Where-Object { $_.Id -ceq $PhaseName }).Count -eq 1) 'Unknown native fixture phase'
