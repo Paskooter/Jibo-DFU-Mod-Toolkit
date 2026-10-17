@@ -7,8 +7,7 @@
 # Every state is rendered at 100%, 150% and 200% through the window's own DPI layout
 # (fonts and sizes in device pixels, as on a per-monitor-DPI screen). "live-*" files are
 # real windows driven through ToolkitSetupStatus and captured with their Windows frame.
-# Setup captures use the machine scale; the live support capture uses forced 125%
-# (see the native-100% product font-lifetime observation in the receipt).
+# Live setup and support captures use native monitor DPI with ForcedDpi=0.
 # -HighContrast switches Windows high contrast on for each isolated phase.
 # The Mono previews on Linux compile the same $script:ToolkitPreviewSource.
 [CmdletBinding()]
@@ -175,9 +174,7 @@ public static class ToolkitPreview {
                     using (var form = Host()) {
                         var view = new ToolkitSupportView(text, DetailsFor(message), LogFolder, allowWait);
                         form.Controls.Add(view);
-                        // The constructor already lays out at 96. Reapplying identical
-                        // fonts hits a product font-lifetime bug (reported separately).
-                        if (dpi != 96) view.ApplyDpi(dpi);
+                        view.ApplyDpi(dpi); // Repeated native DPI is part of the product lifecycle.
                         view.CopyState = (string)d[3]; view.Relayout();
                         form.ClientSize = view.Size;
                         Trace("begin Show " + name);
@@ -292,28 +289,7 @@ public static class ToolkitPreviewWindows {
         if (!thread.Join(5000)) return "message box did not close";
         return result;
     }
-    // Executable regression: run the real product OnLoad, without entering the
-    // invalid-font paint loop first. Every descendant must yield a real HFONT.
-    public static void AssertFonts(Control root, string test) {
-        try { IntPtr h = root.Font.ToHfont(); DeleteObject(h); }
-        catch (Exception e) { throw new InvalidOperationException(test + ": unusable " + root.GetType().Name + " font (" + root.Text + ")", e); }
-        foreach (Control child in root.Controls) AssertFonts(child, test);
-    }
-    public static string FontLifetimeControl() {
-        ToolkitTheme.ForcedDpi = 0; ToolkitTheme.ForcedWorkArea = Rectangle.Empty;
-        const string test = "Native100SupportOnLoadFontsRemainUsable";
-        ToolkitPreview.Trace("begin test " + test);
-        using (var form = new ToolkitSupportForm(ToolkitSetupText.Failure("Synthetic failure", false), "sample", "", false)) {
-            IntPtr handle = form.Handle;
-            int dpi = ToolkitTheme.DpiOf(form);
-            if (dpi != 96) throw new InvalidOperationException(test + ": requires native 96 DPI, got " + dpi);
-            typeof(ToolkitSupportForm).GetMethod("OnLoad", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).Invoke(form, new object[] { EventArgs.Empty });
-            AssertFonts(form, test);
-            ToolkitPreview.Trace("PASS " + test + "; forced=0; actual=" + dpi);
-        }
-        return "ok";
-    }
-    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
+
     // Real clipboard: Copy details puts exactly the summary text there and says Copied.
     public static string ClipboardCheck(string summary) {
         string result = "not run";
@@ -359,7 +335,8 @@ public static class ToolkitPreviewWindows {
             string result = "timeout";
             IAsyncResult pending = dialog.BeginInvoke((MethodInvoker)delegate {
                 ToolkitPreview.CheckBounds(dialog.View, "live-stall-dialog");
-                result = dialog.ClientSize == dialog.View.Size ? "ok" : "client " + dialog.ClientSize + "; view " + dialog.View.Size;
+                ToolkitUiTests.Fonts(dialog, "native-controller");
+                result = ToolkitTheme.WorkArea(dialog).Contains(dialog.Bounds) ? "ok" : "outside working area: " + dialog.Bounds;
             });
             using (var ready = pending.AsyncWaitHandle) {
                 if (!ready.WaitOne(2000)) return "timeout";
@@ -368,6 +345,35 @@ public static class ToolkitPreviewWindows {
             return result;
         }
         return "no dialog";
+    }
+    public static int SupportActualDpi;
+    static void WithSupport(Action<ToolkitSupportForm> action) {
+        foreach (Form form in OpenForms()) {
+            var dialog = form as ToolkitSupportForm;
+            if (dialog == null || !dialog.IsHandleCreated) continue;
+            Exception error = null;
+            IAsyncResult pending = dialog.BeginInvoke((MethodInvoker)delegate { try { action(dialog); } catch (Exception e) { error = e; } });
+            using (var ready = pending.AsyncWaitHandle) {
+                if (!ready.WaitOne(5000)) throw new TimeoutException("Support UI action timed out");
+                dialog.EndInvoke(pending);
+            }
+            if (error != null) throw new InvalidOperationException("Support UI action failed", error);
+            return;
+        }
+        throw new InvalidOperationException("No support dialog");
+    }
+    public static string CopySupport(string summary) {
+        WithSupport(delegate(ToolkitSupportForm dialog) {
+            SupportActualDpi = ToolkitTheme.DpiOf(dialog);
+            if (ToolkitTheme.ForcedDpi != 0 || SupportActualDpi != 96) throw new InvalidOperationException("Native100 requires ForcedDpi=0 and actual96, got " + ToolkitTheme.ForcedDpi + "/" + SupportActualDpi);
+            ToolkitUiTests.Fonts(dialog, "native-controller");
+            ToolkitUiTests.ClickReachable(dialog, dialog.View.Copy, "Native100Copy");
+            if (dialog.View.CopyState != "copied" || Clipboard.GetText() != summary || dialog.View.HelpLine.Text != ToolkitSetupText.CopiedLine) throw new InvalidOperationException("Native clipboard mismatch");
+        });
+        return "ok";
+    }
+    public static void ClickSupportStop() {
+        WithSupport(delegate(ToolkitSupportForm dialog) { ToolkitUiTests.ClickReachable(dialog, dialog.CloseButton, "Native100Stop"); });
     }
     // Same as pressing Esc or the close box: Stop setup.
     public static void CloseSupportDialogs() {
@@ -510,26 +516,29 @@ try {
         Start-Sleep -Milliseconds 600
         Save-LiveCapture $owner 'waiting' 'live-waiting-admin-prompt@100.png'
         [ToolkitSetupStatus]::UserWait($false, '')
-        $stall = [ToolkitPreview]::SupportStates()[0]
-        # Exercise the controller unchanged at 125%; its native 100% OnLoad
-        # redundantly reapplies 96 DPI and has a separately reported font bug.
-        # 125% also fits the hosted runner desktop; 150% was visibly clamped.
-        [ToolkitTheme]::ForcedDpi = 120
-        $receipt.live.stall_dpi = 120
-        Write-PreviewProgress 'begin live stall dialog at forced 120 DPI (native 96 DPI product defect recorded separately)'
-        [ToolkitPreviewWindows]::StartDetails($stall[1], [ToolkitPreview]::DetailsFor($stall[1]), [ToolkitPreview]::LogFolder, $true)
-        $dialog = [IntPtr]::Zero
-        for ($i = 0; $i -lt 50 -and $dialog -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $dialog = [ToolkitPreviewWindows]::SupportDialog() }
-        Start-Sleep -Milliseconds 600
-        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@125.png'
-        $receipt.live.stall_layout = [ToolkitPreviewWindows]::SupportLayoutCheck()
-        if ($receipt.live.stall_layout -ne 'ok') { throw "Live support layout: $($receipt.live.stall_layout)" }
-        Save-LiveCapture $owner 'behind_dialog' 'live-behind-stall-download@100.png'
-        [ToolkitPreviewWindows]::CloseSupportDialogs()
-        $receipt.live.stall_answer = [ToolkitPreviewWindows]::FinishDetails()
-        Write-PreviewProgress "end live stall dialog: $($receipt.live.stall_answer)"
-        if ($receipt.live.stall_answer -ne 'stopped') { throw 'Live stall dialog did not stop' }
         [ToolkitTheme]::ForcedDpi = 0
+        [ToolkitTheme]::ForcedWorkArea = [Drawing.Rectangle]::Empty
+        foreach ($variant in @(@{name='stall'; index=0}, @{name='failure'; index=3})) {
+            $kind = $variant.name
+            $entry = [ToolkitPreview]::SupportStates()[$variant.index]
+            $summary = [ToolkitPreview]::DetailsFor($entry[1])
+            $receipt.live["${kind}_forced_dpi"] = [ToolkitTheme]::ForcedDpi
+            Write-PreviewProgress "begin native100 controller $kind (ForcedDpi=0)"
+            [ToolkitPreviewWindows]::StartDetails($entry[1], $summary, [ToolkitPreview]::LogFolder, [bool]$entry[2])
+            $dialog = [IntPtr]::Zero
+            for ($i = 0; $i -lt 50 -and $dialog -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $dialog = [ToolkitPreviewWindows]::SupportDialog() }
+            Start-Sleep -Milliseconds 300
+            $receipt.live["${kind}_clipboard"] = [ToolkitPreviewWindows]::CopySupport($summary)
+            $receipt.live["${kind}_dpi"] = [ToolkitPreviewWindows]::SupportActualDpi
+            Save-LiveCapture $dialog "${kind}_dialog" "live-dialog-$kind-native@100.png"
+            $receipt.live["${kind}_layout"] = [ToolkitPreviewWindows]::SupportLayoutCheck()
+            if ($receipt.live["${kind}_layout"] -ne 'ok') { throw "Native $kind layout failed" }
+            if ($kind -eq 'stall') { Save-LiveCapture $owner 'behind_dialog' 'live-behind-stall-download@100.png' }
+            [ToolkitPreviewWindows]::ClickSupportStop()
+            $receipt.live["${kind}_answer"] = [ToolkitPreviewWindows]::FinishDetails()
+            Write-PreviewProgress "end native100 controller ${kind}: actual=$($receipt.live["${kind}_dpi"]); clipboard=$($receipt.live["${kind}_clipboard"]); answer=$($receipt.live["${kind}_answer"])"
+            if ($receipt.live["${kind}_answer"] -ne 'stopped') { throw "Native $kind did not stop" }
+        }
         Write-PreviewProgress 'begin live controller Stop'
         [ToolkitSetupStatus]::Stop()
         Write-PreviewProgress 'end live controller Stop'

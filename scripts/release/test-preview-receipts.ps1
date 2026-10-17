@@ -15,6 +15,7 @@ foreach ($lane in @('standard','high-contrast')) {
     $path = Join-Path (Join-Path $OutDir $lane) 'receipt.json'
     $r = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
     Assert-HealthyReceipt $r $lane
+    if ($r.font_lifetime_control -ne 'ok') { throw "$lane native font lifecycle failed or missing" }
     if ($r.clipboard -ne 'ok' -or $r.fallback.setup_window -ne 'ok' -or $r.fallback.launcher -ne 'ok') { throw "$lane clipboard/fallback check failed" }
     foreach ($entry in $r.files) {
         $name = ($entry -split ' ')[0] + '.png'
@@ -23,11 +24,15 @@ foreach ($lane in @('standard','high-contrast')) {
     $expected = if ($lane -eq 'standard') { 144 } else { 53 }
     if ($r.files.Count -ne $expected) { throw "$lane rendered $($r.files.Count) states, expected $expected (update only when the state catalogue changes)" }
     if ($lane -eq 'standard') {
-        if ($r.live.stall_answer -ne 'stopped') { throw 'Live stall dialog did not stop' }
+        if ($r.scaled_forms -ne 'ok') { throw 'Scaled form containment/action checks failed or missing' }
+        foreach ($kind in @('stall','failure')) {
+            if ($r.live."${kind}_answer" -ne 'stopped' -or $r.live."${kind}_clipboard" -ne 'ok' -or $r.live."${kind}_layout" -ne 'ok' -or $r.live."${kind}_dialog" -ne 'ok') { throw "Native $kind copy/layout/stop failed or missing" }
+            if ($null -eq $r.live."${kind}_forced_dpi" -or $r.live."${kind}_forced_dpi" -ne 0 -or $r.live."${kind}_dpi" -ne 96) { throw "Native $kind must use ForcedDpi=0, actual DPI=96" }
+        }
         foreach ($p in $r.live.PSObject.Properties) {
-            if ($p.Name -notin @('stall_answer','stall_dpi') -and $p.Value -ne 'ok') { throw "Live capture $($p.Name) failed" }
+            if ($p.Name -notmatch '_(answer|dpi)$' -and $p.Value -ne 'ok') { throw "Live capture $($p.Name) failed" }
         }
     } elseif (-not $r.high_contrast_active -or -not $r.high_contrast_switched -or -not $r.high_contrast_restored) { throw 'Windows high contrast not enabled/restored' }
     Write-Host "PASS $lane receipt: $($r.files.Count) rendered states, zero layout problems, clipboard and fallbacks ok"
 }
-Write-Host 'PASS live controller stall decision: stopped (125%); native 100% font-lifetime defect is separately documented'
+Write-Host 'PASS native100 controller stall/failure: actual96, forced0, clipboard exact, stopped; repeated DPI fonts and constrained actions ok'
