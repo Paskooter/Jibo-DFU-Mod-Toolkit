@@ -1,7 +1,9 @@
 """Progress, cancellation and process-only trust over signed local fixtures."""
 import os
 from pathlib import Path
+import queue
 import tarfile
+import threading
 import time
 from unittest.mock import patch
 
@@ -111,17 +113,63 @@ class FlashProgressTests(HostedFixture):
     def test_slow_preparation_keeps_plain_progress_and_cancel_active(self):
         import jibo_tui as tui
         events = []
+        heartbeats = queue.Queue()
+        preparing = threading.Event()
+        def report(event):
+            observed = (time.monotonic(), event)
+            events.append(observed)
+            if preparing.is_set() and event.phase == 'prepare':
+                heartbeats.put(observed)
         def run(title, work, token, detail=''):
-            return work(lambda event: events.append((time.monotonic(), event)), token), None
+            return work(report, token), None
         def prepare():
-            time.sleep(2.3)
+            previous = time.monotonic()
+            preparing.set()
+            try:
+                # Observe actual heartbeats while preparation is blocked, not
+                # a scheduler-dependent count during a fixed 2.3-second sleep.
+                for _ in range(9):
+                    try:
+                        observed, _event = heartbeats.get(timeout=2)
+                    except queue.Empty:
+                        self.fail('Preparation heartbeat silent for two seconds')
+                    self.assertLess(observed - previous, 2)
+                    previous = observed
+                self.assertLess(time.monotonic() - previous, 2)
+                return 'prepared'
+            finally:
+                preparing.clear()
         with patch.object(tui, 'run_with_progress', side_effect=run):
-            tui._run_image_work(prepare, "Preparing Jibo's software")
+            self.assertEqual(tui._run_image_work(prepare, "Preparing Jibo's software"), 'prepared')
         self.assertGreater(len(events), 8)
         self.assertLess(max(b[0] - a[0] for a, b in zip(events, events[1:])), 2)
         labels = [tui.format_progress(event) for _, event in events if event.phase == 'prepare']
         self.assertTrue(all(label.startswith("Preparing Jibo's software") for label in labels))
         self.assertGreater(len(set(labels)), 1)
+
+    def test_cancel_during_tui_preparation_reaches_operation_checkpoint(self):
+        import jibo_tui as tui
+        preparing, canceled = threading.Event(), threading.Event()
+        returned = []
+        def run(title, work, token, detail=''):
+            def report(event):
+                if preparing.is_set() and event.phase == 'prepare':
+                    token.cancel()
+                    canceled.set()
+            try:
+                return work(report, token), None
+            except c.ContractError as error:
+                return None, error
+        def prepare():
+            preparing.set()
+            self.assertTrue(canceled.wait(2), 'No preparation heartbeat to cancel from')
+            c.phase('prepare')  # The real cooperative cancellation checkpoint.
+            returned.append('canceled preparation returned a usable result')
+        with patch.object(tui, 'run_with_progress', side_effect=run):
+            with self.assertRaises(c.ContractError) as caught:
+                tui._run_image_work(prepare, "Preparing Jibo's software")
+        self.assertEqual(caught.exception.code, 'canceled')
+        self.assertEqual(returned, [])
 
     def test_signed_bad_downloads_never_reach_usb_and_quarantine_without_images(self):
         import copy
