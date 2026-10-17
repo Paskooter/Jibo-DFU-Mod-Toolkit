@@ -81,7 +81,9 @@ if ($UsbipdWorker) {
     try {
         [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
         [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-        $request = [Console]::In.ReadLine() | ConvertFrom-Json
+        # Framework Process.StandardInput may emit a UTF-8 BOM on AutoFlush,
+        # even before our raw write. Console.In does not consume that preamble.
+        $request = [Console]::In.ReadLine().TrimStart([char]0xFEFF) | ConvertFrom-Json
         foreach ($variable in $request.Variables.PSObject.Properties) { Set-Variable -Scope Global -Name $variable.Name -Value $variable.Value }
         foreach ($function in $request.Functions.PSObject.Properties) { Set-Item -LiteralPath ('Function:global:'+$function.Name) -Value ([scriptblock]::Create($function.Value)) }
         $script:UsbipdResult=$null

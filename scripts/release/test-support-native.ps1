@@ -142,7 +142,7 @@ function Get-SupportBootstrap([string]$Binary, [string]$Arguments, [string]$Root
     $template=@'
 $ErrorActionPreference='Stop'
 $r=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('REQUEST')) | ConvertFrom-Json
-if ([Console]::In.ReadLine() -cne $r.nonce) { exit 121 }
+if ([Console]::In.ReadLine().TrimStart([char]0xFEFF) -cne $r.nonce) { exit 121 }
 $child=New-Object Diagnostics.Process
 $child.StartInfo=New-Object Diagnostics.ProcessStartInfo
 $child.StartInfo.FileName=$r.binary; $child.StartInfo.Arguments=$r.arguments
@@ -215,10 +215,7 @@ function Invoke-SupportChild([string]$Binary, [string]$Arguments, [string]$Root,
         Admit-SupportChild $containment $child $Root $clock $executionDeadline
         Assert-Support ($containment.assigned) 'Owned containment admission not confirmed'
         $phase.admitted=$true
-        # Keep the exact nonce free of a .NET Framework StreamWriter BOM.
-        $gateBytes=[Text.Encoding]::UTF8.GetBytes("$Nonce`n")
-        $child.StandardInput.BaseStream.Write($gateBytes,0,$gateBytes.Length)
-        $child.StandardInput.BaseStream.Flush()
+        $child.StandardInput.WriteLine($Nonce); $child.StandardInput.Flush()
         Save-SupportJson (Join-Path $Root 'phase.json') $phase
         $remaining=Get-SupportWait $clock $executionDeadline
         if ($remaining -le 0 -or -not $child.WaitForExit($remaining)) { $phase.timed_out=$true }

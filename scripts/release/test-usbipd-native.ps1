@@ -248,11 +248,7 @@ function Invoke-OwnedPhase([string]$Name, [int]$Seconds, [string]$Root) {
         if ($bounded) {
             $outer.Assign($process)
             $receipt.outer_assigned_before_gate=$true
-            # .NET Framework's UTF-8 StreamWriter can prepend a BOM, which
-            # Console.In preserves as part of the exact gate. Send raw bytes.
-            $gateBytes=[Text.Encoding]::UTF8.GetBytes("outer-job:$RunId`n")
-            $process.StandardInput.BaseStream.Write($gateBytes,0,$gateBytes.Length)
-            $process.StandardInput.BaseStream.Flush()
+            $process.StandardInput.WriteLine('outer-job:'+$RunId); $process.StandardInput.Flush()
         }
         $out=$process.StandardOutput.ReadToEndAsync(); $err=$process.StandardError.ReadToEndAsync()
         $receipt.pid=$process.Id
@@ -819,7 +815,7 @@ function SelfTest-Bounds {
 function Run-Phase {
     if ($PhaseName -eq 'local-hang') { [IO.File]::WriteAllText((Join-Path $OutputRoot 'entered.txt'), 'owned local hang entered'); Start-Sleep -Seconds 60; exit 89 }
     if ($PhaseName -eq 'local-after') { Write-Output 'owned local guard recovery'; exit 0 }
-    if ($PhaseName -like 'bounds-*') { Assert-True ([Console]::In.ReadLine() -ceq ('outer-job:'+$RunId)) 'Bounds outer Job gate missing' }
+    if ($PhaseName -like 'bounds-*') { Assert-True ([Console]::In.ReadLine().TrimStart([char]0xFEFF) -ceq ('outer-job:'+$RunId)) 'Bounds outer Job gate missing' }
     Assert-WindowsIdentity (Runtime-Identity)
     Assert-True (@(Get-Specs | Where-Object { $_.Id -ceq $PhaseName }).Count -eq 1) 'Unknown native fixture phase'
     Assert-FixtureOwnership ($PhaseName -ne 'compile')

@@ -281,27 +281,7 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return
     [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
     $child = Join-Path $fixture 'flow.ps1'
     $usbHelper = Join-Path (Split-Path (Split-Path (Split-Path $BootstrapPath))) 'usbipd.ps1'
-    if (Test-Path $usbHelper) {
-        # Fixture-only boundary diagnostics; never modify the shipped helper.
-        $diagnosticHelper = [IO.File]::ReadAllText($usbHelper)
-        $diagnosticHelper = $diagnosticHelper.Replace('    if ($inputText.Length -gt 8192)', @'
-    [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='request'; chars=$inputText.Length; functions=@($functions.Keys); variables=$variables} | ConvertTo-Json -Compress -Depth 4) + "`n"))
-    if ($inputText.Length -gt 8192)
-'@)
-        $diagnosticHelper = $diagnosticHelper.Replace('    if (-not $supervisor.Output)', @'
-    [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='supervision'; result=$supervisor} | ConvertTo-Json -Compress -Depth 4) + "`n"))
-    if (-not $supervisor.Output)
-'@)
-        $diagnosticHelper = $diagnosticHelper.Replace('$request = [Console]::In.ReadLine() | ConvertFrom-Json', @'
-$wireRequest = [Console]::In.ReadLine()
-        [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='wire'; encoding=[Console]::InputEncoding.WebName; chars=$wireRequest.Length; base64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wireRequest))} | ConvertTo-Json -Compress) + "`n"))
-        $request = $wireRequest | ConvertFrom-Json
-'@)
-        $diagnosticHelper = $diagnosticHelper.Replace('} catch { [Console]::Out.WriteLine', @'
-} catch { [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='worker-error'; error=$_.Exception.Message; position=$_.InvocationInfo.PositionMessage} | ConvertTo-Json -Compress) + "`n")); [Console]::Out.WriteLine
-'@)
-        [IO.File]::WriteAllText((Join-Path $fixture 'usbipd.ps1'), $diagnosticHelper)
-    }
+    if (Test-Path $usbHelper) { Copy-Item $usbHelper $fixture }
     $programFiles = Join-Path $fixture 'Program Files'
     $usbFolder = Join-Path $programFiles 'usbipd-win'
     New-Item -ItemType Directory -Path $usbFolder -Force | Out-Null
@@ -320,7 +300,6 @@ Add-Type -TypeDefinition 'using System; public class ToolkitConsoleNative { publ
 # before defining mocks: its lazy import (first ConvertTo-Json trace) would
 # otherwise replace the mock with the real hash function. PS7 uses a cmdlet.
 Import-Module Microsoft.PowerShell.Utility
-$env:BOOTSTRAP_USB_DIAGNOSTICS = Join-Path $Payload ($Case + '.usb-diagnostics.jsonl')
 $global:UacCase = $Case
 $global:UacTrace = Join-Path $Payload ($Case + '.jsonl')
 $env:LOCALAPPDATA = Join-Path $Payload $Case
@@ -496,11 +475,7 @@ exit $LASTEXITCODE
             if ($case -eq 'unhealthy-private' -and ($downloads.Count -or $imports.Count -or $prompts.Count)) { throw 'existing unhealthy private distro was changed' }
             if ($case -eq 'grant-failed' -and @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'watcher started after grant failure' }
             $passed++; Write-Output "PASS scenario: $case"
-        } catch {
-            $failedCases += $case; Write-Output "FAIL scenario: $case - $($_.Exception.Message)"
-            $diagnosticPath = Join-Path $fixture ($case + '.usb-diagnostics.jsonl')
-            if (Test-Path -LiteralPath $diagnosticPath) { Get-Content -LiteralPath $diagnosticPath | Write-Output }
-        }
+        } catch { $failedCases += $case; Write-Output "FAIL scenario: $case - $($_.Exception.Message)" }
     }
 } finally { Remove-Item -Recurse -Force $fixture }
 Write-Output "Bootstrap scenarios: $passed passed; $($failedCases.Count) failed. Helpers/parser/native argv passed."
