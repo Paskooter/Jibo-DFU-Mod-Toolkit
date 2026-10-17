@@ -35,6 +35,16 @@ choose **Keep waiting** or **Stop setup**; closing that decision stops setup. Ru
 `Jibo-DFU-Windows-x64.exe -ShowConsole` only when troubleshooting; this can be
 combined with `-Distro NAME`. Source launchers keep their terminal.
 
+The Windows download also checks the Linux display's current mode before opening
+the GUI. If Windows reports **WARN:COPY MODE**, setup stops visibly instead of
+opening an invisible window. Save and close other Linux work, restart Windows,
+then reopen the toolkit; do not remove or reinstall its private Linux. Setup
+never restarts other Linux apps or the shared display automatically. A Linux
+mapped-window signal alone is not success: setup also checks this launch's Windows
+window for visibility and responsiveness. Robot operations stay unavailable until
+that check succeeds. If it cannot confirm the window within two minutes, it closes
+the unopened toolkit and shows recovery instructions with **Copy details**.
+
 Phoenix image lists and downloads use per-user toolkit storage, not the folder you started from: `${XDG_DATA_HOME:-~/.local/share}/jibo-dfu/updates` on Linux/WSL, and `~/Library/Application Support/jibo-dfu/updates` on macOS. Official packages and previously completed Phoenix downloads in `./updates` remain discoverable. The one-step Phoenix install removes its owned download after the flash attempt; robot backups are never part of that cleanup. Folder failures name the affected folder; HTTP failures include the status and a Cloudflare note when detected.
 
 **Remove the toolkit's private Linux:** run `wsl --unregister Jibo-DFU-Toolkit` in PowerShell. This deletes **all files inside that Linux**, including any backups saved there; copy files you need to Windows first. It does not remove your other WSL distributions. Advanced users can explicitly choose another compatible distro with `Jibo-DFU-Windows-x64.exe -Distro NAME`; automatic selection never offers tool distributions.

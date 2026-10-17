@@ -82,6 +82,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File scripts/release/test-console.ps1 -Case all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -File scripts/release/test-window-probe.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows test executable before native fixtures
         if: always() && matrix.platform == 'Windows'
         uses: actions/upload-artifact@v4

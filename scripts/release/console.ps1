@@ -513,6 +513,12 @@ public static class ToolkitSetupText {
             f = F("stall", "The download seems stuck", "No data has arrived for " + (waited ?? "a while") + ". The internet connection may have dropped.",
                 allowWait ? "Check your internet connection, then choose Keep waiting. If nothing arrives for another " + (waited ?? "while") + ", you will be asked again. Stop setup ends setup now."
                           : "Check your internet connection, then open the toolkit again.");
+        else if (text.StartsWith("Windows toolkit window could not be verified"))
+            f = F("error", "The toolkit window could not open", "Setup could not confirm a visible, responding toolkit window. No robot operation was enabled.",
+                "Save and close your other Linux work, restart Windows, then open the toolkit again. Use Copy details if this happens again.");
+        else if (text.StartsWith("Windows display is not ready"))
+            f = F("error", "Windows could not display the toolkit", "Windows reported WARN:COPY MODE. The toolkit window was not opened, and no Linux apps were stopped.",
+                "Save and close your other Linux work, restart Windows, then open the toolkit again. You do not need to set up the toolkit\u2019s Linux again.");
         else if (text.StartsWith("Opening the toolkit stalled"))
             f = F("stall", "The toolkit window did not appear", "The toolkit has not opened after " + (waited ?? "a while") + ".",
                 allowWait ? keepWaiting + " If you stop, restart Windows before opening the toolkit again." : "Restart Windows, then open the toolkit again.");
@@ -1858,6 +1864,42 @@ function Get-ToolkitFallbackText([string]$Safe) {
     return "Setup stopped.`r`n`r`n$Safe`r`n`r`nTo get help, copy the details and paste them in the #help channel on the Phoenix Discord.`r`n`r`n    Yes  $dash  Copy details`r`n    No  $dash  Open log folder`r`n    Cancel  $dash  Close"
 }
 function Get-ToolkitFallbackTitle { return "Jibo DFU Toolkit $([char]0x2013) setup stopped" }
+# Windows-side half of first-open readiness. Match a random per-invocation title
+# token, not an old toolkit window. No activation, close, kill or compositor API.
+$script:ToolkitWindowProbeSource = @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ToolkitWindowProbe {
+    delegate bool EnumProc(IntPtr h, IntPtr p);
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr p);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder text, int n);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out Rect rect);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, IntPtr l, uint flags, uint timeout, out UIntPtr result);
+    public static string State(string token) {
+        if (String.IsNullOrEmpty(token)) return "missing";
+        string state = "missing";
+        EnumWindows(delegate(IntPtr h, IntPtr p) {
+            var text = new StringBuilder(2048);
+            GetWindowText(h, text, text.Capacity);
+            string title = text.ToString();
+            if (title.IndexOf("Jibo DFU Toolkit", StringComparison.Ordinal) < 0 ||
+                title.IndexOf(" [startup " + token + "]", StringComparison.Ordinal) < 0) return true;
+            if (title.StartsWith("[WARN:COPY MODE]", StringComparison.Ordinal)) { state="copy"; return false; }
+            Rect rect; UIntPtr result;
+            if (IsWindowVisible(h) && !IsIconic(h) && GetClientRect(h, out rect) &&
+                rect.Right > rect.Left && rect.Bottom > rect.Top &&
+                SendMessageTimeout(h, 0, UIntPtr.Zero, IntPtr.Zero, 2, 200, out result) != IntPtr.Zero) state="visible";
+            return false;
+        }, IntPtr.Zero);
+        return state;
+    }
+}
+'@
+
 function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
     $safe = Protect-ToolkitText $Message
     $summary = Get-ToolkitSupportDetails $safe

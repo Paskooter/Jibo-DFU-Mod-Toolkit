@@ -83,11 +83,12 @@ def test_release_workflow_is_draft_only_and_has_four_native_targets():
         assert required in text
     assert '--latest' not in text
     windows_step = text.split('name: Build Windows one-file bootstrapper', 1)[1].split('- name:', 1)[0]
-    assert windows_step.count('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }') == 5, 'native failures must not be masked by later PowerShell success'
+    assert windows_step.count('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }') == 6, 'native failures must not be masked by later PowerShell success'
     commands = [line.strip() for line in windows_step.splitlines()]
     for command in ('python -m pip install ', 'python scripts/release/build.py ', 'python -c ',
                     'powershell -NoProfile -File scripts/release/test-bootstrap.ps1',
-                    'powershell -NoProfile -File scripts/release/test-console.ps1'):
+                    'powershell -NoProfile -File scripts/release/test-console.ps1',
+                    'powershell -NoProfile -File scripts/release/test-window-probe.ps1'):
         position = next(index for index, line in enumerate(commands) if line.startswith(command))
         assert commands[position + 1] == 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', command
 

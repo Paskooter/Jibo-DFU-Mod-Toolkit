@@ -4,6 +4,11 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $launcherExitCode = 1
 
+function Get-ToolkitGuiWindowState([string]$Token) {
+    if (-not ('ToolkitWindowProbe' -as [type])) { Add-Type -TypeDefinition $script:ToolkitWindowProbeSource }
+    return [ToolkitWindowProbe]::State($Token)
+}
+
 function Confirm-Setup([string]$Question) {
     $script:ToolkitQuestionAnswer = $null
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -134,6 +139,16 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
     $guiStarted = [DateTime]::UtcNow
     $guiTimer = [Diagnostics.Stopwatch]::StartNew()
     try {
+        # The mapped Linux marker cannot establish Windows visibility. Refuse
+        # the known broken display mode before starting a GUI or robot action.
+        # This is read-only: even a private distro is not authority to restart
+        # a compositor whose scope we cannot prove on this Windows installation.
+        $display = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'bash', "$Target/wsl-user-launch.sh", 'display-mode') -TimeoutSeconds 10
+        $displayMode = ($display.Output -join "`n").Trim()
+        Write-ToolkitLog 'display-mode' @{ mode=$displayMode; exit_code=$display.ExitCode }
+        if ($display.ExitCode -eq 0 -and $displayMode -eq 'copy') {
+            throw 'Windows display is not ready (WARN:COPY MODE). The toolkit window was not opened. Save and close your other Linux work, restart Windows, then open the toolkit again. No Linux distributions were stopped.'
+        }
         $readyFile = Join-Path $run 'ready'
         $linuxReady = Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'wslpath', '-u', '--', $readyFile)
         $command = ConvertTo-NativeArgumentLine @('bash', "$Target/wsl-user-launch.sh", "$Target/jibo-dfu", $Session, $linuxReady)
@@ -151,16 +166,24 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
                 Show-ToolkitFailure 'USB support stopped unexpectedly. Close the GUI when safe, then reopen the toolkit.'
             }
             if (-not $setupStopped -and (Test-Path -LiteralPath $readyFile)) {
-                Complete-ToolkitStep
-                Write-ToolkitLog 'gui-ready' @{ step='Opening the toolkit' }
-                Stop-ToolkitSetup
-                $setupStopped = $true
+                $windowState = Get-ToolkitGuiWindowState -Token (Split-Path $run -Leaf)
+                if ($windowState -eq 'copy') { throw 'Windows toolkit window could not be verified (WARN:COPY MODE).' }
+                if ($windowState -eq 'visible') {
+                    # This file alone unlocks robot actions. Never force-stop an
+                    # admitted GUI, including if logging fails after this point.
+                    $setupStopped = $true
+                    [IO.File]::WriteAllText(($readyFile + '.visible'), 'visible')
+                    Complete-ToolkitStep
+                    Write-ToolkitLog 'gui-ready' @{ step='Opening the toolkit'; windows_state=$windowState }
+                    Stop-ToolkitSetup
+                }
             }
             if (-not $setupStopped -and (Test-ToolkitStall -ElapsedSeconds $readyTimer.Elapsed.TotalSeconds -LimitSeconds $ReadyTimeoutSeconds)) {
-                $message = "Opening the toolkit stalled: its window did not appear within $ReadyTimeoutSeconds seconds. Close other WSL work, run wsl --shutdown, then reopen."
+                $message = "Windows toolkit window could not be verified within $ReadyTimeoutSeconds seconds."
                 Write-ToolkitLog 'stall' @{ step='Opening the toolkit'; error=$message }
-                if (Show-ToolkitSupportDialog $message -AllowWait) { Write-ToolkitLog 'keep-waiting' @{step='Opening the toolkit'}; $readyTimer.Restart() }
-                else { $error = New-Object TimeoutException $message; $error.Data['ToolkitStall'] = $true; throw $error }
+                $error = New-Object TimeoutException $message
+                $error.Data['ToolkitStall'] = $true
+                throw $error
             }
         }
         # A helper can fail in the same polling interval as a normal GUI close.
@@ -168,13 +191,19 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
         if (($Permissions -and $Permissions.HasExited -and $Permissions.ExitCode -ne 0) -or ($Monitor -and $Monitor.HasExited)) { $supportFailed = $true }
         if ($null -eq $gui.ExitCode) { throw 'WSL did not report the GUI exit code.' }
         if ($gui.ExitCode -ne 0) { return $gui.ExitCode }
+        if (-not $setupStopped) { throw 'Windows toolkit window could not be verified before the window closed.' }
         if ($supportFailed) { return 1 }
         return 0
     } catch {
         Complete-ToolkitStep -Result failed -ExitCode 1 -ErrorText $_.Exception.Message
         throw
     } finally {
-        if (-not $setupStopped -and $gui -and -not $gui.WaitForExit(0)) { Stop-ToolkitProcess $gui }
+        if (-not $setupStopped -and $gui -and -not $gui.WaitForExit(0)) {
+            # No Windows acknowledgement was issued: robot actions are still
+            # gated. Ask the Tk event loop to close without a hidden question.
+            [IO.File]::WriteAllText(($readyFile + '.close'), 'close')
+            if (-not $gui.WaitForExit(5000)) { Stop-ToolkitProcess $gui }
+        }
         if ($gui -and $gui.ToolkitStdout -and $gui.ToolkitStderr) {
             $null = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($gui.ToolkitStdout, $gui.ToolkitStderr), 2000)
             $output = ''

@@ -353,6 +353,7 @@ function wsl.exe {
     if ($args -contains 'printenv') { return '/home/fixture/path with spaces' }
     if ($args -contains 'wslpath') { return ('/mnt/c/fixture/' + (Split-Path $args[-1] -Leaf)) }
     if ($args -contains 'once' -and $global:UacCase -eq 'grant-failed') { $global:LASTEXITCODE=1; return 'Synthetic grant failure' }
+    if ($args -contains 'display-mode') { return 'shared' }
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
 function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 } }
@@ -403,7 +404,7 @@ exit $LASTEXITCODE
             $text = $messages -join "`n"
             $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
             $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
-            $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' })
+            $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' -and $_.Values -notcontains 'display-mode' })
             $downloads = @($events | Where-Object { $_.Kind -eq 'download' })
             $imports = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--import' })
             $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
@@ -432,6 +433,7 @@ exit $LASTEXITCODE
                 if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
                 if ($downloads.Count -or $imports.Count -or $gui.Count -or @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'decline caused setup side effects' }
             } elseif ($chosen) {
+                if (@($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'display-mode' }).Count -ne 1) { throw 'Display preflight was not run exactly once' }
                 if ($code -ne 41 -or $gui.Count -ne 1 -or $gui[0].Values[1] -cne $chosen -or $text -notmatch ('Using Linux: ' + [regex]::Escape($chosen))) { throw ('wrong GUI choice/exit: ' + $text) }
                 $user = if ($chosen -eq 'Jibo-DFU-Toolkit') { 'jibo' } else { 'fixture' }
                 if (($gui[0].Values -join '|') -notmatch ('\|--user\|' + $user + '\|') -or ($gui[0].Values -join ' ') -match '/AppRun') { throw 'GUI was not direct normal-user launch' }

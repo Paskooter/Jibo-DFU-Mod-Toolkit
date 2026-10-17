@@ -273,7 +273,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable')) {
+    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
@@ -383,6 +383,7 @@ public class ToolkitSetupStatus {
         $global:LASTEXITCODE = 0
         if ($args[0] -eq '--version') { if ($global:ConsoleFixtureCase -eq 'setup-decline') { $global:LASTEXITCODE=1; return 'missing' }; return 'WSLg 1.0' }
         if ($args[0] -eq '--list') { return "NAME STATE VERSION`n* Ubuntu-22.04 Stopped 2" }
+        if ($args -contains 'display-mode') { if ($global:ConsoleFixtureCase -eq 'display-copy-preflight') { return 'copy' }; return 'shared' }
         if ($args -contains 'getconf') { return 'glibc 2.35' }
         if ($args -contains 'uname') { return 'x86_64' }
         if ($args -contains 'id') { if ($args[-1] -eq '-un') { return 'fixture' }; return '1000' }
@@ -414,7 +415,15 @@ public class ToolkitSetupStatus {
             }
             $process | Add-Member ScriptMethod WaitForExit {
                 param($Timeout)
-                if ($Timeout -ne 100) { return $this.HasExited }
+                if ($Timeout -ne 100) {
+                    if ($Timeout -eq 5000 -and $global:ConsoleFixtureCase -eq 'window-copy') {
+                        if (Test-Path ($global:ConsoleFixtureReady + '.visible')) { throw 'Failed display enabled robot actions' }
+                        if (-not (Test-Path ($global:ConsoleFixtureReady + '.close'))) { throw 'Idle close was not requested' }
+                        Record 'idle-close' @()
+                        $this.HasExited=$true
+                    }
+                    return $this.HasExited
+                }
                 $global:ConsoleFixtureTicks++
                 Record 'tick' @($global:ConsoleFixtureTicks)
                 if ($global:ConsoleFixtureTicks -eq 2 -and $global:ConsoleFixtureCase -ne 'never-ready') {
@@ -450,6 +459,13 @@ public class ToolkitSetupStatus {
     [IO.File]::WriteAllText((Join-Path $fixture 'usbipd.ps1'), 'function Resolve-UsbipdExecutable { return "fixture-usbipd" }')
     $mockHelper = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) + @'
 
+function Get-ToolkitGuiWindowState {
+    param($Token)
+    Record 'window-probe' @($Token)
+    if ($global:ConsoleFixtureCase -eq 'window-copy') { return 'copy' }
+    if ($global:ConsoleFixtureCase -eq 'window-missing') { return 'missing' }
+    return 'visible'
+}
 function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
 function Invoke-ToolkitNative {
     param($File, [string[]]$Arguments)
@@ -492,6 +508,9 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); [Toolk
             if ($index -lt 1 -or $events[$index-1].Kind -ne 'setup-stop') { throw 'Error did not replace the setup status window' }
         }
     }
+    if ($Case -eq 'display-copy-preflight' -and @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[1] -match 'wsl-user-launch.sh' }).Count) { throw 'Known copy mode started a GUI' }
+    if ($Case -eq 'window-copy' -and @($events | Where-Object Kind -eq 'idle-close').Count -ne 1) { throw 'Copy-mode window was not closed by idle request' }
+    if ($Case -in @('window-copy','window-missing') -and -not @($events | Where-Object Kind -eq 'window-probe').Count) { throw 'Windows readiness check did not run' }
     if ($Case -eq 'terminal-failed' -and @($events | Where-Object Kind -eq 'dialog').Count -ne 1) { throw 'Terminal failure needs a visible dialog fallback' }
     if ($Case -notin @('setup-decline','gui-start-failed')) {
         if (@($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'rm' }).Count -ne 1) { throw 'Session was not removed once' }

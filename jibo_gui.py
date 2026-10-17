@@ -1346,26 +1346,52 @@ def create_root():
         raise DisplayUnavailable(str(exc)) from exc
 
 
+def supervise_windows_startup(root, controller, window, ready_file):
+    """A Linux map is only half of the Windows release startup handshake.
+
+    Keep robot actions unavailable until the launcher observes this invocation's
+    visible, responsive native window. A failed startup closes only while idle;
+    it never answers a robot question or interrupts an operation.
+    """
+    ready = Path(ready_file)
+    title = root.title()
+    root.title(title + ' [startup ' + ready.parent.name + ']')
+    start_action = controller.start_action
+    controller.start_action = lambda *_args, **_kwargs: False
+
+    def signal_ready():
+        if root.winfo_viewable():
+            ready.write_text('ready\n', encoding='ascii')
+
+    def on_map(event):
+        if event.widget is root:
+            root.after_idle(signal_ready)
+
+    def poll():
+        if Path(str(ready) + '.close').exists():
+            if not controller.busy:
+                window.close()
+                return
+        elif Path(str(ready) + '.visible').exists():
+            controller.start_action = start_action
+            root.title(title)
+            return
+        root.after(100, poll)
+
+    root.bind('<Map>', on_map, add='+')
+    root.after_idle(signal_ready)
+    root.after(100, poll)
+
+
 def main(api):
     """Open the window for the real device layer and run until it closes."""
     root = create_root()
     controller = core.GuiController(api, preferences_path=api.BACKUP_ROOT / ".phoenix-guidance.json")
-    ToolkitWindow(root, controller)
-    # Only the Windows release wrapper supplies this per-launch marker. A mapped
-    # main window, not a startup delay or a child widget, authorizes console hiding.
+    window = ToolkitWindow(root, controller)
+    # Only the Windows release wrapper supplies these per-launch files.
     ready_file = os.environ.get('JIBO_GUI_READY_FILE')
     if ready_file:
-        def signal_ready():
-            if root.winfo_viewable():
-                Path(ready_file).write_text('ready\n', encoding='ascii')
-
-        def on_map(event):
-            if event.widget is root:
-                root.after_idle(signal_ready)
-
-        root.bind('<Map>', on_map, add='+')
-        # The root may already have mapped while constructing widgets.
-        root.after_idle(signal_ready)
+        supervise_windows_startup(root, controller, window, ready_file)
     with core.capture_output(controller):
         root.mainloop()
     return 0
