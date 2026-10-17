@@ -58,6 +58,11 @@ exact wording documented separately.
 The sidebar continuously checks the USB connection while idle. Its four-item
 **USB FLOW** is the only numbered USB sequence; the state card is labelled
 **USB READINESS** rather than repeating the TUI's separate three-step count.
+Until the recovery loader is ready in DFU, the Actions page shows
+**How do I put Jibo in RCM mode?** above the list. It opens a photo of the
+RCM and RESET buttons with the steps from the README's
+[Put Jibo in RCM mode](../README.md#put-jibo-in-rcm-mode) section; it reads no USB
+and changes nothing. The text menu shows the same steps when you press `h`.
 RCM/APX and DFU are distinct; partition operations require the toolkit loader
 marker and `var` alternate. Multiple robots, missing/incomplete loader, access
 errors and failed enumeration disable unsafe actions. A failed check does not

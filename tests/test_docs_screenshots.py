@@ -35,3 +35,13 @@ def test_docs_fixture_rejects_visible_fixture_paths_before_capture(tmp_path, mon
     with pytest.raises(AssertionError):
         module.main()
     assert not list(tmp_path.glob("*.png"))
+
+
+def test_docs_fixture_captures_rcm_help_without_usb(tmp_path):
+    args = [sys.executable, str(ROOT / "scripts/docs_screenshots.py"), "--rcm-help", "--out", str(tmp_path)]
+    run = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert {path.name for path in tmp_path.glob("*.png")} == {
+        "rcm-help-entry.png", "rcm-help.png", "rcm-help-small.png",
+        "ready.png", "mode-wifi.png", "review.png", "progress.png"}
+    assert "7 screens captured at 1080 x 720 (one at 920 x 640)" in run.stdout

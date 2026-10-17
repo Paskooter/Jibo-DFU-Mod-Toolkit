@@ -13,6 +13,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_LOADER_SIZE = 432_064
 PINNED_LOADER_SHA256 = "7105edf6d7d9b68e32aef3f2c331a348e0612210cc9bd1c06bb26bba33b8e8c0"
+RCM_HELP_IMAGE = "assets/help/rcm-buttons.png"
+RCM_HELP_IMAGE_SHA256 = "52a31b30dc04c1b5432facf211697f27ca604fbcfdbb2b26f9bfcf80111b4fe9"
 BASELINE_LOADER_SHA256 = bytes.fromhex(
     "8f46062f2d201824337093a1e4c154e3048c019b147930da35b9d62e00c5e689")
 
@@ -156,6 +158,11 @@ def main():
     for name in ('contract-v1.json', 'trust.json', 'flash-release-public.pem'):
         key = 'assets/flash-images/' + name
         data[key] = _read_file(parser, key, ROOT / key)
+    # The GUI's RCM help photo; jibo_tui pins its hash and the GUI refuses other bytes.
+    photo = _read_file(parser, RCM_HELP_IMAGE, ROOT / RCM_HELP_IMAGE)
+    if hashlib.sha256(photo).hexdigest() != RCM_HELP_IMAGE_SHA256:
+        parser.error("The RCM help photo does not match its pinned SHA-256.")
+    data[RCM_HELP_IMAGE] = photo
 
     for name, content in data.items():
         if b"PRIVATE KEY-----" in content:

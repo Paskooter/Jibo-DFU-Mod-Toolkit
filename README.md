@@ -88,7 +88,7 @@ Linux file managers may require **Allow Launching** or **Trust** for the `.deskt
 
 ### USB workflow and safety
 
-1. Put one robot in **RCM/APX** (`0955:7740`). The toolkit uses ShofEL to load its recovery program into RAM.
+1. Put one robot in **RCM/APX** (`0955:7740`); see [Put Jibo in RCM mode](#put-jibo-in-rcm-mode). The toolkit uses ShofEL to load its recovery program into RAM.
 2. The robot reappears in **DFU** (`0955:701a`). All partition reads and writes use DFU. ShofEL is used only for the RCM-to-DFU entry step.
 
 The GUI enables DFU entry in RCM and partition actions only after the recovery loader is ready in DFU. It shares the text menu's device operations, validation, backups and per-write review, including the ON-by-default boot-network checkbox for developer mode + Wi-Fi setup. It shows USB state and progress, refuses duplicate starts, and does not allow window closure during a transfer. **Keep USB connected and wait for completion**; forcibly killing the app can still interrupt a transfer. Read the [hardware limitations](#hardware-results-and-remaining-work) and [boot-screen diagnostic caveats](#boot-screen-wi-fiip-diagnostic-usb-only-setup) before proceeding.
@@ -105,13 +105,30 @@ For the original text menu, run `./run.sh` on Linux/macOS or `.\run.ps1 -Distro 
 
 If your robot was previously changed by another mod system, it will most likely work with no changes, but that cannot be guaranteed: there is no way to foresee changes someone else made. If it doesn't work, ask in the [Phoenix Discord](https://discord.gg/FyDVYQ6FfV). I'm happy to help.
 
+## Put Jibo in RCM mode
+
+Every USB step starts with Jibo in RCM mode, which the toolkit shows as **RCM/APX** (`0955:7740`).
+
+<img src="assets/help/rcm-buttons.png" width="360" height="360" alt="Jibo's round button panel with two small buttons circled in red: RESET (upper) and RCM (lower)">
+
+*The round button panel on the back of Jibo's head, under the hatch. RESET is the upper small button; RCM is the lower one.*
+
+1. Fully shut Jibo down.
+2. Open the hatch on the back of his head to reach the round button panel in the photo.
+3. Connect the USB cable from your computer to Jibo's micro-USB port under the same hatch.
+4. Press and hold the RCM button, the lower of the two small buttons circled in the photo. Keep holding it while you turn Jibo back on with his power button, then let go of the RCM button.
+5. In RCM mode, the red light on his forehead stays on and you don't hear his startup chime. If he chimes or starts normally, shut him down and try again.
+6. The toolkit then shows RCM/APX detected. Choose Enter DFU with ShofEL (RAM loader).
+
+The GUI shows these steps and this photo under **How do I put Jibo in RCM mode?** until Jibo reaches DFU. In the text menu, press `h`.
+
 ## Quick path: stock Jibo to int-developer
 
 If you are here to mod a stock robot, use the guided menu to change its existing installation to `int-developer` mode. **If the robot has not joined your Wi-Fi yet, configure Wi-Fi in the toolkit too:** changing the mode alone does not give it a network connection.
 
-1. Start the GUI with `./run.sh --gui` on Linux or macOS, or `.\run.ps1 -Gui -Distro Ubuntu-22.04` from PowerShell on a Windows PC with WSL 2 + WSLg. The double-click entries above open the same window. Connect one robot by USB and put it in RCM/APX mode.
+1. Start the GUI with `./run.sh --gui` on Linux or macOS, or `.\run.ps1 -Gui -Distro Ubuntu-22.04` from PowerShell on a Windows PC with WSL 2 + WSLg. The double-click entries above open the same window. Connect one robot by USB and [put it in RCM mode](#put-jibo-in-rcm-mode).
 2. Choose **Enter DFU with ShofEL (RAM loader)**. Wait for the menu to show the robot in DFU. The included Meerkat Rev02 entry selects RAM slot 2 or 3 from the hardware strap; slot 3 has only offline checks so far. See [hardware coverage](#hardware-results-and-remaining-work) for other revisions.
-3. If the robot already has your Wi-Fi saved, choose **Set robot mode** and select **int-developer**. If it has never connected to your Wi-Fi, choose **Set mode and configure Wi-Fi**, select **int-developer**, then enter your Wi-Fi name and password twice. That action applies both settings together. If a saved Wi-Fi password is wrong, choose **Add or update a Wi-Fi network** and enter the same SSID with the corrected password.
+3. If the robot already has your Wi-Fi saved, choose **More tools and local images → Set robot mode** and select **int-developer**. If it has never connected to your Wi-Fi, choose **Set mode and configure Wi-Fi**, select **int-developer**, then enter your Wi-Fi name and password twice. That action applies both settings together. If a saved Wi-Fi password is wrong, choose **More tools and local images → Add or update a Wi-Fi network** and enter the same SSID with the corrected password.
 4. Review and confirm the change. The toolkit saves or reuses a `var` rollback backup and checks the result. After a fresh RTM flash, the stock Wi-Fi and network startup files can be too large for the quick editor; if the menu offers a full `var` transfer, choose it and leave the robot connected until readback finishes. Setting Wi-Fi also prepares startup to skip the retired Jibo server check that can disconnect an otherwise working network. On RTM2, it applies the later TI radio settings too. These changes take effect when the robot restarts; flashing alone does not make them.
 5. When the toolkit reports the change verified, restart the robot normally.
 
@@ -267,7 +284,7 @@ follows. The fresh var rollback copy is still taken before writing. The CLI's
 See [Phoenix images from jibo.io](docs/hosted-flash-images.md) for the two
 calibration choices and what an install does not fix.
 
-With the robot in RCM/APX, choose **Enter DFU with ShofEL** first. The toolkit waits up to 25 seconds for the new DFU connection to become accessible, within the entry timeout, before checking the recovery loader. Both interfaces refresh robot state and available actions automatically when USB changes. In the GUI, use **Refresh USB**, F5 or Ctrl+R; in the TUI, `r` refreshes manually. The current loader uses Meerkat Rev02 RAM slots 2 and 3; only slot 2 has been confirmed on hardware. Select it for a robot whose hardware profile matches. Once DFU is active, both interfaces offer:
+With the robot in RCM/APX ([how to put Jibo in RCM mode](#put-jibo-in-rcm-mode)), choose **Enter DFU with ShofEL** first. The toolkit waits up to 25 seconds for the new DFU connection to become accessible, within the entry timeout, before checking the recovery loader. Both interfaces refresh robot state and available actions automatically when USB changes. In the GUI, use **Refresh USB**, F5 or Ctrl+R; in the TUI, `r` refreshes manually. The current loader uses Meerkat Rev02 RAM slots 2 and 3; only slot 2 has been confirmed on hardware. Select it for a robot whose hardware profile matches. Once DFU is active, both interfaces offer:
 
 | Action | What it does |
 | --- | --- |

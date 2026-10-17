@@ -141,6 +141,7 @@ uname -m
 ```
 
 Record the macOS version, Mac model, selected package manager, and tool versions.
+To put the robot in RCM, follow [Put Jibo in RCM mode](../README.md#put-jibo-in-rcm-mode).
 If the robot is in RCM, `detect` should show `"state": "rcm"` and a port such as
 `0-3` or `20-3.2`; the menu's ShofEL entry action becomes available. With an
 already active Jibo DFU loader, it should show `"state": "dfu"`. Use the

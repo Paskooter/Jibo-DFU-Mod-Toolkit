@@ -87,9 +87,12 @@ class PackageTests(unittest.TestCase):
             "assets/boot-network-status/boot-network-status.sh",
             "assets/boot-network-status/ota-safe-overlay.js",
             "assets/boot-network-status/manifest.json",
+            "assets/help/rcm-buttons.png",
         }
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(set(archive.namelist()), expected)
+            self.assertEqual(hashlib.sha256(archive.read("assets/help/rcm-buttons.png")).hexdigest(),
+                             package.RCM_HELP_IMAGE_SHA256)
             self.assertEqual(archive.read("loader.bin"), self.padded_loader)
             self.assertEqual(archive.read("tools/shofel2_t124"), self.shofel.read_bytes())
             self.assertEqual(archive.read("tools/intermezzo.bin"), b"RCM intermezzo")
@@ -285,6 +288,30 @@ class PackageTests(unittest.TestCase):
                 ready, reason = check_package.check_package(damaged)
                 self.assertFalse(ready, name)
                 self.assertIn(name, reason)
+
+    def test_altered_rcm_help_photo_is_rejected(self):
+        with patch.object(package, "RCM_HELP_IMAGE_SHA256", "0" * 64), \
+                redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaises(SystemExit):
+            self.run_package()
+        self.assertIn("RCM help photo", stderr.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_package_check_rejects_changed_rcm_help_photo(self):
+        self.run_package()
+        loader_hash = hashlib.sha256(self.padded_loader).hexdigest()
+        damaged = self.root / "photo.pyz"
+        with zipfile.ZipFile(self.output) as source, zipfile.ZipFile(damaged, "w") as destination:
+            for member in source.namelist():
+                content = source.read(member)
+                destination.writestr(member, content + b"x" if member == "assets/help/rcm-buttons.png"
+                                     else content)
+        with patch.object(check_package, "PINNED_LOADER_SIZE", len(self.padded_loader)), \
+                patch.object(check_package, "PINNED_LOADER_SHA256", loader_hash):
+            self.assertEqual(check_package.check_package(self.output), (True, "ready"))
+            ready, reason = check_package.check_package(damaged)
+        self.assertFalse(ready)
+        self.assertIn("rcm-buttons.png", reason)
 
     def test_pinned_file_loader_hash(self):
         self.assertEqual(package.PINNED_LOADER_SIZE, 432_064)

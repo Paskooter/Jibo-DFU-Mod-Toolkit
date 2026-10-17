@@ -29,7 +29,8 @@ SOURCES = ("jibo_dfu.py", "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py",
            "jibo_calibration_client.py",
            "assets/flash-images/contract-v1.json", "assets/flash-images/trust.json",
            "assets/flash-images/flash-release-public.pem",
-           "assets/boot-network-status/manifest.json")
+           "assets/boot-network-status/manifest.json",
+           "assets/help/rcm-buttons.png")
 TOOLS = ("tools/shofel2_t124", "tools/intermezzo.bin",
          "tools/dfu_stage2.bin", "tools/dfu-util")
 

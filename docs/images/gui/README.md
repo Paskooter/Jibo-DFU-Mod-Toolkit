@@ -35,3 +35,12 @@ unsafe confirmation makes no backend call:
 ```sh
 xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/flash_docs_screenshots.py --hosted
 ```
+
+The RCM how-to has three companion images: `rcm-help-entry.png` (the
+**How do I put Jibo in RCM mode?** link before a robot is connected),
+`rcm-help.png` and `rcm-help-small.png` (the same page at 920 × 640). Capture
+them with the four main screens by adding `--rcm-help`:
+
+```sh
+xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/docs_screenshots.py --rcm-help
+```

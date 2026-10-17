@@ -41,6 +41,17 @@ def flash_trust_check():
     return {'key_id': 'phoenix-flash-2026-10', 'ed25519': True}
 
 
+def rcm_help_check(runtime):
+    # The GUI help photo must be the pinned bytes and decode with the bundled Tk.
+    import hashlib
+    import jibo_tui
+    data = (runtime / jibo_tui.RCM_HELP_IMAGE).read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != jibo_tui.RCM_HELP_IMAGE_SHA256:
+        raise RuntimeError('RCM help photo does not match its pinned hash')
+    return {'path': jibo_tui.RCM_HELP_IMAGE, 'sha256': digest, 'bytes': len(data)}
+
+
 def self_check(runtime):
     from manifest import verify_manifest
     receipt = verify_manifest(runtime)
@@ -71,6 +82,7 @@ def self_check(runtime):
     if pipeline.returncode or 'Pipelined DFU transfer' not in pipeline.stdout:
         raise RuntimeError('Embedded pipeline subprocess failed: ' + pipeline.stderr)
     receipt['pipeline_subprocess'] = True
+    receipt['rcm_help_image'] = rcm_help_check(runtime)
     print(json.dumps({k: v for k, v in receipt.items() if k != 'files'}, indent=2))
 
 
@@ -92,7 +104,15 @@ def gui_smoke(runtime):
         raise RuntimeError('GUI build banner mismatch: ' + root.title())
     if not root.winfo_viewable() or errors:
         raise RuntimeError('First window did not render: ' + str(errors))
-    print(json.dumps({'first_window': True, 'title': root.title(), 'width': root.winfo_width(), 'height': root.winfo_height(),
+    # With no robot connected the RCM how-to is offered; it must open with its photo.
+    window.rcm_help_link.invoke()
+    for _ in range(10):
+        root.update()
+    photo = window.controls.get('rcm_photo')
+    if window.page_name != 'rcm-help' or photo is None or not str(photo.cget('image')) or errors:
+        raise RuntimeError('RCM help did not show its photo: ' + str(errors))
+    window.controls['primary'].invoke()
+    print(json.dumps({'first_window': True, 'rcm_help_photo': True, 'title': root.title(), 'width': root.winfo_width(), 'height': root.winfo_height(),
                       'tk': root.tk.call('info', 'patchlevel'), 'usb_access': False}))
     window.close()
     controller.shutdown()

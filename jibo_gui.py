@@ -8,6 +8,8 @@ function. This module imports tkinter at the top on purpose: the launcher
 imports it lazily and reports a missing Tk with a pointer to the text menu.
 """
 
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +58,7 @@ PHOENIX_STEPS = (
     "3. At jibo.io, sign in and choose Robots \u2192 Add a Jibo. "
     "Run the one-line command it gives you; it asks for his IP.",
 )
+RCM_PHOTO_SIZE = 360  # assets/help/rcm-buttons.png is 360 x 360
 _TONES = {
     "info": ("accent_soft", "accent_text"),
     "warning": ("warning_soft", "warning_text"),
@@ -83,6 +86,26 @@ def display_label(label):
     # The shared menu reports quick-file capability, not the transfer chosen
     # later (boot diagnostics and unsupported layouts use full-var instead).
     return str(label).removesuffix(" (quick edit)")
+
+
+def rcm_help_photo(root, flows):
+    """Load the owner's RCM photo only if its bytes match the pinned hash.
+
+    Source checkouts, the .pyz and the frozen bundles all keep it next to the
+    modules at assets/help/. A missing or altered file shows a text pointer.
+    """
+    path = Path(__file__).resolve().parent / flows.RCM_HELP_IMAGE
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if hashlib.sha256(data).hexdigest() != flows.RCM_HELP_IMAGE_SHA256:
+        return None
+    try:
+        return tk.PhotoImage(master=root, data=base64.b64encode(data).decode("ascii"),
+                             format="png")
+    except tk.TclError:
+        return None
 
 
 def _family(root, candidates):
@@ -621,6 +644,10 @@ class ToolkitWindow:
         self.actions = ScrollArea(page, P["bg"])
         self.actions.pack(fill="both", expand=True, pady=(20, 0))
         self._scroll_areas.append(self.actions)
+        # Shown until the robot reaches DFU; packed above the action list.
+        self.rcm_help_link = ttk.Button(page, text=self.controller.flows.RCM_HELP_LINK,
+                                        style="Link.TButton", command=self.show_rcm_help)
+        self._rcm_help_shown = False
         return page
 
     def _build_progress(self):
@@ -682,7 +709,9 @@ class ToolkitWindow:
         self.controls = {}
         self._stop_progress()
         self._show("home", self.home)
-        self._render_actions(self.controller.snapshot())
+        snap = self.controller.snapshot()
+        self._render_rcm_help(snap)
+        self._render_actions(snap)
 
     def show_progress(self):
         self.prompt = None
@@ -710,6 +739,91 @@ class ToolkitWindow:
         self._build_phoenix_card(area.inner, self.show_home, show_prerequisite=True)
         self.controls["primary"] = back
         back.focus_set()
+
+    def show_rcm_help(self):
+        """Local how-to with the owner's photo; never interrupts a running robot flow."""
+        if self.controller.busy:
+            return
+        flows = self.controller.flows
+        self.prompt = None
+        self._stop_progress()
+        page = self._new_page("rcm-help")
+        self._header(page, flows.RCM_HELP_TITLE, flows.RCM_HELP_INTRO, kicker="Help")
+        buttons = self._button_bar(page)
+        back = ttk.Button(buttons, text="Back to actions", style="Accent.TButton",
+                          command=self.show_home)
+        back.pack(side="right")
+        area = ScrollArea(page, P["bg"])
+        area.pack(fill="both", expand=True, pady=(16, 0))
+        self._scroll_areas.append(area)
+        card = tk.Frame(area.inner, bg=P["surface"], highlightthickness=1,
+                        highlightbackground=P["border"])
+        card.pack(fill="x")
+        figure = tk.Frame(card, bg=P["surface"])
+        steps_box = tk.Frame(card, bg=P["surface"])
+        photo = rcm_help_photo(self.root, flows)
+        if photo is not None:
+            picture = tk.Label(figure, image=photo, bg=P["surface"], borderwidth=0)
+            picture.image = photo  # Tk drops an unreferenced PhotoImage.
+            picture.pack(anchor="w")
+        else:
+            picture = tk.Label(figure, text="The photo of the buttons is missing from this copy "
+                               "of the toolkit. See the README's \"" + flows.RCM_HELP_TITLE +
+                               "\" section.", font=self.theme.small, bg=P["surface"],
+                               fg=P["warning_text"], anchor="w", justify="left", wraplength=300)
+            picture.pack(anchor="w")
+        caption = tk.Label(figure, text=flows.RCM_HELP_CAPTION, font=self.theme.small,
+                           bg=P["surface"], fg=P["muted"], anchor="w", justify="left",
+                           wraplength=RCM_PHOTO_SIZE)
+        caption.pack(anchor="w", pady=(8, 0))
+        step_labels = []
+        for step in flows.RCM_HELP_STEPS:
+            label = tk.Label(steps_box, text=step, font=self.theme.base, bg=P["surface"],
+                             fg=P["text"], anchor="w", justify="left")
+            label.pack(fill="x", pady=(0, 8))
+            step_labels.append(label)
+        layout = {"wide": None}
+
+        def arrange(event=None):
+            width = event.width if event is not None else card.winfo_width()
+            wide = width >= RCM_PHOTO_SIZE + 300
+            if wide != layout["wide"]:
+                layout["wide"] = wide
+                figure.grid_forget()
+                steps_box.grid_forget()
+                if wide:
+                    figure.grid(row=0, column=0, sticky="nw", padx=(18, 0), pady=18)
+                    steps_box.grid(row=0, column=1, sticky="new", padx=18, pady=18)
+                    card.grid_columnconfigure(0, weight=0)
+                    card.grid_columnconfigure(1, weight=1)
+                else:
+                    figure.grid(row=0, column=0, columnspan=2, sticky="nw", padx=18, pady=(18, 0))
+                    steps_box.grid(row=1, column=0, columnspan=2, sticky="new", padx=18, pady=18)
+                    card.grid_columnconfigure(0, weight=1)
+                    card.grid_columnconfigure(1, weight=0)
+            text_width = max(180, width - 36 - ((RCM_PHOTO_SIZE + 18) if wide else 0) - 4)
+            for label in step_labels:
+                label.configure(wraplength=text_width)
+
+        card.bind("<Configure>", arrange, add="+")
+        arrange()
+        self.controls.update(primary=back, rcm_card=card, rcm_photo=picture,
+                             rcm_caption=caption, rcm_steps=step_labels, rcm_layout=layout)
+        back.focus_set()
+        back.bind("<Return>", lambda _event: self.show_home())
+        back.bind("<Escape>", lambda _event: self.show_home())
+
+    def _render_rcm_help(self, snap):
+        """Offer the RCM how-to until the robot's recovery loader is ready in DFU."""
+        wanted = snap.readiness.state != "dfu-ready" or not snap.checked
+        if wanted and not self._rcm_help_shown:
+            self.rcm_help_link.pack(anchor="w", before=self.actions, pady=(12, 0))
+            self.actions.pack_configure(pady=(10, 0))
+        elif not wanted and self._rcm_help_shown:
+            self.rcm_help_link.pack_forget()
+            self.actions.pack_configure(pady=(20, 0))
+        self._rcm_help_shown = wanted
+        self.rcm_help_link.state(["disabled"] if snap.busy else ["!disabled"])
 
     # -- main actions ------------------------------------------------------
     def _render_actions(self, snap):
@@ -755,6 +869,7 @@ class ToolkitWindow:
         self.phoenix_entry.state(["disabled"] if snap.busy else ["!disabled"])
         self.note.configure(text=snap.note)
         if self.page_name == "home":
+            self._render_rcm_help(snap)
             self._render_actions(snap)
 
     def render_output(self):

@@ -134,7 +134,7 @@ def status_lines(readiness):
     """Return short, distinct RCM-to-DFU status text for the screen."""
     if readiness.state == "none":
         return ("STEP 1 / 3   Connect the robot over USB",
-                "No Jibo recovery device is visible. Put the robot into RCM/APX during reset.")
+                "No Jibo recovery device is visible. Put Jibo in RCM mode and connect him by USB.")
     if readiness.state == "multiple":
         return ("USB STATE   Multiple recovery devices detected",
                 (readiness.detail or "Connect one robot at a time.") + ".")
@@ -235,6 +235,36 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
 
 BACKUPS_MENU_LABEL = "Backups"
 MORE_TOOLS_LABEL = "More tools and local images"
+
+# One how-to for every surface: the README section, the GUI help page and the
+# text menu's h screen use these exact sentences (tests compare them).
+RCM_HELP_LINK = "How do I put Jibo in RCM mode?"
+RCM_HELP_TITLE = "Put Jibo in RCM mode"
+RCM_HELP_INTRO = "The toolkit starts from RCM mode, which it shows as RCM/APX."
+RCM_HELP_STEPS = (
+    "1. Fully shut Jibo down.",
+    "2. Open the hatch on the back of his head to reach the round button panel in the photo.",
+    "3. Connect the USB cable from your computer to Jibo's micro-USB port under the same hatch.",
+    "4. Press and hold the RCM button, the lower of the two small buttons circled in the "
+    "photo. Keep holding it while you turn Jibo back on with his power button, then let go "
+    "of the RCM button.",
+    "5. In RCM mode, the red light on his forehead stays on and you don't hear his startup "
+    "chime. If he chimes or starts normally, shut him down and try again.",
+    "6. The toolkit then shows RCM/APX detected. Choose Enter DFU with ShofEL (RAM loader).",
+)
+RCM_HELP_CAPTION = ("The round button panel on the back of Jibo's head, under the hatch. "
+                    "RESET is the upper small button; RCM is the lower one.")
+RCM_HELP_ALT = ("Jibo's round button panel with two small buttons circled in red: "
+                "RESET (upper) and RCM (lower)")
+RCM_HELP_IMAGE = "assets/help/rcm-buttons.png"
+RCM_HELP_IMAGE_SHA256 = "52a31b30dc04c1b5432facf211697f27ca604fbcfdbb2b26f9bfcf80111b4fe9"
+
+
+def rcm_help_lines():
+    """The text menu has no photo; it points to the README for the picture."""
+    return (RCM_HELP_INTRO, "") + RCM_HELP_STEPS + (
+        "", "The README's \"Put Jibo in RCM mode\" section has a photo of the buttons. "
+        + RCM_HELP_CAPTION)
 
 
 UPDATE_ACTION_LABEL = "Install a Phoenix image or an official update"
@@ -1189,7 +1219,7 @@ class TerminalMenu:
             _addstr(screen, line, 0, "USB port " + self.readiness.port)
             line += 1
         line += 1
-        _addstr(screen, line, 0, "ACTIONS   (↑/↓ select, Enter open, r refresh, q quit; USB auto-refreshes)", bold)
+        _addstr(screen, line, 0, "ACTIONS   (↑/↓ select, Enter open, r refresh, h RCM help, q quit; USB auto-refreshes)", bold)
         first_item_line = line + 1
         for index, item in enumerate(self.items):
             y = first_item_line + index
@@ -1214,7 +1244,7 @@ class TerminalMenu:
         if self.note:
             _addstr(screen, max(0, height - 1), 0, self.note, bold)
         else:
-            _addstr(screen, max(0, height - 1), 0, "q Quit   r Refresh", dim)
+            _addstr(screen, max(0, height - 1), 0, "q Quit   r Refresh   h " + RCM_HELP_LINK, dim)
         screen.refresh()
 
     def session(self, screen):
@@ -1244,6 +1274,9 @@ class TerminalMenu:
                 continue
             if key in (ord("q"), ord("Q"), 27):
                 self.command = "quit"
+                return
+            if key in (ord("h"), ord("H"), ord("?")):
+                self.command = "rcm-help"
                 return
             if key in (ord("r"), ord("R")):
                 self.note = "Refreshing USB state..."
@@ -2137,6 +2170,9 @@ def run(api_module):
         curses.wrapper(app.session)
         if app.command in (None, "quit"):
             return 0
+        if app.command == "rcm-help":
+            show_screen(RCM_HELP_TITLE, rcm_help_lines())
+            continue
         action = app.command
         label = next(item.label for item in app.items if item.key == action)
         try:

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Capture the README's four Tk screens using docs-only example data, never USB.
 
+``--rcm-help`` adds the RCM how-to link and page, shown before a robot is connected.
+
 Run with Tk, Pillow and ImageMagick under Xvfb:
     xvfb-run -a -s '-screen 0 1400x1000x24' python3 scripts/docs_screenshots.py
 """
@@ -70,14 +72,14 @@ class DocsApi(FakeApi):
         return {"status": "backup complete", "image": str(self.BACKUP_ROOT / "var.img")}
 
 
-def clean_png(path):
+def clean_png(path, expected=(1080, 720)):
     """Keep identical RGB pixels, with no metadata or trailing payload."""
     from PIL import Image
 
     with Image.open(path) as source:
         pixels = source.convert("RGB")
         size, data = pixels.size, pixels.tobytes()
-    assert size == (1080, 720), size
+    assert size == tuple(expected), size
     Image.frombytes("RGB", size, data).save(path, optimize=True)
     with Image.open(path) as image:
         assert image.size == size and image.tobytes() == data
@@ -101,6 +103,8 @@ def main():
     parser.add_argument("--phoenix", action="store_true",
                         help="Also capture the quiet entry, local guide and successful setup card")
     parser.add_argument("--calibration", action="store_true", help="Also capture the owner-approved calibration consent")
+    parser.add_argument("--rcm-help", action="store_true",
+                        help="Also capture the RCM how-to link and page before a robot is connected")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -139,14 +143,14 @@ def main():
         parts.extend(visible_text(child) for child in widget.winfo_children())
         return "\n".join(parts)
 
-    def capture(name):
+    def capture(name, size=(1080, 720)):
         root.update()
         assert root.winfo_viewable() and not errors
         assert not re.search(r"\bfake\b|\btest(?:ing)?\b|/tmp", visible_text(root), re.I)
         path = out / (name + ".png")
         subprocess.run(["import", "-window", str(root.winfo_id()), str(path)],
                        check=True, timeout=10)
-        clean_png(path)
+        clean_png(path, size)
         captured.append(path)
 
     def answer(value):
@@ -164,6 +168,34 @@ def main():
     try:
         with core.capture_output(controller):
             pump_until(lambda: controller.snapshot().checked)
+            if args.rcm_help:
+                api.state = "none"
+                assert controller.request_refresh()
+                pump_until(lambda: controller.snapshot().readiness.state == "none"
+                           and not controller._probing)
+                window.render_state()
+                assert window.rcm_help_link.winfo_viewable()
+                capture("rcm-help-entry")
+                window.rcm_help_link.invoke()
+                pump_until(lambda: window.page_name == "rcm-help")
+                assert window.controls["rcm_layout"]["wide"] is True
+                assert str(window.controls["rcm_photo"].cget("image"))
+                capture("rcm-help")
+                root.geometry("920x640")
+                pump_until(lambda: root.winfo_width() == 920 and
+                           window.controls["rcm_layout"]["wide"] is False)
+                capture("rcm-help-small", (920, 640))
+                root.geometry("1080x720")
+                pump_until(lambda: root.winfo_width() == 1080)
+                window.controls["primary"].invoke()
+                api.state = "dfu"
+                assert controller.request_refresh()
+                pump_until(lambda: controller.snapshot().readiness.state == "dfu-ready"
+                           and not controller._probing)
+                window.render_state()
+                root.update()
+                assert not window.rcm_help_link.winfo_ismapped()
+                assert not api.calls and not api.writes
             assert controller.snapshot().readiness.state == "dfu-ready"
             window.render_state()
             capture("ready")
@@ -231,13 +263,16 @@ def main():
     expected = (["ready.png", "phoenix-entry.png", "phoenix-guidance.png", "mode-wifi.png",
                  "review.png", "phoenix-complete.png", "progress.png"] if args.phoenix else
                 ["ready.png", "mode-wifi.png", "review.png", "progress.png"])
+    if args.rcm_help:
+        expected[:0] = ["rcm-help-entry.png", "rcm-help.png", "rcm-help-small.png"]
     if args.calibration:
         expected.append("calibration-consent.png")
     assert [path.name for path in captured] == expected
     assert not opened, "Screenshot capture must never open a browser"
     for path in captured:
         print(str(path.relative_to(ROOT) if path.is_relative_to(ROOT) else path))
-    print(f"{len(captured)} screens captured at 1080 x 720; PNG metadata removed; no Tk callback errors")
+    small = " (one at 920 x 640)" if args.rcm_help else ""
+    print(f"{len(captured)} screens captured at 1080 x 720{small}; PNG metadata removed; no Tk callback errors")
     return 0
 
 

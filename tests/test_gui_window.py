@@ -1,6 +1,8 @@
 """Actual Tk widgets; run with JIBO_GUI_TEST_DISPLAY=1 under Xvfb or a desktop."""
 import os
 import time
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -454,3 +456,126 @@ def test_error_result_is_visibly_failed(window):
     window.show_outcome(core.Outcome("error", "write-var", "Action failed", ("Fake readback mismatch",)))
     window.root.update()
     assert window.page_name == "result" and window.controls["tone"] == "danger"
+
+
+def _help_state(w, state):
+    w.controller.api.state = state
+    assert w.controller.request_refresh()
+    w.show_home()
+    w.render_state()
+    w.root.update()
+
+
+@pytest.mark.parametrize("state,shown", [("none", True), ("multiple", True), ("rcm", True),
+                                         ("dfu", False)])
+def test_rcm_help_link_is_offered_until_the_loader_is_ready(window, state, shown):
+    w = window
+    _help_state(w, state)
+    link = w.rcm_help_link
+    assert link.cget("text") == "How do I put Jibo in RCM mode?"
+    assert bool(link.winfo_ismapped()) is shown
+    if shown:
+        # The link sits between the page header and the action list, fully visible.
+        assert link.winfo_rooty() + link.winfo_height() <= w.actions.winfo_rooty()
+        assert link.winfo_height() >= link.winfo_reqheight()
+
+
+def test_rcm_help_link_hides_and_returns_as_usb_state_changes(window):
+    w = window
+    _help_state(w, "rcm")
+    assert w.rcm_help_link.winfo_ismapped()
+    _help_state(w, "dfu")
+    assert not w.rcm_help_link.winfo_ismapped()
+    _help_state(w, "none")
+    assert w.rcm_help_link.winfo_ismapped()
+
+
+@pytest.mark.parametrize("geometry,wide", [("1080x720", True), ("920x640", False)])
+def test_rcm_help_page_shows_the_photo_and_shared_steps(window, geometry, wide):
+    import jibo_tui
+    w = window
+    w.root.geometry(geometry)
+    _help_state(w, "none")
+    w.rcm_help_link.invoke()
+    w.root.update()
+    assert w.page_name == "rcm-help"
+    photo = w.controls["rcm_photo"]
+    image = str(photo.cget("image"))
+    assert image, "the photo must load, not the missing-file text"
+    assert (int(w.root.tk.call("image", "width", image)),
+            int(w.root.tk.call("image", "height", image))) == (360, 360)
+    assert w.controls["rcm_caption"].cget("text") == jibo_tui.RCM_HELP_CAPTION
+    steps = tuple(str(label.cget("text")) for label in w.controls["rcm_steps"])
+    assert steps == jibo_tui.RCM_HELP_STEPS
+    assert w.controls["rcm_layout"]["wide"] is wide
+    for label in w.controls["rcm_steps"]:
+        assert label.winfo_height() >= label.winfo_reqheight()
+    back = w.controls["primary"]
+    assert back.winfo_viewable()
+    assert back.winfo_rooty() + back.winfo_height() <= w.root.winfo_rooty() + w.root.winfo_height()
+    assert w.root.focus_get() is back
+    assert not w.controller.api.calls and not w.controller.api.writes
+    back.invoke()
+    w.root.update()
+    assert w.page_name == "home"
+
+
+def test_rcm_help_page_escape_returns_to_actions(window):
+    w = window
+    _help_state(w, "rcm")
+    w.rcm_help_link.invoke()
+    w.root.update()
+    w.controls["primary"].event_generate("<Escape>")
+    w.root.update()
+    assert w.page_name == "home" and w.rcm_help_link.winfo_ismapped()
+
+
+def test_rcm_help_refuses_an_altered_photo(window, tmp_path, monkeypatch):
+    import jibo_gui as gui
+    w = window
+    flows = SimpleNamespace(RCM_HELP_IMAGE="rcm.png",
+                            RCM_HELP_IMAGE_SHA256=w.controller.flows.RCM_HELP_IMAGE_SHA256)
+    monkeypatch.setattr(gui, "__file__", str(tmp_path / "jibo_gui.py"))
+    assert gui.rcm_help_photo(w.root, flows) is None  # missing
+    (tmp_path / "rcm.png").write_bytes(b"\x89PNG not the owner's photo")
+    assert gui.rcm_help_photo(w.root, flows) is None  # wrong bytes
+    original = Path(__file__).resolve().parents[1] / w.controller.flows.RCM_HELP_IMAGE
+    # A decodable PNG that is not the pinned file must be refused by its hash.
+    import base64
+    import struct
+    import tkinter as tk
+    import zlib
+
+    def chunk(kind, body):
+        return (struct.pack(">I", len(body)) + kind + body +
+                struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff))
+    other = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)) +
+             chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+    assert tk.PhotoImage(master=w.root, data=base64.b64encode(other).decode(), format="png")
+    (tmp_path / "rcm.png").write_bytes(other)
+    assert gui.rcm_help_photo(w.root, flows) is None
+    (tmp_path / "rcm.png").write_bytes(original.read_bytes())
+    assert gui.rcm_help_photo(w.root, flows) is not None
+
+
+def test_rcm_help_shows_text_pointer_when_photo_is_missing(window, monkeypatch):
+    import jibo_gui as gui
+    w = window
+    monkeypatch.setattr(gui, "rcm_help_photo", lambda *_args: None)
+    _help_state(w, "none")
+    w.rcm_help_link.invoke()
+    w.root.update()
+    assert w.page_name == "rcm-help"
+    assert "README" in w.controls["rcm_photo"].cget("text")
+    assert len(w.controls["rcm_steps"]) == 6
+
+
+def test_rcm_help_cannot_replace_an_active_operation(window):
+    w = window
+    _help_state(w, "rcm")
+    w.controller._busy = True
+    w.show_progress()
+    w.render_state()
+    w.show_rcm_help()
+    assert w.page_name == "progress"
+    w.controller._busy = False
