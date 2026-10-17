@@ -2,6 +2,8 @@
 public static class ToolkitUiTests {
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     static void Require(bool ok, string message) { if (!ok) throw new InvalidOperationException(message); }
     static void Pump() { Application.DoEvents(); System.Threading.Thread.Sleep(15); Application.DoEvents(); }
@@ -50,10 +52,13 @@ public static class ToolkitUiTests {
             using (Form form = support ? (Form)Support(true) : new ToolkitSetupForm()) {
                 Control view = support ? (Control)((ToolkitSupportForm)form).View : ((ToolkitSetupForm)form).View;
                 if (!support) ((ToolkitSetupForm)form).View.Show(ToolkitPreview.SetupStates()[16].Value);
+                form.Show(); Pump(); Fonts(form, "NativeShowOnLoad");
                 foreach (int dpi in new int[] { 96, 144, 144, 192, 96 }) {
                     ToolkitFonts old = Owner(view);
                     if (support) ((ToolkitSupportView)view).ApplyDpi(dpi); else ((ToolkitSetupView)view).ApplyDpi(dpi);
                     Fonts(form, "DpiSequence");
+                    Pump();
+                    using (var bitmap = new Bitmap(view.Width, view.Height)) view.DrawToBitmap(bitmap, new Rectangle(Point.Empty, view.Size));
                     if (!Object.ReferenceEquals(old, Owner(view))) Released(old, "DpiSequence retired owner");
                 }
                 if (support) ((ToolkitSupportView)view).ApplyDpi(144); else ((ToolkitSetupView)view).ApplyDpi(144);
@@ -64,7 +69,7 @@ public static class ToolkitUiTests {
                 Fonts(form, "EqualFontRoleAcrossDpi");
                 Released(aliased, "EqualFontRoleAcrossDpi retired owner");
                 view.Controls.Remove(inherited); inherited.Dispose();
-                form.Show(); Pump(); Fonts(form, "RepeatedShowClose");
+                Pump(); Fonts(form, "RepeatedShowClose");
                 using (var bitmap = new Bitmap(view.Width, view.Height)) view.DrawToBitmap(bitmap, new Rectangle(Point.Empty, view.Size));
                 ToolkitFonts last = Owner(view);
                 form.Close(); form.Dispose(); Released(last, "RepeatedShowClose final owner");
@@ -86,9 +91,12 @@ public static class ToolkitUiTests {
     public static void ClickReachable(Form form, Control button, string test) {
         form.ScrollControlIntoView(button); button.Focus(); Pump();
         var screen = button.RectangleToScreen(button.ClientRectangle);
-        var client = form.RectangleToScreen(form.ClientRectangle);
+        RECT nativeClient; Require(GetClientRect(form.Handle, out nativeClient), test + ": no native client");
+        var client = form.RectangleToScreen(new Rectangle(nativeClient.Left, nativeClient.Top, nativeClient.Right - nativeClient.Left, nativeClient.Bottom - nativeClient.Top));
         Require(button.Visible && button.Enabled && client.Contains(screen) && ToolkitTheme.WorkArea(form).Contains(screen), test + ": action not visible " + button.Text + " " + screen + "; client=" + client);
         var point = new Point(screen.Left + screen.Width / 2, screen.Top + screen.Height / 2);
+        foreach (Point edge in new Point[] { new Point(screen.Left + 1, screen.Top + 1), new Point(screen.Right - 2, screen.Top + 1), new Point(screen.Left + 1, screen.Bottom - 2), new Point(screen.Right - 2, screen.Bottom - 2) })
+            Require(WindowFromPoint(edge) == button.Handle, test + ": action edge clipped or occluded " + button.Text + " " + edge);
         Require(WindowFromPoint(point) == button.Handle, test + ": action occluded " + button.Text);
         int clicks = 0; EventHandler clicked = delegate { clicks++; }; button.Click += clicked;
         IntPtr position = new IntPtr((button.Height / 2 << 16) | (button.Width / 2));
@@ -97,6 +105,7 @@ public static class ToolkitUiTests {
         button.Click -= clicked;
         Require(clicks == 1, test + ": native mouse click not delivered " + button.Text);
         ToolkitPreview.Trace(test + ": clicked " + button.Text + "; rect=" + screen);
+        if (!form.IsDisposed) { form.Refresh(); Pump(); }
     }
     public static string ScaledForms(string folder) {
         var errors = new System.Collections.Generic.List<string>();
