@@ -142,7 +142,15 @@ function Get-SupportBootstrap([string]$Binary, [string]$Arguments, [string]$Root
     $template=@'
 $ErrorActionPreference='Stop'
 $r=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('REQUEST')) | ConvertFrom-Json
-if ([Console]::In.ReadLine().TrimStart([char]0xFEFF) -cne $r.nonce) { exit 121 }
+$gateStdin=[Console]::OpenStandardInput(); $gateRaw=New-Object 'Collections.Generic.List[byte]'
+$gateClock=[Diagnostics.Stopwatch]::StartNew(); $gateBuffer=New-Object byte[] 4096; $gateEof=$false
+while (-not $gateRaw.Contains([byte]10) -and $gateRaw.Count -lt 4096 -and $gateClock.ElapsedMilliseconds -lt 8000) { $gateTask=$gateStdin.ReadAsync($gateBuffer,0,4096); if (-not $gateTask.Wait([int][Math]::Max(1,8000-$gateClock.ElapsedMilliseconds))) { break }; if ($gateTask.Result -le 0) { $gateEof=$true; break }; for ($gateIndex=0; $gateIndex -lt $gateTask.Result; $gateIndex++) { $gateRaw.Add($gateBuffer[$gateIndex]) } }
+$gateEncoding=[Console]::InputEncoding; $gateDecoded=$gateEncoding.GetString($gateRaw.ToArray())
+[Console]::SetIn((New-Object IO.StringReader($gateDecoded)))
+$gateLine=[Console]::In.ReadLine().TrimStart([char]0xFEFF)
+$gateHex={ param([string]$s) if ($null -eq $s) { return $null }; return (($s.ToCharArray() | ForEach-Object { '{0:X4}' -f [int]$_ }) -join ' ') }
+[IO.File]::WriteAllText((Join-Path $r.root 'gate-received.json'), (([ordered]@{raw_hex=[BitConverter]::ToString($gateRaw.ToArray()); raw_count=$gateRaw.Count; eof=$gateEof; elapsed_ms=$gateClock.ElapsedMilliseconds; input_code_page=$gateEncoding.CodePage; input_web_name=$gateEncoding.WebName; input_redirected=[Console]::IsInputRedirected; decoded_utf16=(& $gateHex $gateDecoded); received_utf16=(& $gateHex $gateLine); expected_utf16=(& $gateHex $r.nonce); matches=($gateLine -ceq $r.nonce)}) | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+if ($gateLine -cne $r.nonce) { exit 121 }
 $child=New-Object Diagnostics.Process
 $child.StartInfo=New-Object Diagnostics.ProcessStartInfo
 $child.StartInfo.FileName=$r.binary; $child.StartInfo.Arguments=$r.arguments
@@ -216,6 +224,8 @@ function Invoke-SupportChild([string]$Binary, [string]$Arguments, [string]$Root,
         Assert-Support ($containment.assigned) 'Owned containment admission not confirmed'
         $phase.admitted=$true
         $child.StandardInput.WriteLine($Nonce); $child.StandardInput.Flush()
+        $gateSentEncoding=$child.StandardInput.Encoding
+        Save-SupportJson (Join-Path $Root 'gate-sent.json') ([ordered]@{text=$Nonce; writer_web_name=$gateSentEncoding.WebName; writer_code_page=$gateSentEncoding.CodePage; writer_preamble_hex=[BitConverter]::ToString($gateSentEncoding.GetPreamble()); writer_newline_hex=[BitConverter]::ToString($gateSentEncoding.GetBytes($child.StandardInput.NewLine)); payload_hex=[BitConverter]::ToString($gateSentEncoding.GetBytes($Nonce)); supervisor_input_code_page=[Console]::InputEncoding.CodePage; supervisor_output_code_page=[Console]::OutputEncoding.CodePage})
         Save-SupportJson (Join-Path $Root 'phase.json') $phase
         $remaining=Get-SupportWait $clock $executionDeadline
         if ($remaining -le 0 -or -not $child.WaitForExit($remaining)) { $phase.timed_out=$true }
