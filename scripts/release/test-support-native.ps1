@@ -215,7 +215,10 @@ function Invoke-SupportChild([string]$Binary, [string]$Arguments, [string]$Root,
         Admit-SupportChild $containment $child $Root $clock $executionDeadline
         Assert-Support ($containment.assigned) 'Owned containment admission not confirmed'
         $phase.admitted=$true
-        $child.StandardInput.WriteLine($Nonce); $child.StandardInput.Flush()
+        # Keep the exact nonce free of a .NET Framework StreamWriter BOM.
+        $gateBytes=[Text.Encoding]::UTF8.GetBytes("$Nonce`n")
+        $child.StandardInput.BaseStream.Write($gateBytes,0,$gateBytes.Length)
+        $child.StandardInput.BaseStream.Flush()
         Save-SupportJson (Join-Path $Root 'phase.json') $phase
         $remaining=Get-SupportWait $clock $executionDeadline
         if ($remaining -le 0 -or -not $child.WaitForExit($remaining)) { $phase.timed_out=$true }

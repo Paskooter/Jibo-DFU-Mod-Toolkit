@@ -292,6 +292,11 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return
     [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='supervision'; result=$supervisor} | ConvertTo-Json -Compress -Depth 4) + "`n"))
     if (-not $supervisor.Output)
 '@)
+        $diagnosticHelper = $diagnosticHelper.Replace('$request = [Console]::In.ReadLine() | ConvertFrom-Json', @'
+$wireRequest = [Console]::In.ReadLine()
+        [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='wire'; encoding=[Console]::InputEncoding.WebName; chars=$wireRequest.Length; base64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wireRequest))} | ConvertTo-Json -Compress) + "`n"))
+        $request = $wireRequest | ConvertFrom-Json
+'@)
         $diagnosticHelper = $diagnosticHelper.Replace('} catch { [Console]::Out.WriteLine', @'
 } catch { [IO.File]::AppendAllText($env:BOOTSTRAP_USB_DIAGNOSTICS, ((@{event='worker-error'; error=$_.Exception.Message; position=$_.InvocationInfo.PositionMessage} | ConvertTo-Json -Compress) + "`n")); [Console]::Out.WriteLine
 '@)

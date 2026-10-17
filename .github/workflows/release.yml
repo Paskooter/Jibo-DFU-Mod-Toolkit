@@ -15,6 +15,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bootstrap-boundary-diagnostics:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Isolated synthetic bootstrap boundary diagnostic
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-bootstrap.ps1 -Scenario success
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   linux-payload:
     runs-on: ubuntu-22.04
     timeout-minutes: 45

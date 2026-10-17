@@ -248,7 +248,11 @@ function Invoke-OwnedPhase([string]$Name, [int]$Seconds, [string]$Root) {
         if ($bounded) {
             $outer.Assign($process)
             $receipt.outer_assigned_before_gate=$true
-            $process.StandardInput.WriteLine('outer-job:'+$RunId); $process.StandardInput.Flush()
+            # .NET Framework's UTF-8 StreamWriter can prepend a BOM, which
+            # Console.In preserves as part of the exact gate. Send raw bytes.
+            $gateBytes=[Text.Encoding]::UTF8.GetBytes("outer-job:$RunId`n")
+            $process.StandardInput.BaseStream.Write($gateBytes,0,$gateBytes.Length)
+            $process.StandardInput.BaseStream.Flush()
         }
         $out=$process.StandardOutput.ReadToEndAsync(); $err=$process.StandardError.ReadToEndAsync()
         $receipt.pid=$process.Id
@@ -522,7 +526,9 @@ function Get-BoundsFixtureSource {
 }
 function Import-BoundsTypes {
     Assert-FixtureOwnership $true
-    if (-not ('NativeBoundsJob' -as [type])) { Add-Type -Path (Join-Path $ScratchRoot 'bounds-job.dll') }
+    # Load the already hash-checked image, not a file-backed assembly that
+    # Windows keeps locked until this supervisor exits and prevents cleanup.
+    if (-not ('NativeBoundsJob' -as [type])) { $null=[Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $ScratchRoot 'bounds-job.dll'))) }
 }
 function Assert-BoundsEvidence($Value, [string]$Case, [string]$Token) {
     Assert-True ($Value.run_id -ceq $Token -and $Value.id -ceq $Case -and $Value.before_outer_cleanup -eq $true) 'Bounds stale/missing API observation'
