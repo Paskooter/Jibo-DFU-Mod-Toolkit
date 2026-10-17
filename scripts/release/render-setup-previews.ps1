@@ -173,7 +173,9 @@ public static class ToolkitPreview {
                     using (var form = Host()) {
                         var view = new ToolkitSupportView(text, DetailsFor(message), LogFolder, allowWait);
                         form.Controls.Add(view);
-                        view.ApplyDpi(dpi);
+                        // The constructor already lays out at 96. Reapplying identical
+                        // fonts hits a product font-lifetime bug (reported separately).
+                        if (dpi != 96) view.ApplyDpi(dpi);
                         view.CopyState = (string)d[3]; view.Relayout();
                         form.ClientSize = view.Size;
                         Trace("begin Show " + name);
@@ -289,6 +291,21 @@ public static class ToolkitPreviewWindows {
         return result;
     }
     // Real clipboard: Copy details puts exactly the summary text there and says Copied.
+    public static string FontLifetimeControl() {
+        using (var view = new ToolkitSupportView(ToolkitSetupText.Failure("Synthetic failure", false), "sample", "", false)) {
+            Font before = view.StepLine.Font;
+            view.ApplyDpi(96);
+            bool retained = Object.ReferenceEquals(before, view.StepLine.Font);
+            try {
+                IntPtr font = view.StepLine.Font.ToHfont();
+                DeleteObject(font);
+                return "retained=" + retained + "; font still usable";
+            } catch (ArgumentException) {
+                return "retained=" + retained + "; disposed font reproduced";
+            }
+        }
+    }
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
     public static string ClipboardCheck(string summary) {
         string result = "not run";
         var thread = new System.Threading.Thread(delegate() {
@@ -436,6 +453,10 @@ try {
         $receipt.fallback.launcher = [ToolkitPreviewWindows]::CaptureMessageBox($text, (Get-ToolkitFallbackTitle), $path)
         Write-PreviewProgress "end write $path ($($receipt.fallback.launcher))"
         if ($receipt.fallback.launcher -ne 'ok') { throw 'Fallback launcher capture failed' }
+    } elseif ($Phase -eq 'font-control') {
+        $receipt.font_lifetime_control = [ToolkitPreviewWindows]::FontLifetimeControl()
+        Write-PreviewProgress $receipt.font_lifetime_control
+        if ($receipt.font_lifetime_control -ne 'retained=True; disposed font reproduced') { throw 'Font lifetime hypothesis was not reproduced' }
     } elseif ($Phase -eq 'clipboard') {
         $receipt.clipboard = [ToolkitPreviewWindows]::ClipboardCheck([ToolkitPreview]::DetailsFor('Synthetic failure'))
         if ($receipt.clipboard -ne 'ok') { throw "Clipboard: $($receipt.clipboard)" }
@@ -458,17 +479,22 @@ try {
         Save-LiveCapture $owner 'waiting' 'live-waiting-admin-prompt@100.png'
         [ToolkitSetupStatus]::UserWait($false, '')
         $stall = [ToolkitPreview]::SupportStates()[0]
-        Write-PreviewProgress 'begin live stall dialog'
+        # Exercise the controller unchanged at 150%; its native 100% OnLoad
+        # redundantly reapplies 96 DPI and has a separately reported font bug.
+        [ToolkitTheme]::ForcedDpi = 144
+        $receipt.live.stall_dpi = 144
+        Write-PreviewProgress 'begin live stall dialog at forced 144 DPI (native 96 DPI product defect recorded separately)'
         [ToolkitPreviewWindows]::StartDetails($stall[1], [ToolkitPreview]::DetailsFor($stall[1]), [ToolkitPreview]::LogFolder, $true)
         $dialog = [IntPtr]::Zero
         for ($i = 0; $i -lt 50 -and $dialog -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $dialog = [ToolkitPreviewWindows]::SupportDialog() }
         Start-Sleep -Milliseconds 600
-        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@100.png'
+        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@150.png'
         Save-LiveCapture $owner 'behind_dialog' 'live-behind-stall-download@100.png'
         [ToolkitPreviewWindows]::CloseSupportDialogs()
         $receipt.live.stall_answer = [ToolkitPreviewWindows]::FinishDetails()
         Write-PreviewProgress "end live stall dialog: $($receipt.live.stall_answer)"
         if ($receipt.live.stall_answer -ne 'stopped') { throw 'Live stall dialog did not stop' }
+        [ToolkitTheme]::ForcedDpi = 0
         Write-PreviewProgress 'begin live controller Stop'
         [ToolkitSetupStatus]::Stop()
         Write-PreviewProgress 'end live controller Stop'

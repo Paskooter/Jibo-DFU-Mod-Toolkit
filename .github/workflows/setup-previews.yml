@@ -53,3 +53,8 @@ jobs:
           path: setup-previews/
           if-no-files-found: error
           retention-days: 14
+      - name: Require complete preview receipts
+        if: always()
+        timeout-minutes: 1
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/test-preview-receipts.ps1
