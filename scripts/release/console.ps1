@@ -1448,6 +1448,8 @@ public sealed class ToolkitSupportView : Panel {
 // scrollbars (also scrolled by keyboard focus) expose every action instead of
 // letting Windows silently clamp away the footer. No content or choices change.
 public class ToolkitViewportForm : Form {
+    [StructLayout(LayoutKind.Sequential)] struct CLIENTRECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out CLIENTRECT rect);
     Size fittedView;
     Rectangle fittedArea;
     int fittedDpi;
@@ -1461,8 +1463,9 @@ public class ToolkitViewportForm : Form {
             if (fittedView != view.Size || fittedArea != area || fittedDpi != dpi) {
                 AutoScroll = false; AutoScrollMinSize = Size.Empty;
                 view.Location = Point.Empty;
-                int maxW = Math.Max(1, area.Width - (Width - ClientSize.Width));
-                int maxH = Math.Max(1, area.Height - (Height - ClientSize.Height));
+                Size client = NativeClientSize();
+                int maxW = Math.Max(1, area.Width - (Width - client.Width));
+                int maxH = Math.Max(1, area.Height - (Height - client.Height));
                 bool vertical = view.Height > maxH;
                 bool horizontal = view.Width + (vertical ? SystemInformation.VerticalScrollBarWidth : 0) > maxW;
                 vertical = view.Height + (horizontal ? SystemInformation.HorizontalScrollBarHeight : 0) > maxH;
@@ -1475,6 +1478,23 @@ public class ToolkitViewportForm : Form {
             Location = new Point(Math.Min(Math.Max(area.Left, Left), Math.Max(area.Left, area.Right - Width)),
                 Math.Min(Math.Max(area.Top, Top), Math.Max(area.Top, area.Bottom - Height)));
         } finally { fitting = false; }
+    }
+    Size NativeClientSize() {
+        CLIENTRECT rect;
+        return IsHandleCreated && GetClientRect(Handle, out rect) ? new Size(rect.Right - rect.Left, rect.Bottom - rect.Top) : ClientSize;
+    }
+    protected override Point ScrollToControl(Control activeControl) {
+        // Framework Form.ClientSize can retain the pre-scrollbar dimensions.
+        // Use the real native viewport so keyboard focus never hides the bottom
+        // or right edge of a decision behind a scrollbar.
+        Size client = NativeClientSize();
+        Rectangle bounds = RectangleToClient(activeControl.Parent.RectangleToScreen(activeControl.Bounds));
+        Point next = AutoScrollPosition;
+        if (bounds.Left < 0) next.X -= bounds.Left;
+        else if (bounds.Right > client.Width) next.X -= bounds.Right - client.Width;
+        if (bounds.Top < 0) next.Y -= bounds.Top;
+        else if (bounds.Bottom > client.Height) next.Y -= bounds.Bottom - client.Height;
+        return new Point(Math.Min(0, next.X), Math.Min(0, next.Y));
     }
 }
 // Window for the support view: owned by the setup window, topmost, sized to the view.
