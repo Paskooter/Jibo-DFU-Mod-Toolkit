@@ -685,6 +685,13 @@ public sealed class ToolkitFonts : IDisposable {
         Mono = Make("Consolas", 9f, dpi);
     }
     public int S(int logical) { return ToolkitTheme.S(logical, Dpi); }
+    // WinForms may retain an equal existing Font rather than the newly assigned
+    // instance. Clear explicit references before assigning a new owned set;
+    // inherited fonts then follow the new parent instead of a retired owner.
+    public static void Detach(Control root) {
+        root.Font = null;
+        foreach (Control child in root.Controls) Detach(child);
+    }
     public void Dispose() { foreach (var f in new Font[] { Brand, Title, Body, BodyBold, Small, SmallBold, Caps, Button, Mono }) f.Dispose(); }
 }
 // Static text measured and painted with the same flags, so wrapped text is never clipped.
@@ -1091,6 +1098,7 @@ public sealed class ToolkitSetupView : Panel {
     public void ApplyDpi(int dpi) {
         if (Fonts != null && Fonts.Dpi == dpi) return;
         var old = Fonts;
+        ToolkitFonts.Detach(this);
         Fonts = new ToolkitFonts(dpi);
         Rail.Fonts = Chip.Fonts = Facts.Fonts = Steps.Fonts = Where.Fonts = Fonts;
         Font = Fonts.Body;
@@ -1100,6 +1108,10 @@ public sealed class ToolkitSetupView : Panel {
         Yes.Font = No.Font = Fonts.Button; Where.Font = Fonts.Body;
         if (shown != null) Show(shown);
         if (old != null) old.Dispose();
+    }
+    protected override void Dispose(bool disposing) {
+        base.Dispose(disposing); // Destroy descendants before releasing their fonts.
+        if (disposing && Fonts != null) { Fonts.Dispose(); Fonts = null; }
     }
     int S(int logical) { return Fonts.S(logical); }
     public void Restyle() { if (shown != null) Show(shown); }
@@ -1349,7 +1361,9 @@ public sealed class ToolkitSupportView : Panel {
         HelpLine.Announce();
     }
     public void ApplyDpi(int dpi) {
+        if (fonts != null && fonts.Dpi == dpi) return;
         var old = fonts;
+        ToolkitFonts.Detach(this);
         fonts = new ToolkitFonts(dpi);
         Font = fonts.Body;
         StepLine.Font = fonts.SmallBold; Headline.Font = fonts.Title; What.Font = fonts.Body;
@@ -1358,6 +1372,10 @@ public sealed class ToolkitSupportView : Panel {
         Details.Font = fonts.Mono;
         Relayout();
         if (old != null) old.Dispose();
+    }
+    protected override void Dispose(bool disposing) {
+        base.Dispose(disposing);
+        if (disposing && fonts != null) { fonts.Dispose(); fonts = null; }
     }
     int S(int logical) { return fonts.S(logical); }
     public void Relayout() {
