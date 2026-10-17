@@ -327,10 +327,10 @@ function Assert-PhaseEvidence($Spec, $Receipt, [string]$Root, [string]$Token) {
         return
     }
     if ($Spec.Id -eq 'bootstrap-usb') {
-        foreach ($name in @('usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-declined')) {
+        foreach ($name in @('usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-declined','usb-winget-hidden-prompt','usb-installer-never-finishes')) {
             Assert-True ($stdout -match ('(?m)^PASS scenario: ' + [regex]::Escape($name) + '\r?$')) ('Existing bootstrap case missing: ' + $name)
         }
-        Assert-True ($stdout -match 'Bootstrap scenarios: 14 passed; 0 failed') 'Existing bootstrap USB inventory incomplete'
+        Assert-True ($stdout -match 'Bootstrap scenarios: 16 passed; 0 failed') 'Existing bootstrap USB inventory incomplete'
         return
     }
     $records=@(Native-Records $Root)
