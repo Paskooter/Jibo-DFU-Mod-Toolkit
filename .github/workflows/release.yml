@@ -76,12 +76,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/release/build.py --windows-payload linux-stage
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c 'import pathlib,hashlib,json; directory=pathlib.Path("release-out"); files={p.name:{"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()} for p in directory.iterdir() if p.is_file()}; (directory/"build-info-Windows-x64.json").write_text(json.dumps({"revision":"${{ github.sha }}","files":files},indent=2)+"\n")'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File scripts/release/test-bootstrap.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File scripts/release/test-console.ps1 -Case all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows test executable before native fixtures
-        if: matrix.platform == 'Windows'
+        if: always() && matrix.platform == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-exe
