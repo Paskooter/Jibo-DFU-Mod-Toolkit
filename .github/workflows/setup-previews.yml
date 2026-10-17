@@ -1,57 +1,76 @@
-name: Setup window previews
+name: Windows native fixture diagnostics
 
-# Renders the Windows setup window and its support dialog to PNG with the real
-# Windows WinForms runtime, for design review. Manual only: it never builds,
-# tags, releases or publishes anything, and never runs setup, WSL or USB.
+# Manual source-only evidence, NOT a release build or owner Windows 11 acceptance.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: setup-previews-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  previews:
+  usbipd:
+    name: Native usbipd source fixtures (49 phases)
     runs-on: windows-2022
-    timeout-minutes: 30
+    # Existing phase budgets total 1216s; leave headroom for cleanup and validation.
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: powershell
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-      - name: Verify preview timeout isolation
-        timeout-minutes: 2
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/test-preview-harness.ps1
-      - name: Render 100%, 150% and 200% previews (Windows PowerShell 5.1)
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 14
-        shell: powershell
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check integrated usbipd sources
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/render-setup-previews.ps1 -OutDir setup-previews/standard
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Render with Windows high contrast switched on
-        timeout-minutes: 8
-        if: always()
-        continue-on-error: true
-        shell: powershell
+      - name: Run native usbipd fixtures
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/render-setup-previews.ps1 -OutDir setup-previews/high-contrast -HighContrast -SkipLive
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
-        timeout-minutes: 3
         if: always()
         with:
-          name: setup-previews-${{ github.sha }}
-          path: setup-previews/
+          name: usbipd-native-receipts
+          path: usbipd-native-receipts/
           if-no-files-found: error
-          retention-days: 14
-      - name: Require complete preview receipts
+          retention-days: 7
+      - name: Require complete native usbipd receipts
         if: always()
-        timeout-minutes: 1
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  support:
+    name: Native support source fixture
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/test-preview-receipts.ps1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check integrated support sources
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run native support fixture
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: support-native-receipts
+          path: support-native-receipts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require complete native support receipts
+        if: always()
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
