@@ -84,6 +84,8 @@ def test_every_logged_setup_string_has_plain_window_wording(tmp_path):
 
 
 @pytest.mark.parametrize('message,wait,tone,headline', [
+    ('Windows display is not ready (WARN:COPY MODE).', False, 'error', 'Windows could not display the toolkit'),
+    ('Windows toolkit window could not be verified within 120 seconds.', False, 'error', 'The toolkit window could not open'),
     ('Downloading Ubuntu stalled: no bytes arrived for 120 seconds. Check your internet connection, then reopen the toolkit.', True, 'stall', 'The download seems stuck'),
     ('Unpacking the toolkit stalled: no completion after 300 seconds. Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', True, 'stall', 'Setup is taking longer than expected'),
     ('Opening the toolkit stalled: its window did not appear within 120 seconds. Close other WSL work, run wsl --shutdown, then reopen.', True, 'stall', 'The toolkit window did not appear'),

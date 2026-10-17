@@ -124,11 +124,12 @@ foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.Fu
 Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('e' * 40)
 Set-ToolkitStep 'Opening the toolkit'
 function Native { param($Arguments); return $Arguments[-1] }
+function Invoke-ToolkitNative { return [pscustomobject]@{ExitCode=0; Output=@('shared')} }
 $script:child = $null
 function Start-ToolkitProcess { param($FilePath,$ArgumentList); $script:child = [Diagnostics.Process]::Start((Get-Process -Id $PID).Path, '-NoProfile -Command "Start-Sleep 60"'); return $script:child }
 function Show-ToolkitSupportDialog { param($Message,[switch]$AllowWait); return $false }
 $failed = $false
-try { Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session -ReadyTimeoutSeconds 0.3 | Out-Null } catch { if ($_.Exception.Message -notmatch 'Opening the toolkit.*stalled') { throw }; $failed = $true }
+try { Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session -ReadyTimeoutSeconds 0.3 | Out-Null } catch { if ($_.Exception.Message -notmatch '^Windows toolkit window could not be verified within 0.3 seconds' -or -not $_.Exception.Data['ToolkitStall']) { throw }; $failed = $true }
 if (-not $failed -or -not $script:child.HasExited) { throw 'Never-ready GUI was not stopped' }
 Write-Output 'PASS GUI ready deadline'
 """.replace('BOOTSTRAP', str(ROOT / 'scripts/release/bootstrap.ps1'))
@@ -200,11 +201,14 @@ Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('e' * 40)
 Set-ToolkitStep 'Opening the toolkit'
 $script:ready=$null
 function Native { param($Arguments); $script:ready=$Arguments[-1]; return $script:ready }
+function Invoke-ToolkitNative { return [pscustomobject]@{ExitCode=0; Output=@('shared')} }
+$script:windowChecks=0
+function Get-ToolkitGuiWindowState { param($Token); $script:windowChecks++; return 'visible' }
 function Start-ToolkitProcess { param($FilePath,$ArgumentList); [IO.File]::WriteAllText($script:ready,'ready'); return [Diagnostics.Process]::Start((Get-Process -Id $PID).Path, '-NoProfile -Command "Start-Sleep -Milliseconds 900; exit 0"') }
 function Show-ToolkitSupportDialog { param($Message,[switch]$AllowWait); throw 'Ready GUI was incorrectly diagnosed as stalled' }
 $timer=[Diagnostics.Stopwatch]::StartNew()
 $code=Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session -ReadyTimeoutSeconds 0.2
-if ($code -ne 0 -or $timer.Elapsed.TotalSeconds -lt 0.8) { throw 'Normal toolkit lifetime was truncated' }
+if ($code -ne 0 -or $script:windowChecks -ne 1 -or $timer.Elapsed.TotalSeconds -lt 0.8) { throw 'Normal toolkit lifetime was truncated' }
 Write-Output 'PASS ready GUI lifetime'
 """.replace('BOOTSTRAP', str(ROOT / 'scripts/release/bootstrap.ps1'))
     result = run_ps(code, tmp_path)
@@ -219,6 +223,7 @@ foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.Fu
 Initialize-ToolkitLog -Root ([IO.Path]::GetTempPath()) -Build ('e' * 40)
 Set-ToolkitStep 'Opening the toolkit'
 function Native { param($Arguments); return $Arguments[-1] }
+function Invoke-ToolkitNative { return [pscustomobject]@{ExitCode=0; Output=@('shared')} }
 $script:realStart=[scriptblock]::Create((Get-Command Start-ToolkitProcess).Definition)
 function Start-ToolkitProcess { param($FilePath,$ArgumentList,[switch]$CaptureOutput); return (& $script:realStart -FilePath (Get-Process -Id $PID).Path -ArgumentList (ConvertTo-NativeArgumentLine @('-NoProfile','-Command','[Console]::Error.WriteLine("synthetic GUI stderr"); exit 7')) -CaptureOutput:$CaptureOutput) }
 $code=Invoke-WslGui -Name Ubuntu -User fixture -Target /target -Session /session
