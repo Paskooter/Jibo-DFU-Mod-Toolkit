@@ -15,7 +15,10 @@ param(
     [switch]$HighContrast,
     [string]$LauncherTextFile = '',
     [string]$Filter = '',
-    [switch]$SkipLive
+    [switch]$SkipLive,
+    [string]$Phase = '',
+    [switch]$TimeoutProbe,
+    [int]$PhaseTimeoutSeconds = 60
 )
 $ErrorActionPreference = 'Stop'
 
@@ -23,6 +26,12 @@ $ErrorActionPreference = 'Stop'
 # appended to the setup UI source, whose directives cover it).
 $script:ToolkitPreviewSource = @'
 public static class ToolkitPreview {
+    public static string ProgressPath, Phase;
+    public static void Trace(string message) {
+        string line = DateTime.UtcNow.ToString("o") + " " + Phase + " " + message;
+        Console.WriteLine(line); Console.Out.Flush();
+        if (!String.IsNullOrEmpty(ProgressPath)) System.IO.File.AppendAllText(ProgressPath, line + Environment.NewLine);
+    }
     public delegate void Saver(Control control, string name);
     public static readonly System.Collections.Generic.List<string> Written = new System.Collections.Generic.List<string>();
     public static readonly System.Collections.Generic.List<string> Problems = new System.Collections.Generic.List<string>();
@@ -127,6 +136,7 @@ public static class ToolkitPreview {
             foreach (var pair in SetupStates()) {
                 string name = prefix + pair.Key + "@" + (dpi * 100 / 96);
                 if (!Wanted(name, filter)) continue;
+                Trace("begin render " + name);
                 UseScreen(dpi);
                 using (var form = Host()) {
                     var view = new ToolkitSetupView();
@@ -136,10 +146,15 @@ public static class ToolkitPreview {
                     form.Controls.Add(view);
                     view.Show(pair.Value);
                     form.ClientSize = view.Size;
+                    Trace("begin Show " + name);
                     form.Show(); Pump();
+                    Trace("end Show; begin CheckBounds " + name);
                     CheckBounds(view, name);
+                    Trace("end CheckBounds; begin save " + name);
                     save(view, name);
+                    Trace("end save; begin Close " + name);
                     form.Close();
+                    Trace("end render " + name);
                 }
             }
         }
@@ -154,14 +169,18 @@ public static class ToolkitPreview {
                 string name = prefix + "dialog-" + key + "@" + (dpi * 100 / 96);
                 UseScreen(dpi);
                 if (Wanted(name, filter)) {
+                    Trace("begin support render " + name);
                     using (var form = Host()) {
                         var view = new ToolkitSupportView(text, DetailsFor(message), LogFolder, allowWait);
                         form.Controls.Add(view);
                         view.ApplyDpi(dpi);
                         view.CopyState = (string)d[3]; view.Relayout();
                         form.ClientSize = view.Size;
+                        Trace("begin Show " + name);
                         form.Show(); Pump();
+                        Trace("end Show; begin CheckBounds " + name);
                         CheckBounds(view, name);
+                        Trace("end CheckBounds; begin save " + name);
                         save(view, name);
                         form.Close();
                     }
@@ -283,7 +302,8 @@ public static class ToolkitPreviewWindows {
                 }
             } catch (Exception e) { result = "error: " + e.Message; }
         });
-        thread.SetApartmentState(System.Threading.ApartmentState.STA); thread.Start(); thread.Join(15000);
+        thread.IsBackground = true; thread.SetApartmentState(System.Threading.ApartmentState.STA); thread.Start();
+        if (!thread.Join(15000)) return "timeout";
         return result;
     }
     static Form[] OpenForms() {
@@ -323,110 +343,158 @@ public static class ToolkitPreviewWindows {
 }
 '@
 
+function Write-PreviewProgress([string]$Message) {
+    $line = [DateTime]::UtcNow.ToString('o') + " $Phase " + $Message
+    Write-Host $line
+    [Console]::Out.Flush()
+    [IO.File]::AppendAllText((Join-Path $OutDir 'progress.txt'), $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+}
+function Save-LiveCapture([IntPtr]$Handle, [string]$Key, [string]$Name) {
+    Write-PreviewProgress "begin write $Name"
+    $receipt.live[$Key] = [ToolkitPreviewWindows]::Capture($Handle, (Join-Path $OutDir $Name))
+    Write-PreviewProgress "end write $Name ($($receipt.live[$Key]))"
+    if ($receipt.live[$Key] -ne 'ok') { throw "Live capture $Key failed: $($receipt.live[$Key])" }
+}
 function Save-PreviewReceipt($Receipt, [string]$Path) {
+    Write-PreviewProgress "begin write $Path"
     [IO.File]::WriteAllText($Path, ($Receipt | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+    Write-PreviewProgress "end write $Path"
 }
 
 if ($env:OS -ne 'Windows_NT') { throw 'This renders with the Windows WinForms runtime. On Linux, use the Mono previews.' }
+if (-not $Phase) {
+    & (Join-Path $PSScriptRoot 'invoke-preview-phases.ps1') -OutDir $OutDir -HighContrast:$HighContrast -LauncherTextFile $LauncherTextFile -Filter $Filter -SkipLive:$SkipLive -TimeoutProbe:$TimeoutProbe -PhaseTimeoutSeconds $PhaseTimeoutSeconds
+    exit $LASTEXITCODE
+}
 if (-not [IO.Path]::IsPathRooted($OutDir)) { $OutDir = Join-Path (Get-Location) $OutDir }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-. (Join-Path $PSScriptRoot 'console.ps1')
 $receipt = [ordered]@{
-    windows = [Environment]::OSVersion.VersionString
-    powershell = $PSVersionTable.PSVersion.ToString()
-    clr = [Environment]::Version.ToString()
-    high_contrast_requested = [bool]$HighContrast
-    files = @(); problems = @(); live = [ordered]@{}; fallback = [ordered]@{}
+    files = @(); problems = @(); live = [ordered]@{}; fallback = [ordered]@{}; failed = $false
 }
-$receiptPath = Join-Path $OutDir 'receipt.json'
-$failed = $false
+$receiptPath = Join-Path $OutDir "$Phase.json"
+Write-PreviewProgress 'begin worker'
+if ($Phase -eq 'timeout-probe') { Write-PreviewProgress 'deliberately hanging'; Start-Sleep -Seconds 60; exit 2 }
+if ($Phase -eq 'success-probe') { Save-PreviewReceipt $receipt $receiptPath; exit 0 }
 try {
-    # Strict, like production: Add-Type treats compiler warnings as errors here.
+    Write-PreviewProgress 'begin source console.ps1'
+    . (Join-Path $PSScriptRoot 'console.ps1')
+    Write-PreviewProgress 'end source console.ps1; begin Add-Type'
     Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($script:ToolkitSetupUiSource + $script:ToolkitQuestionModelSource + $script:ToolkitPreviewSource + $script:ToolkitPreviewWindowsSource)
-    $receipt.dpi_awareness = 'per-monitor (thread), rendered at forced 96/144/192 DPI'
+    [ToolkitPreview]::ProgressPath = Join-Path $OutDir 'progress.txt'
+    [ToolkitPreview]::Phase = $Phase
+    Write-PreviewProgress 'end Add-Type; begin DPI awareness'
+    [ToolkitTheme]::UsePerMonitorDpi()
+    Write-PreviewProgress 'end DPI awareness'
     if ($HighContrast) {
+        Write-PreviewProgress 'begin enable Windows high contrast'
         $receipt.high_contrast_switched = [ToolkitPreviewWindows]::HighContrast($true)
         Start-Sleep -Seconds 3
         $receipt.high_contrast_active = [Windows.Forms.SystemInformation]::HighContrast
+        Write-PreviewProgress "end enable Windows high contrast: active=$($receipt.high_contrast_active)"
+        if (-not $receipt.high_contrast_switched -or -not $receipt.high_contrast_active) { throw 'Windows high contrast did not activate' }
     }
     $save = [ToolkitPreview+Saver]{
         param([Windows.Forms.Control]$Control, [string]$Name)
+        Write-PreviewProgress "begin DrawToBitmap $Name"
         $bitmap = New-Object Drawing.Bitmap $Control.Width, $Control.Height
         try {
             $Control.DrawToBitmap($bitmap, (New-Object Drawing.Rectangle 0, 0, $Control.Width, $Control.Height))
+            Write-PreviewProgress "end DrawToBitmap $Name; begin write $Name.png"
             $bitmap.Save((Join-Path $OutDir ($Name + '.png')), [Drawing.Imaging.ImageFormat]::Png)
+            Write-PreviewProgress "end write $Name.png"
         } finally { $bitmap.Dispose() }
         [ToolkitPreview]::Written.Add("$Name $($Control.Width)x$($Control.Height)")
     }
-    [ToolkitTheme]::UsePerMonitorDpi()
-    $dpis = if ($HighContrast) { [int[]]@(96) } else { [int[]]@(96, 144, 192) }
-    [ToolkitPreview]::RenderSetup($dpis, $Filter, '', $save)
-    [ToolkitPreview]::RenderSupport($dpis, $Filter, '', $save)
-    if (-not $HighContrast) { [ToolkitPreview]::RenderSimulatedHighContrast($Filter, $save) }
-
-    # The early fallbacks are Windows' own message box: render the exact texts.
-    $title = Get-ToolkitFallbackTitle
-    $setupText = Get-ToolkitFallbackText 'Opening the toolkit stalled: its window did not appear within 120 seconds. Close other WSL work, run wsl --shutdown, then reopen.'
-    $receipt.fallback.setup_window = [ToolkitPreviewWindows]::CaptureMessageBox($setupText, $title, (Join-Path $OutDir 'fallback-setup-window@100.png'))
-    if (-not $LauncherTextFile -and (Get-Command python -ErrorAction SilentlyContinue)) {
-        $LauncherTextFile = Join-Path $OutDir 'launcher-fallback.txt'
-        $code = "import importlib.util,sys; s=importlib.util.spec_from_file_location('l',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); open(sys.argv[2],'w',encoding='utf-8').write(m.error_dialog_text('Windows setup could not start or ended without a result (PowerShell exit 1). Restart Windows and reopen the toolkit; use Copy details if it happens again.', m.Path(sys.argv[3])))"
-        & python -c $code (Join-Path $PSScriptRoot 'windows_launcher.py') $LauncherTextFile 'C:\Users\Owner\AppData\Local\Jibo-DFU-Toolkit\logs\setup-20261016T194218.821Z-1a2b3c4d.log'
-        if ($LASTEXITCODE -ne 0) { $LauncherTextFile = '' }
-    }
-    if ($LauncherTextFile -and (Test-Path -LiteralPath $LauncherTextFile)) {
-        $launcherText = [IO.File]::ReadAllText($LauncherTextFile, [Text.Encoding]::UTF8)
-        $receipt.fallback.launcher = [ToolkitPreviewWindows]::CaptureMessageBox($launcherText, $title, (Join-Path $OutDir 'fallback-early-error@100.png'))
-    } else { $receipt.fallback.launcher = 'skipped: no Python to produce the launcher text' }
-    $receipt.clipboard = [ToolkitPreviewWindows]::ClipboardCheck([ToolkitPreview]::DetailsFor('Synthetic failure'))
-    if ($receipt.clipboard -ne 'ok') { $failed = $true }
-
-    # Real windows through the real controller, captured with their Windows frame.
-    if (-not $SkipLive -and -not $HighContrast) {
-        $prefix = 'live-'
+    Write-PreviewProgress "begin action $Phase"
+    if ($Phase -match '^setup-(96|144|192)$') {
+        [ToolkitPreview]::RenderSetup([int[]]@([int]$Matches[1]), $Filter, '', $save)
+    } elseif ($Phase -match '^support-(96|144|192)$') {
+        [ToolkitPreview]::RenderSupport([int[]]@([int]$Matches[1]), $Filter, '', $save)
+    } elseif ($Phase -eq 'simulated-hc') {
+        [ToolkitPreview]::RenderSimulatedHighContrast($Filter, $save)
+    } elseif ($Phase -eq 'fallback-setup') {
+        $text = Get-ToolkitFallbackText 'Opening the toolkit stalled: its window did not appear within 120 seconds. Close other WSL work, run wsl --shutdown, then reopen.'
+        $path = Join-Path $OutDir 'fallback-setup-window@100.png'
+        Write-PreviewProgress "begin write $path"
+        $receipt.fallback.setup_window = [ToolkitPreviewWindows]::CaptureMessageBox($text, (Get-ToolkitFallbackTitle), $path)
+        Write-PreviewProgress "end write $path ($($receipt.fallback.setup_window))"
+        if ($receipt.fallback.setup_window -ne 'ok') { throw 'Fallback setup capture failed' }
+    } elseif ($Phase -eq 'launcher-text') {
+        if (-not $LauncherTextFile) {
+            $LauncherTextFile = Join-Path $OutDir 'launcher-fallback.txt'
+            $code = "import importlib.util,sys; s=importlib.util.spec_from_file_location('l',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); open(sys.argv[2],'w',encoding='utf-8').write(m.error_dialog_text('Windows setup could not start or ended without a result (PowerShell exit 1). Restart Windows and reopen the toolkit; use Copy details if it happens again.', m.Path(sys.argv[3])))"
+            Write-PreviewProgress "begin write $LauncherTextFile"
+            & python -c $code (Join-Path $PSScriptRoot 'windows_launcher.py') $LauncherTextFile 'C:\Users\Owner\AppData\Local\Jibo-DFU-Toolkit\logs\setup-20261016T194218.821Z-1a2b3c4d.log'
+            if ($LASTEXITCODE -ne 0) { throw 'Launcher text generation failed' }
+            Write-PreviewProgress "end write $LauncherTextFile"
+        }
+    } elseif ($Phase -eq 'fallback-launcher') {
+        if (-not $LauncherTextFile) { $LauncherTextFile = Join-Path $OutDir 'launcher-fallback.txt' }
+        $text = [IO.File]::ReadAllText($LauncherTextFile, [Text.Encoding]::UTF8)
+        $path = Join-Path $OutDir 'fallback-early-error@100.png'
+        Write-PreviewProgress "begin write $path"
+        $receipt.fallback.launcher = [ToolkitPreviewWindows]::CaptureMessageBox($text, (Get-ToolkitFallbackTitle), $path)
+        Write-PreviewProgress "end write $path ($($receipt.fallback.launcher))"
+        if ($receipt.fallback.launcher -ne 'ok') { throw 'Fallback launcher capture failed' }
+    } elseif ($Phase -eq 'clipboard') {
+        $receipt.clipboard = [ToolkitPreviewWindows]::ClipboardCheck([ToolkitPreview]::DetailsFor('Synthetic failure'))
+        if ($receipt.clipboard -ne 'ok') { throw "Clipboard: $($receipt.clipboard)" }
+    } elseif ($Phase -eq 'live') {
+        Write-PreviewProgress 'begin live controller Start'
         [ToolkitSetupStatus]::Start()
+        Write-PreviewProgress 'end live controller Start'
         $owner = [ToolkitSetupStatus]::OwnerHandle
         [ToolkitSetupStatus]::Update('Downloading Ubuntu (117.0 of 344.0 MB)', 'Only received bytes count as progress. You will be warned if no bytes arrive.', 34)
         Start-Sleep -Milliseconds 600
-        $receipt.live.working = [ToolkitPreviewWindows]::Capture($owner, (Join-Path $OutDir "$($prefix)working-download@100.png"))
+        Save-LiveCapture $owner 'working' 'live-working-download@100.png'
         [ToolkitSetupStatus]::AskQuestion([ToolkitPreview]::Prompts[1])
         Start-Sleep -Milliseconds 900
-        $receipt.live.question = [ToolkitPreviewWindows]::Capture($owner, (Join-Path $OutDir "$($prefix)question-linux@100.png"))
+        Save-LiveCapture $owner 'question' 'live-question-linux@100.png'
         [ToolkitSetupStatus]::AnswerQuestion('closed')
         Start-Sleep -Milliseconds 400
-        $receipt.live.question_closed = [ToolkitPreviewWindows]::Capture($owner, (Join-Path $OutDir "$($prefix)question-closed@100.png"))
+        Save-LiveCapture $owner 'question_closed' 'live-question-closed@100.png'
         [ToolkitSetupStatus]::UserWait($true, [ToolkitPreview]::Waits[0])
         Start-Sleep -Milliseconds 600
-        $receipt.live.waiting = [ToolkitPreviewWindows]::Capture($owner, (Join-Path $OutDir "$($prefix)waiting-admin-prompt@100.png"))
+        Save-LiveCapture $owner 'waiting' 'live-waiting-admin-prompt@100.png'
         [ToolkitSetupStatus]::UserWait($false, '')
         $stall = [ToolkitPreview]::SupportStates()[0]
+        Write-PreviewProgress 'begin live stall dialog'
         [ToolkitPreviewWindows]::StartDetails($stall[1], [ToolkitPreview]::DetailsFor($stall[1]), [ToolkitPreview]::LogFolder, $true)
         $dialog = [IntPtr]::Zero
         for ($i = 0; $i -lt 50 -and $dialog -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $dialog = [ToolkitPreviewWindows]::SupportDialog() }
         Start-Sleep -Milliseconds 600
-        $receipt.live.stall_dialog = [ToolkitPreviewWindows]::Capture($dialog, (Join-Path $OutDir "$($prefix)dialog-stall-download@100.png"))
-        $receipt.live.behind_dialog = [ToolkitPreviewWindows]::Capture($owner, (Join-Path $OutDir "$($prefix)behind-stall-download@100.png"))
+        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@100.png'
+        Save-LiveCapture $owner 'behind_dialog' 'live-behind-stall-download@100.png'
         [ToolkitPreviewWindows]::CloseSupportDialogs()
         $receipt.live.stall_answer = [ToolkitPreviewWindows]::FinishDetails()
-        if ($receipt.live.stall_answer -ne 'stopped') { $failed = $true }
+        Write-PreviewProgress "end live stall dialog: $($receipt.live.stall_answer)"
+        if ($receipt.live.stall_answer -ne 'stopped') { throw 'Live stall dialog did not stop' }
+        Write-PreviewProgress 'begin live controller Stop'
         [ToolkitSetupStatus]::Stop()
-    }
+        Write-PreviewProgress 'end live controller Stop'
+    } else { throw "Unknown phase $Phase" }
+    Write-PreviewProgress "end action $Phase"
 } catch {
     $receipt.error = $_.Exception.ToString()
-    $failed = $true
+    $receipt.failed = $true
+    Write-PreviewProgress "error $($receipt.error)"
 } finally {
+    Write-PreviewProgress 'begin cleanup'
     if ('ToolkitPreviewWindows' -as [type]) { try { [ToolkitPreviewWindows]::CloseSupportDialogs() } catch { } }
     if ('ToolkitSetupStatus' -as [type]) { try { [ToolkitSetupStatus]::Stop() } catch { } }
-    if ($HighContrast) { try { $null = [ToolkitPreviewWindows]::HighContrast($false) } catch { } }
+    if ($HighContrast -and ('ToolkitPreviewWindows' -as [type])) {
+        Write-PreviewProgress 'begin restore Windows high contrast'
+        $receipt.high_contrast_restored = [ToolkitPreviewWindows]::HighContrast($false)
+        Write-PreviewProgress "end restore Windows high contrast: $($receipt.high_contrast_restored)"
+    }
+    Write-PreviewProgress 'end cleanup'
 }
 if ('ToolkitPreview' -as [type]) {
     $receipt.files = @([ToolkitPreview]::Written)
     $receipt.problems = @([ToolkitPreview]::Problems)
-    if ([ToolkitPreview]::Problems.Count) { $failed = $true }
+    if ([ToolkitPreview]::Problems.Count) { $receipt.failed = $true }
 }
 Save-PreviewReceipt $receipt $receiptPath
-Write-Output ("Rendered {0} previews into {1}; {2} layout problem(s)." -f $receipt.files.Count, $OutDir, $receipt.problems.Count)
-foreach ($problem in $receipt.problems) { Write-Output "PROBLEM $problem" }
-if ($receipt.error) { Write-Output $receipt.error }
-if ($failed) { exit 1 }
+Write-PreviewProgress "end worker: $($receipt.files.Count) previews, $($receipt.problems.Count) layout problems"
+if ($receipt.failed) { exit 1 }
 exit 0
