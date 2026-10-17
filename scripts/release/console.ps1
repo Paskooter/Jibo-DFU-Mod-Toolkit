@@ -1444,8 +1444,41 @@ public sealed class ToolkitSupportView : Panel {
         using (var pen = new Pen(ToolkitTheme.Border)) e.Graphics.DrawLine(pen, 0, Footer.Top - 1, Width, Footer.Top - 1);
     }
 }
+// Keep the reviewed view at its DPI size. On a smaller working area, native
+// scrollbars (also scrolled by keyboard focus) expose every action instead of
+// letting Windows silently clamp away the footer. No content or choices change.
+public class ToolkitViewportForm : Form {
+    Size fittedView;
+    Rectangle fittedArea;
+    int fittedDpi;
+    bool fitting;
+    protected void FitViewport(Control view) {
+        if (fitting) return;
+        fitting = true;
+        try {
+            var area = ToolkitTheme.WorkArea(this);
+            int dpi = IsHandleCreated ? ToolkitTheme.DpiOf(this) : 0;
+            if (fittedView != view.Size || fittedArea != area || fittedDpi != dpi) {
+                AutoScroll = false; AutoScrollMinSize = Size.Empty;
+                view.Location = Point.Empty;
+                int maxW = Math.Max(1, area.Width - (Width - ClientSize.Width));
+                int maxH = Math.Max(1, area.Height - (Height - ClientSize.Height));
+                bool vertical = view.Height > maxH;
+                bool horizontal = view.Width + (vertical ? SystemInformation.VerticalScrollBarWidth : 0) > maxW;
+                vertical = view.Height + (horizontal ? SystemInformation.HorizontalScrollBarHeight : 0) > maxH;
+                ClientSize = new Size(Math.Min(maxW, view.Width + (vertical ? SystemInformation.VerticalScrollBarWidth : 0)),
+                    Math.Min(maxH, view.Height + (horizontal ? SystemInformation.HorizontalScrollBarHeight : 0)));
+                AutoScrollMinSize = view.Size;
+                AutoScroll = true;
+                fittedView = view.Size; fittedArea = area; fittedDpi = dpi;
+            }
+            Location = new Point(Math.Min(Math.Max(area.Left, Left), Math.Max(area.Left, area.Right - Width)),
+                Math.Min(Math.Max(area.Top, Top), Math.Max(area.Top, area.Bottom - Height)));
+        } finally { fitting = false; }
+    }
+}
 // Window for the support view: owned by the setup window, topmost, sized to the view.
-public sealed class ToolkitSupportForm : Form {
+public sealed class ToolkitSupportForm : ToolkitViewportForm {
     public readonly ToolkitSupportView View;
     public ToolkitButton KeepWaiting { get { return View.KeepWaiting; } }
     public ToolkitButton CloseButton { get { return View.CloseButton; } }
@@ -1465,15 +1498,13 @@ public sealed class ToolkitSupportForm : Form {
         Fit();
     }
     void Fit() {
-        View.Location = Point.Empty;
-        if (ClientSize == View.Size) return;
-        ClientSize = View.Size;
-        if (ClientSize != View.Size) Size = new Size(Width + View.Width - ClientSize.Width, Height + View.Height - ClientSize.Height);
+        FitViewport(View);
     }
     protected override void OnLoad(EventArgs e) {
         View.ApplyDpi(ToolkitTheme.DpiOf(this));
         Fit();
         if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        Fit(); // Centering must not put a clamped window outside the working area.
         base.OnLoad(e);
         ActiveControl = View.Copy;
     }
@@ -1492,7 +1523,7 @@ public sealed class ToolkitSupportForm : Form {
 }
 // Window that hosts the setup view: keeps its size in step with the view, follows
 // monitor DPI changes, and repaints when Windows switches high contrast on or off.
-public sealed class ToolkitSetupForm : Form {
+public sealed class ToolkitSetupForm : ToolkitViewportForm {
     public readonly ToolkitSetupView View = new ToolkitSetupView();
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
     public ToolkitSetupForm() {
@@ -1508,23 +1539,16 @@ public sealed class ToolkitSetupForm : Form {
     // Client area exactly the view's size. Non-client size can differ per monitor DPI,
     // so measure the real client area and correct; never leave the work area.
     public void FitView() {
-        View.Location = Point.Empty;
         var area = ToolkitTheme.WorkArea(this);
         bool compact = View.Height + (Height - ClientSize.Height) > area.Height && !View.Compact;
         if (compact) { View.Compact = true; View.Restyle(); }
-        if (ClientSize == View.Size) return;
-        int centerX = Left + Width / 2, centerY = Top + Height / 2;
-        ClientSize = View.Size;
-        if (ClientSize != View.Size) Size = new Size(Width + View.Width - ClientSize.Width, Height + View.Height - ClientSize.Height);
-        if (!IsHandleCreated || !Visible) return;
-        int x = Math.Min(Math.Max(area.Left, centerX - Width / 2), Math.Max(area.Left, area.Right - Width));
-        int y = Math.Min(Math.Max(area.Top, centerY - Height / 2), Math.Max(area.Top, area.Bottom - Height));
-        Location = new Point(x, y);
+        FitViewport(View);
     }
     protected override void OnLoad(EventArgs e) {
         View.ApplyDpi(ToolkitTheme.DpiOf(this));
         FitView();
         if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        FitView();
         base.OnLoad(e);
     }
     protected override void WndProc(ref Message m) {
