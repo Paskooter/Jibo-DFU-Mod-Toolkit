@@ -8,6 +8,9 @@ if ($LASTEXITCODE -ne 1) { throw 'Injected timeout must fail the renderer' }
 $r = Get-Content -Raw (Join-Path $OutDir 'receipt.json') | ConvertFrom-Json
 if ($r.phases.'timeout-probe'.status -ne 'timeout') { throw 'Hung child was not recorded as timeout' }
 if ($r.phases.'success-probe'.status -ne 'ok') { throw 'A timeout prevented the next phase from running' }
+# The final CI gate must reject the failed receipt too; no false-green workflow.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-preview-receipts.ps1') -OutDir $OutDir -ControlReceipt
+if ($LASTEXITCODE -ne 1) { throw 'Receipt validation silently accepted an injected timeout' }
 if ($watch.Elapsed.TotalSeconds -gt 30) { throw 'Timeout control exceeded its bounded budget' }
 if (-not (Test-Path (Join-Path $OutDir 'progress.txt'))) { throw 'Missing incremental progress artifact' }
 Write-Host 'PASS preview harness: killed hung child, recorded timeout, continued to next phase'

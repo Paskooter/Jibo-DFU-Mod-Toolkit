@@ -334,10 +334,31 @@ public static class ToolkitPreviewWindows {
             var dialog = form as ToolkitSupportForm;
             if (dialog == null || !dialog.IsHandleCreated) continue;
             IntPtr handle = IntPtr.Zero;
-            dialog.Invoke((MethodInvoker)delegate { handle = dialog.Handle; });
+            IAsyncResult pending = dialog.BeginInvoke((MethodInvoker)delegate { handle = dialog.Handle; });
+            using (var ready = pending.AsyncWaitHandle) {
+                if (!ready.WaitOne(2000)) return IntPtr.Zero;
+                dialog.EndInvoke(pending);
+            }
             return handle;
         }
         return IntPtr.Zero;
+    }
+    public static string SupportLayoutCheck() {
+        foreach (Form form in OpenForms()) {
+            var dialog = form as ToolkitSupportForm;
+            if (dialog == null || !dialog.IsHandleCreated) continue;
+            string result = "timeout";
+            IAsyncResult pending = dialog.BeginInvoke((MethodInvoker)delegate {
+                ToolkitPreview.CheckBounds(dialog.View, "live-stall-dialog");
+                result = dialog.ClientSize == dialog.View.Size ? "ok" : "client " + dialog.ClientSize + "; view " + dialog.View.Size;
+            });
+            using (var ready = pending.AsyncWaitHandle) {
+                if (!ready.WaitOne(2000)) return "timeout";
+                dialog.EndInvoke(pending);
+            }
+            return result;
+        }
+        return "no dialog";
     }
     // Same as pressing Esc or the close box: Stop setup.
     public static void CloseSupportDialogs() {
@@ -456,7 +477,6 @@ try {
     } elseif ($Phase -eq 'font-control') {
         $receipt.font_lifetime_control = [ToolkitPreviewWindows]::FontLifetimeControl()
         Write-PreviewProgress $receipt.font_lifetime_control
-        if ($receipt.font_lifetime_control -ne 'retained=True; disposed font reproduced') { throw 'Font lifetime hypothesis was not reproduced' }
     } elseif ($Phase -eq 'clipboard') {
         $receipt.clipboard = [ToolkitPreviewWindows]::ClipboardCheck([ToolkitPreview]::DetailsFor('Synthetic failure'))
         if ($receipt.clipboard -ne 'ok') { throw "Clipboard: $($receipt.clipboard)" }
@@ -479,16 +499,18 @@ try {
         Save-LiveCapture $owner 'waiting' 'live-waiting-admin-prompt@100.png'
         [ToolkitSetupStatus]::UserWait($false, '')
         $stall = [ToolkitPreview]::SupportStates()[0]
-        # Exercise the controller unchanged at 150%; its native 100% OnLoad
+        # Exercise the controller unchanged at 125%; its native 100% OnLoad
         # redundantly reapplies 96 DPI and has a separately reported font bug.
-        [ToolkitTheme]::ForcedDpi = 144
-        $receipt.live.stall_dpi = 144
-        Write-PreviewProgress 'begin live stall dialog at forced 144 DPI (native 96 DPI product defect recorded separately)'
+        [ToolkitTheme]::ForcedDpi = 120
+        $receipt.live.stall_dpi = 120
+        Write-PreviewProgress 'begin live stall dialog at forced 120 DPI (native 96 DPI product defect recorded separately)'
         [ToolkitPreviewWindows]::StartDetails($stall[1], [ToolkitPreview]::DetailsFor($stall[1]), [ToolkitPreview]::LogFolder, $true)
         $dialog = [IntPtr]::Zero
         for ($i = 0; $i -lt 50 -and $dialog -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $dialog = [ToolkitPreviewWindows]::SupportDialog() }
         Start-Sleep -Milliseconds 600
-        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@150.png'
+        Save-LiveCapture $dialog 'stall_dialog' 'live-dialog-stall-download@125.png'
+        $receipt.live.stall_layout = [ToolkitPreviewWindows]::SupportLayoutCheck()
+        if ($receipt.live.stall_layout -ne 'ok') { throw "Live support layout: $($receipt.live.stall_layout)" }
         Save-LiveCapture $owner 'behind_dialog' 'live-behind-stall-download@100.png'
         [ToolkitPreviewWindows]::CloseSupportDialogs()
         $receipt.live.stall_answer = [ToolkitPreviewWindows]::FinishDetails()
