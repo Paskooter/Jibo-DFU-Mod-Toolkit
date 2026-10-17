@@ -292,20 +292,26 @@ public static class ToolkitPreviewWindows {
         if (!thread.Join(5000)) return "message box did not close";
         return result;
     }
-    // Observe the unchanged product same-DPI font lifetime without showing a window.
+    // Executable regression: run the real product OnLoad, without entering the
+    // invalid-font paint loop first. Every descendant must yield a real HFONT.
+    public static void AssertFonts(Control root, string test) {
+        try { IntPtr h = root.Font.ToHfont(); DeleteObject(h); }
+        catch (Exception e) { throw new InvalidOperationException(test + ": unusable " + root.GetType().Name + " font (" + root.Text + ")", e); }
+        foreach (Control child in root.Controls) AssertFonts(child, test);
+    }
     public static string FontLifetimeControl() {
-        using (var view = new ToolkitSupportView(ToolkitSetupText.Failure("Synthetic failure", false), "sample", "", false)) {
-            Font before = view.StepLine.Font;
-            view.ApplyDpi(96);
-            bool retained = Object.ReferenceEquals(before, view.StepLine.Font);
-            try {
-                IntPtr font = view.StepLine.Font.ToHfont();
-                DeleteObject(font);
-                return "retained=" + retained + "; font still usable";
-            } catch (ArgumentException) {
-                return "retained=" + retained + "; disposed font reproduced";
-            }
+        ToolkitTheme.ForcedDpi = 0; ToolkitTheme.ForcedWorkArea = Rectangle.Empty;
+        const string test = "Native100SupportOnLoadFontsRemainUsable";
+        ToolkitPreview.Trace("begin test " + test);
+        using (var form = new ToolkitSupportForm(ToolkitSetupText.Failure("Synthetic failure", false), "sample", "", false)) {
+            IntPtr handle = form.Handle;
+            int dpi = ToolkitTheme.DpiOf(form);
+            if (dpi != 96) throw new InvalidOperationException(test + ": requires native 96 DPI, got " + dpi);
+            typeof(ToolkitSupportForm).GetMethod("OnLoad", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).Invoke(form, new object[] { EventArgs.Empty });
+            AssertFonts(form, test);
+            ToolkitPreview.Trace("PASS " + test + "; forced=0; actual=" + dpi);
         }
+        return "ok";
     }
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
     // Real clipboard: Copy details puts exactly the summary text there and says Copied.
