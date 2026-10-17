@@ -426,7 +426,8 @@ try {
     Write-PreviewProgress 'begin source console.ps1'
     . (Join-Path $PSScriptRoot 'console.ps1')
     Write-PreviewProgress 'end source console.ps1; begin Add-Type'
-    Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($script:ToolkitSetupUiSource + $script:ToolkitQuestionModelSource + $script:ToolkitPreviewSource + $script:ToolkitPreviewWindowsSource)
+    $tests = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'test-setup-ui.cs'))
+    Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ($script:ToolkitSetupUiSource + $script:ToolkitQuestionModelSource + $script:ToolkitPreviewSource + $script:ToolkitPreviewWindowsSource + $tests)
     [ToolkitPreview]::ProgressPath = Join-Path $OutDir 'progress.txt'
     [ToolkitPreview]::Phase = $Phase
     Write-PreviewProgress 'end Add-Type; begin DPI awareness'
@@ -484,8 +485,10 @@ try {
         Write-PreviewProgress "end write $path ($($receipt.fallback.launcher))"
         if ($receipt.fallback.launcher -ne 'ok') { throw 'Fallback launcher capture failed' }
     } elseif ($Phase -eq 'font-control') {
-        $receipt.font_lifetime_control = [ToolkitPreviewWindows]::FontLifetimeControl()
+        $receipt.font_lifetime_control = [ToolkitUiTests]::FontLifetime()
         Write-PreviewProgress $receipt.font_lifetime_control
+    } elseif ($Phase -eq 'scaled-forms') {
+        $receipt.scaled_forms = [ToolkitUiTests]::ScaledForms($OutDir)
     } elseif ($Phase -eq 'clipboard') {
         $receipt.clipboard = [ToolkitPreviewWindows]::ClipboardCheck([ToolkitPreview]::DetailsFor('Synthetic failure'))
         if ($receipt.clipboard -ne 'ok') { throw "Clipboard: $($receipt.clipboard)" }

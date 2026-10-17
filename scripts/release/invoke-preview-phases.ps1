@@ -39,7 +39,7 @@ $receipt = [ordered]@{
 }
 $phases = if ($TimeoutProbe) { @('timeout-probe', 'success-probe') }
 elseif ($HighContrast) { @('setup-96', 'support-96', 'fallback-setup', 'launcher-text', 'fallback-launcher', 'clipboard','font-control') }
-else { @('setup-96','setup-144','setup-192','support-96','support-144','support-192','simulated-hc','fallback-setup','launcher-text','fallback-launcher','clipboard','font-control') }
+else { @('setup-96','setup-144','setup-192','support-96','support-144','support-192','simulated-hc','fallback-setup','launcher-text','fallback-launcher','clipboard','font-control','scaled-forms') }
 if (-not $TimeoutProbe -and -not $SkipLive -and -not $HighContrast) { $phases += 'live' }
 $failed = $false
 Save-Receipt
@@ -81,7 +81,7 @@ foreach ($phase in $phases) {
                 foreach ($key in @('live', 'fallback')) {
                     foreach ($p in $child.$key.PSObject.Properties) { $receipt[$key][$p.Name] = $p.Value }
                 }
-                foreach ($key in @('clipboard','font_lifetime_control','high_contrast_switched','high_contrast_active','high_contrast_restored')) {
+                foreach ($key in @('clipboard','font_lifetime_control','scaled_forms','high_contrast_switched','high_contrast_active','high_contrast_restored')) {
                     if ($child.PSObject.Properties.Name -contains $key) { $receipt[$key] = $child.$key }
                 }
                 if ($child.error) { $result.error = $child.error }
