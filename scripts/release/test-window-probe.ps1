@@ -45,27 +45,67 @@ if (-not $script:ToolkitWindowProbeSource) { throw 'Missing Windows startup prob
 Add-Type -TypeDefinition $script:ToolkitWindowProbeSource
 if ($env:OS -eq 'Windows_NT') {
     Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
+    # The nonresponding fixture runs in its own process, like the real WSLg
+    # window, and blocks its UI thread in kernel32 Sleep. A managed WaitOne on
+    # an STA thread still dispatches sent messages (WM_NULL, WM_GETTEXT), so an
+    # in-process "blocked" window answers the probe and proves nothing.
+    Add-Type -TypeDefinition @'
 using System;
-using System.Threading;
-using System.Windows.Forms;
-public static class ToolkitHungWindowFixture {
-    static readonly ManualResetEvent ready = new ManualResetEvent(false);
-    static readonly ManualResetEvent release = new ManualResetEvent(false);
-    static Thread thread;
-    public static void Start(string title) {
-        thread = new Thread(delegate() {
-            using (var form = new Form()) {
-                form.Text = title; form.Show(); Application.DoEvents();
-                ready.Set(); release.WaitOne();
-            }
-        });
-        thread.IsBackground = true; thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        if (!ready.WaitOne(5000)) throw new Exception("Fixture window did not start");
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ToolkitWindowFixtureNative {
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out Rect rect);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder text, int n);
+    public static string Title(IntPtr h) { var t = new StringBuilder(2048); GetWindowText(h, t, t.Capacity); return t.ToString(); }
+    public static bool Eligible(IntPtr h) {
+        Rect r;
+        return IsWindow(h) && IsWindowVisible(h) && !IsIconic(h) && GetClientRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top;
     }
-    public static void Stop() { release.Set(); if (!thread.Join(5000)) throw new Exception("Fixture thread survived"); }
 }
 '@
+    $fixtureChild=@'
+param([string]$Title,[string]$Mode,[string]$Ready)
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+# Signal and block in one native call path so no script code (and no pumping
+# managed wait) runs between publishing the handle and blocking the UI thread.
+Add-Type -TypeDefinition 'using System.IO; using System.Runtime.InteropServices; public static class ToolkitFixtureBlock { [DllImport("kernel32.dll")] static extern void Sleep(uint milliseconds); public static void SignalAndBlock(string ready, string text) { File.WriteAllText(ready + ".tmp", text); File.Move(ready + ".tmp", ready); Sleep(60000); } }'
+$form=New-Object Windows.Forms.Form
+$form.Text=$Title; $form.Show(); [Windows.Forms.Application]::DoEvents()
+$handle=[string]$form.Handle.ToInt64()
+if ($Mode -eq 'block') { [ToolkitFixtureBlock]::SignalAndBlock($Ready, $handle) }
+else { [IO.File]::WriteAllText("$Ready.tmp", $handle); [IO.File]::Move("$Ready.tmp", $Ready); [Windows.Forms.Application]::Run($form) }
+'@
+    $fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('toolkit-window-fixture-' + [guid]::NewGuid().ToString('N'))
+    $null=New-Item -ItemType Directory -Path $fixtureRoot
+    $fixtureScript=Join-Path $fixtureRoot 'window.ps1'
+    [IO.File]::WriteAllText($fixtureScript, $fixtureChild)
+    function Invoke-WindowFixtureProcess([string]$Title, [string]$Mode, [scriptblock]$Check) {
+        $ready=Join-Path $fixtureRoot "$Mode.ready"
+        $psi=New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $psi.Arguments=('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Title "{1}" -Mode {2} -Ready "{3}"' -f $fixtureScript,$Title,$Mode,$ready)
+        $psi.UseShellExecute=$false
+        $child=[Diagnostics.Process]::Start($psi)
+        try {
+            $wait=[Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $ready)) {
+                if ($child.HasExited) { throw "Fixture window process exited early ($($child.ExitCode))" }
+                if ($wait.Elapsed.TotalSeconds -gt 60) { throw 'Fixture window process did not start' }
+                Start-Sleep -Milliseconds 20
+            }
+            $handle=[IntPtr][long][IO.File]::ReadAllText($ready)
+            & $Check $handle
+        } finally {
+            if (-not $child.HasExited) { $child.Kill() }
+            if (-not $child.WaitForExit(5000)) { throw 'Fixture window process survived' }
+        }
+    }
     $form=New-Object Windows.Forms.Form
     $token='fixture-' + [guid]::NewGuid().ToString('N')
     try {
@@ -83,10 +123,27 @@ public static class ToolkitHungWindowFixture {
         if ([ToolkitWindowProbe]::State($token) -eq 'visible') { throw 'Minimized window admitted' }
     } finally { $form.Dispose() }
     try {
-        [ToolkitHungWindowFixture]::Start("Jibo DFU Toolkit (build aaaaaaa) [startup $token] (Ubuntu)")
-        $timer=[Diagnostics.Stopwatch]::StartNew()
-        if ([ToolkitWindowProbe]::State($token) -eq 'visible') { throw 'Nonresponding window admitted' }
-        if ($timer.Elapsed.TotalSeconds -gt 1.5) { throw 'Hung window probe was not bounded' }
-    } finally { [ToolkitHungWindowFixture]::Stop() }
+        $title="Jibo DFU Toolkit (build aaaaaaa) [startup $token] (Ubuntu)"
+        # Positive control through the same separate-process harness.
+        Invoke-WindowFixtureProcess $title 'pump' {
+            param($handle)
+            $state=[ToolkitWindowProbe]::State($token)
+            if ($state -ne 'visible') { throw "Responsive separate-process window refused ($state)" }
+        }
+        Invoke-WindowFixtureProcess $title 'block' {
+            param($handle)
+            $timer=[Diagnostics.Stopwatch]::StartNew()
+            $state=[ToolkitWindowProbe]::State($token)
+            $elapsed=$timer.ElapsedMilliseconds
+            if ($state -eq 'visible') { throw "Nonresponding window admitted after $elapsed ms" }
+            if ($timer.Elapsed.TotalSeconds -gt 1.5) { throw "Hung window probe was not bounded ($elapsed ms)" }
+            # Refused for the intended reason only: the window was a visible,
+            # sized, non-minimized match that failed the WM_NULL check.
+            if ($state -ne 'missing') { throw "Nonresponding window gave unexpected state $state" }
+            if ([ToolkitWindowFixtureNative]::Title($handle) -ne $title) { throw 'Nonresponding fixture title did not match' }
+            if (-not [ToolkitWindowFixtureNative]::Eligible($handle)) { throw 'Nonresponding fixture was not a visible, sized window' }
+            if ($elapsed -lt 150 -and -not [ToolkitWindowFixtureNative]::IsHungAppWindow($handle)) { throw "Nonresponding window refused without a responsiveness timeout ($elapsed ms)" }
+        }
+    } finally { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
     'PASS native Windows display probe (visible, hidden, unrelated, copy, minimized, nonresponding)'
 } else { 'PASS display probe compiled (Win32 not executed)' }
