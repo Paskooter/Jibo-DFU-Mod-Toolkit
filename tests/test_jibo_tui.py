@@ -117,25 +117,25 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertNotIn("backup-var-shofel", items)
         self.assertNotIn("verify-bundle", items)
         self.assertTrue(items["more-tools"].enabled)
-        self.assertFalse(items["backup-var"].enabled)
-        self.assertFalse(items["set-mode"].enabled)
+        self.assertFalse({i.key: i for i in jibo_tui._backup_menu_options(rcm)}["backup-var"].enabled)
+        self.assertFalse(items["set-mode-wifi"].enabled)
         self.assertTrue(items["more-tools"].enabled)
-        self.assertIn("Enter DFU", items["backup-var"].reason)
+        self.assertIn("Enter DFU", {i.key: i for i in jibo_tui._backup_menu_options(rcm)}["backup-var"].reason)
 
         no_marker = jibo_tui.inspect_readiness(
             fake_api([{"port": "1-1", "state": "dfu"}], marker=False))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_marker)}
         self.assertFalse(items["enter-dfu-shofel"].enabled)
         self.assertTrue(items["more-tools"].enabled)
-        self.assertFalse(items["backup-var"].enabled)
+        self.assertFalse({i.key: i for i in jibo_tui._backup_menu_options(no_marker)}["backup-var"].enabled)
 
         no_var = jibo_tui.inspect_readiness(fake_api(
             [{"port": "1-1", "state": "dfu"}], alts=["jibo-dfu-v1", "rootfsA"]))
         items = {item.key: item for item in jibo_tui.build_menu_items(no_var)}
         self.assertEqual(no_var.state, "dfu-profile-incomplete")
         self.assertTrue(items["more-tools"].enabled)
-        self.assertFalse(items["backup-var"].enabled)
-        self.assertIn("var", items["backup-var"].reason)
+        self.assertFalse({i.key: i for i in jibo_tui._backup_menu_options(no_var)}["backup-var"].enabled)
+        self.assertIn("var", {i.key: i for i in jibo_tui._backup_menu_options(no_var)}["backup-var"].reason)
 
     def test_dfu_gpt_probe_is_enabled_only_with_ready_loader(self):
         ready = jibo_tui.inspect_readiness(fake_api(
@@ -207,11 +207,11 @@ class TuiReadinessTests(unittest.TestCase):
     def test_enabled_item_is_returned_for_dispatch(self):
         api = fake_api([{"port": "1-1", "state": "dfu"}])
         app = jibo_tui.TerminalMenu(api)
-        screen = FakeScreen([curses.KEY_DOWN] * 5 + [
+        screen = FakeScreen([curses.KEY_DOWN] * 3 + [
                              curses.KEY_ENTER])
         with patch.object(curses, "curs_set", return_value=None):
             app.session(screen)
-        self.assertEqual(app.command, "backup-var")
+        self.assertEqual(app.command, "backups")
 
     def test_idle_usb_transition_rebuilds_enabled_actions(self):
         snapshots = [
@@ -230,7 +230,7 @@ class TuiReadinessTests(unittest.TestCase):
         self.assertEqual(screen.timeout_ms, 1500)
         self.assertEqual(app.readiness.state, "dfu-ready")
         self.assertTrue(app.items[1].enabled)
-        self.assertEqual(app.command, "set-mode")
+        self.assertEqual(app.command, "set-mode-wifi")
 
     def test_enter_rechecks_usb_and_blocks_disconnected_action(self):
         snapshots = [

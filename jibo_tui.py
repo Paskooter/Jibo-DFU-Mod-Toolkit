@@ -6,7 +6,9 @@ not import jibo_dfu, which keeps the CLI and the terminal interface acyclic.
 
 import curses
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import queue
 import re
@@ -43,6 +45,17 @@ class MenuItem:
 
 FILE_LEVEL_VAR_ALTS = frozenset(("jibo-file-v1", "jibo-file-var-in",
                                  "jibo-file-var-out"))
+
+
+@dataclass(frozen=True)
+class BackupItem(MenuItem):
+    """One saved backup in a list; the parts let a window lay the row out in columns."""
+    robot: str = ""
+    saved: str = ""
+    partitions: str = ""
+    size: str = ""
+    state: str = ""          # complete, missing-files, incomplete or unreadable
+    this_robot: bool = False
 
 
 def _can_edit_var_files(readiness):
@@ -141,6 +154,23 @@ def status_lines(readiness):
             "DFU is not the same as RCM/APX. Restart into RCM/APX, then load the matching recovery.")
 
 
+def _connection_reason(readiness):
+    """Why robot actions are unavailable in this USB state ('' when DFU is ready)."""
+    if readiness.state == "none":
+        return "Connect the robot and enter RCM/APX first."
+    if readiness.state == "multiple":
+        return "Connect one robot at a time."
+    if readiness.state == "rcm":
+        return "Enter DFU from RCM/APX first."
+    if readiness.state == "dfu-error":
+        return "DFU was detected, but its Jibo loader could not be checked."
+    if readiness.state == "dfu-profile-incomplete":
+        return readiness.detail or "The Jibo recovery loader does not expose var."
+    if readiness.state == "dfu-no-marker":
+        return "The Jibo recovery loader marker is missing."
+    return ""
+
+
 def build_menu_items(readiness, update_packages=(), hosted_available=False):
     """Build actions with disabled reasons instead of hiding their requirements.
 
@@ -150,27 +180,7 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
     """
     is_rcm = readiness.state == "rcm"
     is_dfu = readiness.state == "dfu-ready"
-    if readiness.state == "none":
-        connection_reason = "Connect the robot and enter RCM/APX first."
-        dfu_reason = connection_reason
-    elif readiness.state == "multiple":
-        connection_reason = "Connect one robot at a time."
-        dfu_reason = connection_reason
-    elif readiness.state == "rcm":
-        connection_reason = "Enter DFU from RCM/APX first."
-        dfu_reason = connection_reason
-    elif readiness.state == "dfu-error":
-        connection_reason = "DFU was detected, but its Jibo loader could not be checked."
-        dfu_reason = "Restart into RCM/APX before entering DFU again."
-    elif readiness.state == "dfu-profile-incomplete":
-        connection_reason = readiness.detail or "The Jibo recovery loader does not expose var."
-        dfu_reason = "The robot is already in DFU."
-    elif readiness.state == "dfu-no-marker":
-        connection_reason = "The Jibo recovery loader marker is missing."
-        dfu_reason = "The robot is already in DFU; enter RCM/APX before loading recovery again."
-    else:
-        connection_reason = ""
-        dfu_reason = "The robot is already in DFU."
+    connection_reason = _connection_reason(readiness)
 
     if readiness.state == "rcm":
         shofel_dfu_reason = ("" if readiness.shofel_dfu_available else
@@ -205,25 +215,26 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
         update_reason = "No packages found in ./updates."
     else:
         update_reason = ""
+    quick = " (quick edit)" if _can_edit_var_files(readiness) else ""
+    # Owner order: enter DFU, then the combined setup, then installing an image.
+    # The separate mode and Wi-Fi edits live in More tools; var backups in Backups.
     items = [
         MenuItem("enter-dfu-shofel", "Enter DFU with ShofEL (RAM loader)",
                  is_rcm and readiness.shofel_dfu_available, shofel_dfu_reason),
-        MenuItem("set-mode", "Set robot mode" + (" (quick edit)" if _can_edit_var_files(readiness)
-                                               else ""), is_dfu, connection_reason),
-        MenuItem("configure-wifi", "Add or update a Wi-Fi network" +
-                 (" (quick edit)" if _can_edit_var_files(readiness) else ""),
-                 is_dfu, connection_reason),
-        MenuItem("set-mode-wifi", "Set mode and configure Wi-Fi" +
-                 (" (quick edit)" if _can_edit_var_files(readiness) else ""),
+        MenuItem("set-mode-wifi", "Set mode and configure Wi-Fi" + quick,
                  is_dfu, connection_reason),
         MenuItem("flash-update", UPDATE_ACTION_LABEL if hosted_available else
                  "Install an official update package",
                  is_dfu and not missing_update and (bool(packages) or hosted_available),
                  update_reason),
-        MenuItem("backup-var", "Save or check a var backup", is_dfu, connection_reason),
+        MenuItem("backups", BACKUPS_MENU_LABEL),
+        MenuItem("more-tools", MORE_TOOLS_LABEL),
     ]
-    items.append(MenuItem("more-tools", "More tools and local images"))
     return tuple(items)
+
+
+BACKUPS_MENU_LABEL = "Backups"
+MORE_TOOLS_LABEL = "More tools and local images"
 
 
 UPDATE_ACTION_LABEL = "Install a Phoenix image or an official update"
@@ -787,13 +798,14 @@ def select_option(title, options, prompt="", detail="", cancel_label="Cancel", i
         screen, title, options, prompt, detail, initial, cancel_label))
 
 
-def _multi_select_session(screen, title, options, initial=()):
+def _multi_select_session(screen, title, options, initial=(), detail=""):
     _start_screen(screen)
     items = _normalise_options(options)
-    chosen = set(initial)
+    allowed = {item.key for item in items if item.enabled}
+    chosen = set(initial) & allowed
     selected = 0
     while True:
-        row, height, width = _screen_heading(screen, title)
+        row, height, width = _screen_heading(screen, title, detail)
         row += 1
         dim = getattr(curses, "A_DIM", 0)
         reverse = getattr(curses, "A_REVERSE", 0)
@@ -804,9 +816,11 @@ def _multi_select_session(screen, title, options, initial=()):
             if index == len(items):
                 label = "Continue with {} selected".format(len(chosen))
             else:
-                label = "[{}] {}".format("x" if items[index].key in chosen else " ",
+                label = "[{}] {}".format("x" if items[index].key in chosen else
+                                         " " if items[index].enabled else "-",
                                          items[index].label)
-            attr = reverse if index == selected else 0
+            attr = reverse if index == selected else (0 if index == len(items) or
+                                                      items[index].enabled else dim)
             _addstr(screen, row + index - start, 0,
                     ("> " if index == selected else "  ") + label, attr)
         _addstr(screen, height - 2, 0, "Space/Enter Toggle   A Select all   N Clear", dim)
@@ -821,14 +835,14 @@ def _multi_select_session(screen, title, options, initial=()):
         elif key in (curses.KEY_DOWN, ord("j")):
             selected = (selected + 1) % rows
         elif key in (ord("a"), ord("A")):
-            chosen = {item.key for item in items}
+            chosen = set(allowed)
         elif key in (ord("n"), ord("N")):
             chosen.clear()
         elif key in (ord(" "), curses.KEY_ENTER, 10, 13):
             if selected == len(items):
                 if chosen:
                     return tuple(item.key for item in items if item.key in chosen)
-            else:
+            elif items[selected].enabled:
                 key_name = items[selected].key
                 if key_name in chosen:
                     chosen.remove(key_name)
@@ -836,11 +850,12 @@ def _multi_select_session(screen, title, options, initial=()):
                     chosen.add(key_name)
 
 
-def select_multiple_options(title, options, initial=()):
+def select_multiple_options(title, options, initial=(), detail=""):
     """Use the same arrow-key menu style for a partition checklist."""
     if not _terminal_available():
         return None
-    return curses.wrapper(lambda screen: _multi_select_session(screen, title, options, initial))
+    return curses.wrapper(lambda screen: _multi_select_session(
+        screen, title, options, initial, detail))
 
 
 def _read_key(screen):
@@ -999,6 +1014,8 @@ def _result_summary(action, result):
         lines = ["Var backup is ready."]
         if result.get("image"):
             lines.append("Saved at: " + result["image"])
+    elif action == "backups":
+        return _backups_summary(result)
     elif result.get("partitions") and result.get("manifest"):
         names = [entry.get("name", "?") if isinstance(entry, dict) else str(entry)
                  for entry in result["partitions"]]
@@ -1032,6 +1049,45 @@ def _result_summary(action, result):
         if result.get("calibration_sharing_detail"):
             lines.extend(result["calibration_sharing_detail"].splitlines())
     return lines
+
+
+def _partition_list(result):
+    return [entry.get("name", "?") if isinstance(entry, dict) else str(entry)
+            for entry in result.get("partitions") or ()]
+
+
+def _backups_summary(result):
+    """Outcome lines for every action in the Backups menu."""
+    status = result.get("status")
+    if result.get("image") and "partitions" not in result:
+        lines = ["Var backup is ready.", "Saved at: " + str(result["image"])]
+        if calibration_service.CALIBRATION_SHARING_AVAILABLE and \
+                result.get("calibration_sharing") is not None:
+            lines.append("Local backup: verified")
+            lines.append("Calibration sharing: " + result["calibration_sharing"])
+            if result.get("calibration_sharing_detail"):
+                lines.extend(result["calibration_sharing_detail"].splitlines())
+        return lines
+    if status == "backup complete" and result.get("manifest"):
+        lines = ["Backup saved for {}.".format(result.get("robot_label") or "this Jibo"),
+                 "Partitions: " + ", ".join(_partition_list(result)),
+                 "Folder: " + str(Path(result["manifest"]).parent)]
+        if result.get("robot_label") and not result.get("robot_name"):
+            lines.append("Jibo's name was not found, so the folder uses a short USB tag.")
+        return lines
+    if status == "verified" and result.get("partitions"):
+        lines = ["Restored and checked: " + ", ".join(_partition_list(result)) + "."]
+        if result.get("manifest"):
+            lines.append("Restore record: " + str(result["manifest"]))
+        return lines
+    if status == "deleted":
+        return ["Deleted the backup of {} saved {}.".format(
+                    result.get("robot_label") or "this Jibo",
+                    backup_time_label(result.get("created_utc"))),
+                "It was removed from this computer. The robot was not changed."]
+    if status == "cancelled":
+        return [result.get("message", "No change was made.")]
+    return _screen_lines(result)
 
 
 def _message_session(screen, title, lines, wait=True):
@@ -1226,7 +1282,10 @@ def _action_hint(key):
         "write-var": "Select an edited image; review and confirm before writing.",
         "inspect-backup": "Read mode and Wi-Fi presence from a local image without showing credentials.",
         "edit-backup": "Create an edited copy of a local image. The source image is kept unchanged.",
-        "more-tools": "Partition checks, edited images, and local backup tools.",
+        "backups": "Back up every partition or chosen ones, restore, and see saved backups. "
+                   "Backups stay on this computer.",
+        "more-tools": "Set mode or Wi-Fi on their own, check the partition layout, and edit "
+                      "local var images.",
         "backup-partitions": "Select GPT partitions to save. Existing verified copies are reused.",
         "restore-partitions": "Select partitions from a backup set and verify every write by readback.",
     }
@@ -1274,6 +1333,10 @@ def _confirmation_details(plan, introduction):
     for key, label in fields:
         if plan.get(key) is not None:
             lines.append("{}: {}".format(label, plan[key]))
+    if plan.get("backup_robot"):
+        lines.append("Backup of: " + str(plan["backup_robot"]))
+    if plan.get("backup_created_utc"):
+        lines.append("Backup saved: " + backup_time_label(plan["backup_created_utc"]))
     partitions = plan.get("partitions")
     if partitions:
         lines.append("Partitions:")
@@ -1348,6 +1411,390 @@ def _run_update(api, port=None):
         return {"status": "cancelled", "message": "No package selected."}
     package = packages[int(package_key)]
     return _run_local_update(api, package, port, phoenix_marked=looks_like_phoenix_package(package))
+
+
+# -- Backups menu ----------------------------------------------------------------
+
+# Planning estimates only, not deadlines or measured hardware guarantees.
+# USB speed varies; reads may be slower, and restores also read back each write.
+ESTIMATE_READ_BYTES_PER_SECOND = 4 * 1024 * 1024
+ESTIMATE_RESTORE_FACTOR = 3
+BACKUPS_TITLE = "Backups"
+SAVED_BACKUPS_TITLE = "Saved backups"
+RESTORE_REVIEW_INTRO = ("These partitions on the connected Jibo will be replaced with this backup. "
+                        "Each one is read back and checked after writing.")
+OTHER_FOLDER_KEY = "other-folder"
+BACKUP_DETAIL_KEYS = ("restore", "open-folder", "check-files", "delete")
+_STATE_TEXT = {"complete": "Ready to restore", "missing-files": "Files missing",
+               "incomplete": "Not finished", "unreadable": "Cannot be read"}
+
+
+@dataclass(frozen=True)
+class PartitionItem(MenuItem):
+    """A checklist row that carries its size, so a window can total the selection."""
+    size_bytes: int = 0
+
+
+def size_label(value):
+    """'524 MB' below one gigabyte, else '1.0 GB' (decimal units, like file browsers)."""
+    value = max(0, value or 0)
+    if value < 1e9:
+        return "{} MB".format(int(round(value / 1e6)))
+    return "{:.1f} GB".format(value / 1e9)
+
+
+def estimate_minutes(size_bytes, factor=1):
+    """Rough planning minutes for moving size_bytes over USB."""
+    seconds = (size_bytes or 0) * factor / ESTIMATE_READ_BYTES_PER_SECOND
+    return max(1, int(math.ceil(seconds / 60.0)))
+
+
+def estimate_text(size_bytes, factor=1):
+    """'about 3 minutes', 'about 1 hour 10 min'."""
+    minutes = estimate_minutes(size_bytes, factor)
+    if minutes < 60:
+        return "about {} minute{}".format(minutes, "" if minutes == 1 else "s")
+    hours, rest = divmod(minutes, 60)
+    text = "about {} hour{}".format(hours, "" if hours == 1 else "s")
+    return text + (" {} min".format(rest) if rest else "")
+
+
+def selection_summary(count, size_bytes):
+    """Count and actual selected bytes for a partition checklist."""
+    if not count:
+        return "Nothing selected"
+    return "{} selected \u00b7 {}".format(count, size_label(size_bytes))
+
+
+def backup_time_label(created_utc):
+    """'Oct 17, 2026 14:05 UTC' from the saved ISO time, or 'Unknown date'."""
+    try:
+        moment = datetime.strptime(str(created_utc), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return "Unknown date"
+    return moment.strftime("%b ") + str(moment.day) + moment.strftime(", %Y %H:%M UTC")
+
+
+def _partition_names(entry, limit=4):
+    names = [item["name"] for item in entry["partitions"]]
+    if entry.get("every_partition") and len(names) > limit:
+        return "All {} partitions".format(len(names))
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + " +{} more".format(len(names) - limit)
+    return ", ".join(names) or "No partitions"
+
+
+def saved_backup_items(entries, current_tag=None):
+    """Rows for a saved-backups list: robot, date, partitions, size and status."""
+    items = []
+    for index, entry in enumerate(entries):
+        this_robot = bool(current_tag) and entry.get("device_tag") == current_tag
+        state = _STATE_TEXT.get(entry["state"], "Cannot be read")
+        saved = backup_time_label(entry["created_utc"])
+        partitions = _partition_names(entry)
+        size = size_label(entry["total_bytes"])
+        items.append(BackupItem(
+            "set:%d" % index, "{}{} \u2014 {}".format(
+                entry["robot_label"], " (connected)" if this_robot else "", saved),
+            entry["state"] != "unreadable",
+            "{} \u00b7 {} \u00b7 {}".format(partitions, size, state),
+            robot=entry["robot_label"], saved=saved, partitions=partitions, size=size,
+            state=entry["state"], this_robot=this_robot))
+    return tuple(items)
+
+
+def backup_detail_lines(entry, current_tag=None, identified=True):
+    """Plain details for one saved backup. The raw USB identity is never shown."""
+    lines = ["Robot: " + entry["robot_label"]]
+    if entry.get("robot_name") is None:
+        lines.append("Name: not found in this backup, so it is labelled by a short USB tag.")
+    lines += ["Saved: " + backup_time_label(entry["created_utc"]),
+              "Status: " + _STATE_TEXT.get(entry["state"], "Cannot be read")]
+    if current_tag:
+        lines.append("Connected Jibo: " + ("this backup's robot" if entry.get("device_tag") ==
+                                           current_tag else "a different robot"))
+    elif not identified:
+        lines.append("Connected Jibo: could not be identified")
+    lines.append("Size: " + size_label(entry["total_bytes"]))
+    lines.append("Partitions:")
+    for item in entry["partitions"]:
+        lines.append("  {}  {}{}".format(item["name"], size_label(item["size_bytes"]),
+                                         "" if item["present"] else "  (file missing)"))
+    lines.append("Folder: " + entry["folder"])
+    return lines
+
+
+def _connected_robot(api, readiness):
+    """``(tag, identified)``: the connected robot's USB identity tag, read-only.
+
+    ``identified`` is False only when DFU is ready but the robot could not be read.
+    """
+    if readiness.state != "dfu-ready":
+        return None, True
+    try:
+        _port, tag, _available = api.available_backup_partitions(port=readiness.port)
+    except Exception:
+        return None, False
+    return tag, bool(tag)
+
+
+def _backup_menu_options(readiness):
+    reason = _connection_reason(readiness)
+    ready = readiness.state == "dfu-ready"
+    return (
+        MenuItem("backup-all", "Back up every partition", ready,
+                 reason or "Reads every partition this robot shares over USB into one new "
+                           "backup on this computer."),
+        MenuItem("backup-choose", "Back up specific partitions", ready,
+                 reason or "Choose the partitions to save. Sizes and time estimates are shown."),
+        MenuItem("restore-backup", "Restore partitions", ready,
+                 reason or "Pick a saved backup of this Jibo and the partitions to put back. "
+                           "You review everything before anything is written."),
+        MenuItem("saved-backups", SAVED_BACKUPS_TITLE,
+                 reason="Every backup on this computer: robot, date, partitions and size."),
+        MenuItem("backup-var", "Save or check a var backup", ready,
+                 reason or "Reads the var partition (524 MB) and keeps one checked copy. "
+                           "An earlier verified copy of this robot is reused."),
+    )
+
+
+def _run_backup_set(api, readiness, selected, available, title):
+    """Show what will be read, then read it into one new named backup."""
+    total = sum(available[name]["size_bytes"] for name in selected)
+    lines = ["{} partition{}: {}".format(len(selected), "" if len(selected) == 1 else "s",
+                                         ", ".join(selected)),
+             "Size: {} \u00b7 {}".format(size_label(total), estimate_text(total))]
+    try:
+        free = api.backup_free_bytes()
+    except Exception:
+        free = None
+    if free is not None:
+        if free < total + 1024 ** 3:
+            return {"status": "cancelled",
+                    "message": "Not enough free space for this backup. It needs {} and this "
+                               "computer has {} free. Nothing was read from the robot.".format(
+                                   size_label(total + 1024 ** 3), size_label(free))}
+        lines.append("Free space on this computer: " + size_label(free))
+    lines += ["Saved in: {} (a folder named after this Jibo)".format(
+                  getattr(api, "BACKUP_ROOT", "Jibo-Backups")),
+              "This only reads from the robot. Keep the USB cable connected until it finishes."]
+    choice = select_option(title, (MenuItem("start", "Start backup", tone="recommended"),),
+                           prompt="Start the backup?", detail="\n".join(lines), initial="start")
+    if choice != "start":
+        return {"status": "cancelled", "message": "No backup was started."}
+    return api.backup_partitions(tuple(selected), port=readiness.port)
+
+
+def partition_checklist(available):
+    """Checklist rows: partition name, size and a rough read time."""
+    return tuple(PartitionItem(name, "{}  \u2014  {}".format(name, size_label(extent["size_bytes"])),
+                               reason="{} to read; USB speed varies.".format(
+                                   estimate_text(extent["size_bytes"]).capitalize()),
+                               size_bytes=extent["size_bytes"])
+                 for name, extent in available.items())
+
+
+def _choose_partitions_to_back_up(api, readiness):
+    _, _, available = api.available_backup_partitions(port=readiness.port)
+    if not available:
+        raise RuntimeError("This DFU loader exposes no complete partitions for backup.")
+    selected = select_multiple_options(
+        "Back up specific partitions", partition_checklist(available),
+        initial=("var",) if "var" in available else (),
+        detail="These are the partitions this robot shares over USB. Times are rough "
+               "estimates, not time limits; USB speed varies.")
+    if selected is None:
+        return {"status": "cancelled", "message": "No backup was started."}
+    return _run_backup_set(api, readiness, selected, available, "Back up specific partitions")
+
+
+def _restore_from_entry(api, readiness, entry):
+    """Choose partitions from one saved backup; the backend checks, reviews and writes."""
+    choices = tuple(PartitionItem(
+        item["name"], "{}  \u2014  {}".format(item["name"], size_label(item["size_bytes"])),
+        item["present"], ("{} to write and check; USB speed varies.".format(
+            estimate_text(item["size_bytes"], ESTIMATE_RESTORE_FACTOR).capitalize())
+            if item["present"] else "This file is missing from the backup folder."),
+        size_bytes=item["size_bytes"])
+        for item in entry["partitions"])
+    present = tuple(item.key for item in choices if item.enabled)
+    if not present:
+        return {"status": "cancelled", "message": "This backup has no files that can be restored."}
+    selected = select_multiple_options(
+        "Choose partitions to restore", choices, initial=present,
+        detail="Only the partitions you check are replaced. You review the full list "
+               "before anything is written.")
+    if selected is None:
+        return {"status": "cancelled", "message": "No restore was started."}
+    confirmation = lambda plan: confirm_action(
+        "Confirm partition restore", _confirmation_details(plan, RESTORE_REVIEW_INTRO))
+    return api.restore_partitions(Path(entry["manifest"]), selected, port=readiness.port,
+                                  confirmation=confirmation)
+
+
+def _restore_from_other_folder(api, readiness):
+    source = text_input("Restore partitions", "Path to backup-set.json or its folder:",
+                        detail="Use this for a backup kept outside the backup folder, such as "
+                               "one copied to another drive.")
+    if source is None or not source.strip():
+        return {"status": "cancelled", "message": "No restore was started."}
+    manifest = Path(source.strip()).expanduser()
+    if manifest.is_dir():
+        manifest /= "backup-set.json"
+    entry = api.describe_backup_set(manifest)
+    if entry["state"] == "unreadable":
+        raise RuntimeError("That file is not a backup made by this toolkit.")
+    if not entry["restorable"]:
+        return {"status": "cancelled", "message": "This backup is not complete, so it cannot be "
+                                                  "restored. Nothing was written."}
+    return _restore_from_entry(api, readiness, entry)
+
+
+def _restore_partitions_flow(api, readiness):
+    tag, identified = _connected_robot(api, readiness)
+    if not identified:
+        raise RuntimeError("The connected Jibo could not be identified. Refresh USB and try again.")
+    entries = [entry for entry in api.saved_backups() if entry["device_tag"] == tag]
+    items = saved_backup_items(entries, tag) + (
+        MenuItem(OTHER_FOLDER_KEY, "Choose a backup from another folder\u2026",
+                 reason="For a backup kept outside the backup folder."),)
+    detail = ("Backups of the connected Jibo, newest first." if entries else
+              "No backups of the connected Jibo were found in {}.".format(
+                  getattr(api, "BACKUP_ROOT", "the backup folder")))
+    key = select_option("Restore partitions", items,
+                        prompt="Choose the backup to restore from.", detail=detail,
+                        initial=items[0].key, cancel_label="Back")
+    if key is None:
+        return {"status": "cancelled", "message": "No restore was started."}
+    if key == OTHER_FOLDER_KEY:
+        return _restore_from_other_folder(api, readiness)
+    entry = entries[int(key.partition(":")[2])]
+    if not entry["restorable"]:
+        return {"status": "cancelled", "message": "This backup is not complete, so it cannot be "
+                                                  "restored. Nothing was written."}
+    return _restore_from_entry(api, readiness, entry)
+
+
+def _check_lines(result):
+    words = {"match": "matches its checksum", "mismatch": "does not match its checksum",
+             "missing": "is missing"}
+    lines = ["Every saved file matches its checksum." if result.get("all_match") else
+             "Some saved files do not match. Do not restore from this backup."]
+    lines += ["{}: {}".format(item["name"], words.get(item["status"], item["status"]))
+              for item in result.get("partitions") or ()]
+    return lines
+
+
+def _backup_detail_flow(api, readiness, entry, tag, identified):
+    """One backup's details: Restore, Open folder, Check files or Delete.
+
+    Returns None for Back. Opening the folder and checking files come back here.
+    """
+    ready = readiness.state == "dfu-ready"
+    same_robot = bool(tag) and entry["device_tag"] == tag
+    if not ready:
+        restore_reason = _connection_reason(readiness)
+    elif not identified:
+        restore_reason = "The connected Jibo could not be identified. Refresh USB and try again."
+    elif not same_robot:
+        restore_reason = ("The connected Jibo is a different robot. Connect this backup's Jibo "
+                          "to restore it.")
+    elif not entry["restorable"]:
+        restore_reason = "This backup is not complete, so it cannot be restored."
+    else:
+        restore_reason = ""
+    deletable = entry.get("layout") == "named" and entry["status"] != "reading"
+    options = (
+        MenuItem("restore", "Restore from this backup", not restore_reason,
+                 restore_reason or "Choose the partitions to put back, then review before "
+                                   "anything is written."),
+        MenuItem("open-folder", "Open folder", reason="Show this backup's files on this computer."),
+        MenuItem("check-files", "Check files", entry["state"] == "complete",
+                 "Re-reads the saved files on this computer and compares their checksums. "
+                 "The robot is not used." if entry["state"] == "complete" else
+                 "Some files are missing from this backup."),
+        MenuItem("delete", "Delete this backup", deletable,
+                 "Removes this backup from this computer. The robot is not changed."
+                 if deletable else "Backups made before the Backups menu share files with "
+                                   "other backups, so they are not deleted here.",
+                 tone="danger" if deletable else ""),
+    )
+    note = ""
+    while True:
+        detail = "\n".join(([note, ""] if note else []) +
+                           backup_detail_lines(entry, tag, identified))
+        choice = select_option("Backup of " + entry["robot_label"], options,
+                               prompt="Choose what to do with this backup.", detail=detail,
+                               cancel_label="Back")
+        note = ""
+        if choice is None:
+            return None
+        if choice == "restore":
+            return _restore_from_entry(api, readiness, entry)
+        if choice == "open-folder":
+            if api.open_folder(entry["folder"]):
+                note = "Opened this backup's folder in your file browser."
+            else:
+                note = "Could not open a file browser. The files are in the folder shown below."
+            continue
+        if choice == "check-files":
+            show_screen("Check files", _check_lines(api.check_backup_set_files(entry["manifest"])))
+            continue
+        if not confirm_action(
+                "Delete this backup?",
+                "Delete the backup of {} saved {}?\n\n{} of files will be removed from this "
+                "computer. This cannot be undone. The robot is not changed.\n\nFolder: {}".format(
+                    entry["robot_label"], backup_time_label(entry["created_utc"]),
+                    size_label(entry["total_bytes"]), entry["folder"])):
+            note = "The backup was kept."
+            continue
+        return api.delete_backup_set(entry["manifest"])
+
+
+def _saved_backups_flow(api, readiness):
+    tag, identified = _connected_robot(api, readiness)
+    while True:
+        entries = list(api.saved_backups())
+        if not entries:
+            return {"status": "cancelled", "message": "No saved backups were found in {}.".format(
+                getattr(api, "BACKUP_ROOT", "the backup folder"))}
+        key = select_option(SAVED_BACKUPS_TITLE, saved_backup_items(entries, tag),
+                            prompt="Choose a backup to see its details.",
+                            detail="Newest first. Backups are kept only on this computer, "
+                                   "in {}.".format(getattr(api, "BACKUP_ROOT", "the backup folder")),
+                            cancel_label="Back")
+        if key is None:
+            return {"status": "cancelled", "message": "No backup was changed."}
+        result = _backup_detail_flow(api, readiness, entries[int(key.partition(":")[2])], tag,
+                                     identified)
+        if result is not None:
+            return result
+
+
+def _backups_menu(api, readiness):
+    selected = select_option(BACKUPS_TITLE, _backup_menu_options(readiness),
+                             prompt="Choose a backup action.",
+                             detail="Backups are saved on this computer in a folder named after "
+                                    "each Jibo. Making a backup never writes to the robot.")
+    if selected is None:
+        return {"status": "cancelled", "message": "No backup action selected."}
+    if selected in ("backup-all", "backup-choose", "restore-backup", "backup-var") and \
+            readiness.state != "dfu-ready":
+        raise RuntimeError("This backup action is available only while the robot is in DFU.")
+    if selected == "backup-all":
+        _, _, available = api.available_backup_partitions(port=readiness.port)
+        if not available:
+            raise RuntimeError("This DFU loader exposes no complete partitions for backup.")
+        return _run_backup_set(api, readiness, tuple(available), available,
+                               "Back up every partition")
+    if selected == "backup-choose":
+        return _choose_partitions_to_back_up(api, readiness)
+    if selected == "restore-backup":
+        return _restore_partitions_flow(api, readiness)
+    if selected == "saved-backups":
+        return _saved_backups_flow(api, readiness)
+    return api.backup_var(port=readiness.port)
 
 
 def execute_action(api, key, readiness):
@@ -1525,12 +1972,15 @@ def _execute_action(api, key, readiness):
         return api.boot_network_status_live("remove", port=readiness.port, confirmation=confirmation)
     if key == "flash-update":
         return _run_update(api, port=readiness.port)
+    if key == "backups":
+        return _backups_menu(api, readiness)
     if key == "more-tools":
         options = []
         if readiness.state == "dfu-ready":
-            options.extend((("probe-dfu-gpt", "Check partition layout"),
-                            ("backup-partitions", "Back up selected partitions"),
-                            ("restore-partitions", "Restore selected partitions"),
+            quick = " (quick edit)" if _can_edit_var_files(readiness) else ""
+            options.extend((("set-mode", "Set robot mode" + quick),
+                            ("configure-wifi", "Add or update a Wi-Fi network" + quick),
+                            ("probe-dfu-gpt", "Check partition layout"),
                             ("write-var", "Write an edited var image"),
                             ("remove-boot-network-status", "Remove boot-screen Wi-Fi/IP status")))
             if calibration_service.CALIBRATION_SHARING_AVAILABLE:

@@ -108,13 +108,14 @@ class FlowTests(unittest.TestCase):
     def test_gui_private_shared_flow_consent_prompt(self):
         prompts = []
         def ask(p):
+            if p.title == "Backups": return "backup-var"
             prompts.append(p); return "local"
         def backup_var(**kwargs):
             self.flow.on_verified_var_backup_ready(self.backup, self.api.calibration_identity())
             return self.backup
         self.api.backup_var = backup_var
         c = gui_core.GuiController(self.api, prompter=ask, runner=gui_core.sync_runner)
-        c.request_refresh(); self.assertTrue(c.start_action("backup-var"))
+        c.request_refresh(); self.assertTrue(c.start_action("backups"))
         self.assertEqual(prompts[0].kind, "calibration-consent")
         self.assertEqual(prompts[0].initial, "share")
         self.assertEqual(self.client.requests, [])

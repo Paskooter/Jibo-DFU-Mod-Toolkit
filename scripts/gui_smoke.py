@@ -133,10 +133,13 @@ def main():
     def flow(key, entries, result_name):
         w.show_home()
         root.update()
-        w.action_rows[key].activate()
+        menu = "more-tools" if key in ("set-mode", "configure-wifi") else key
+        w.action_rows[menu].activate()
         check(c.busy, "action busy: " + result_name)
         check(not c.start_action(key), "duplicate refused: " + result_name)
         check(not c.request_refresh(), "probe refused while busy: " + result_name)
+        if menu != key:
+            prompt_screen(result_name + "-submenu", key)
         for name, answer in entries:
             prompt_screen(name, answer)
         pump_until(lambda: not c.busy and w.page_name in ("result", "home"))
@@ -182,7 +185,8 @@ def main():
                 gate.wait(5)
                 return original_backup(**kwargs)
             api.backup_var = progress_backup
-            w.open_action("backup-var")
+            w.open_action("backups")
+            prompt_screen("36a-backups-menu", "backup-var")
             pump_until(lambda: float(w.progress_bar.cget("value")) == 50)
             shot("36-backup-progress")
             check(c.busy and not c.start_action("backup-var"), "transfer duplicate refused")
@@ -193,13 +197,15 @@ def main():
             shot("38-backup-operation-log")
             w.show_home()
             api.backup_var = original_backup
-            flow("more-tools", [("39-more-tools", "backup-partitions"),
-                 ("40-backup-var-checklist", ("var",))], "41-backup-set-success")
+            flow("backups", [("39-more-tools", "backup-choose"),
+                 ("40-backup-var-checklist", ("var",)),
+                 ("40a-backup-review", "start")], "41-backup-set-success")
             with tempfile.TemporaryDirectory(prefix="gui-smoke-") as directory:
                 manifest = Path(directory) / "backup-set.json"
                 manifest.write_text(json.dumps({"partitions": [{"name": "var", "size_bytes": 524288000},
                                                               {"name": "services", "size_bytes": 524288000}]}))
-                flow("more-tools", [("42-restore-tool", "restore-partitions"),
+                flow("backups", [("42-restore-tool", "restore-backup"),
+                     ("42a-other-folder", "other-folder"),
                      ("43-restore-path", str(manifest)), ("44-restore-var-checklist", ("var",)),
                      ("45-restore-review", "confirm")], "46-restore-success")
             flow("flash-update", [("47-update-package", "0"), ("48-update-calibration-policy", "keep-calibration"),

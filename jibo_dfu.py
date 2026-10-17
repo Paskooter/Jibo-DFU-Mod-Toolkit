@@ -3,6 +3,7 @@
 import argparse
 from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import getpass
 import hashlib
@@ -714,8 +715,16 @@ def _bind_partition_backup_identity(backup, device_tag, digest, identity=None):
         raise DfuError("Could not record the verified robot identity on its partition backup.") from exc
 
 
-def _backup_partition_once(dfu_util, port, device_tag, partition, size, identity=None):
-    if _has_unique_device_tag(device_tag):
+def _backup_partition_once(dfu_util, port, device_tag, partition, size, identity=None,
+                           out=None):
+    """Save one partition.
+
+    Without ``out`` this keeps the shared store's behavior: a verified copy
+    already saved for this robot is reused, and identical bytes share one copy.
+    With ``out`` (a folder inside a named backup set) the partition is always
+    read again into that new folder, with the same manifest format.
+    """
+    if out is None and _has_unique_device_tag(device_tag):
         existing = _find_partition_backup(device_tag, partition, size)
         if existing:
             try:
@@ -724,16 +733,17 @@ def _backup_partition_once(dfu_util, port, device_tag, partition, size, identity
             except DfuError:
                 # Do not reuse a same-size backup from another formatted extent.
                 pass
-    if shutil.disk_usage(BACKUP_ROOT.parent).free < size + 1024 ** 3:
+    space_root = BACKUP_ROOT.parent if out is None else Path(out).expanduser().resolve().parent
+    if shutil.disk_usage(space_root).free < size + 1024 ** 3:
         raise DfuError("Not enough free space to save the original {} partition.".format(partition))
-    directory = _new_operation_dir(prefix="partition-backup")
+    directory = _new_operation_dir(out, "partition-backup")
     image = directory / "partition.img"
     try:
         digest = _upload_partition(dfu_util, port, partition, size, image)
         if identity and _ext4_uuid_from_image(image) != identity.get("ext4_uuid"):
             raise DfuError("The downloaded {} image ext4 UUID does not match the live partition."
                            .format(partition))
-        existing = _find_partition_backup_by_hash(partition, size, digest)
+        existing = _find_partition_backup_by_hash(partition, size, digest) if out is None else None
         if existing:
             image.unlink(missing_ok=True)
             directory.rmdir()
@@ -818,46 +828,577 @@ def _selected_partitions(requested, available):
     return selected
 
 
+def _flock(stream, exclusive=False, wait=0.0):
+    """Non-blocking advisory lock with a short retry; False when it stays held elsewhere."""
+    try:
+        import fcntl
+    except ImportError:  # no flock here; the one-operation-per-window rule still applies
+        return True
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(stream.fileno(), (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) |
+                        fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+def _unlock(stream):
+    try:
+        import fcntl
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        pass
+
+
+@contextmanager
+def _backup_set_lock(manifest, exclusive=False):
+    """Hold one backup set while it is written or deleted, across toolkit windows."""
+    with open(manifest, "rb") as stream:
+        if not _flock(stream, exclusive):
+            raise DfuError("This backup is in use by another toolkit window. "
+                           "Try again when that finishes.")
+        try:
+            yield
+        finally:
+            _unlock(stream)
+
+
 def backup_partitions(partitions, port=None, dfu_util=None, out=None):
-    """Save only selected GPT partitions, reusing a verified copy for this robot."""
+    """Read selected GPT partitions into one new, dated backup set named after the robot.
+
+    The set is ``Jibo-Backups/<robot name>/<UTC date-time>/``: ``backup-set.json``
+    plus one folder per partition, each read fresh from the robot, so the folder
+    holds the whole backup. The name is read from var on this computer and never
+    by writing to the robot; without one, the folder uses a short tag of the USB
+    identity. That USB identity (device_tag) and each partition's own manifest stay
+    the restore safety check, exactly as for older backup sets. ``out`` names the
+    set folder instead (it must not exist yet).
+    """
     dfu_util = dfu_util or tool("dfu-util")
     port, device_tag, available = available_backup_partitions(port, dfu_util)
     if not _has_unique_device_tag(device_tag):
         raise DfuError("Partition backup sets require a stable robot identity from the DFU loader.")
     selected = _selected_partitions(partitions, available)
-    directory = _new_operation_dir(out, "backup-set")
-    manifest = directory / "backup-set.json"
-    record = {"schema": 1, "kind": "jibo-partition-backup-set", "created_utc": _utc_now(),
-              "device_tag": device_tag, "usb_port": port, "partitions": [], "status": "reading"}
+    needed = sum(available[name]["size_bytes"] for name in selected)
+    space_root = Path(out).expanduser().resolve().parent if out is not None else BACKUP_ROOT.parent
+    while not space_root.exists() and space_root != space_root.parent:
+        space_root = space_root.parent
+    if shutil.disk_usage(space_root).free < needed + 1024 ** 3:
+        raise DfuError("Not enough free space for this backup: it needs {:.1f} GB plus 1 GB to "
+                       "spare. Nothing was read from the robot.".format(needed / 1e9))
+    created = _utc_now()
+    robot_name = _saved_robot_name(device_tag)
+    name_source = "an earlier var backup of this robot" if robot_name else None
+    label = backup_folder_label(robot_name, device_tag)
+    directory = (_new_operation_dir(out, "backup-set") if out is not None else
+                 _new_backup_set_dir(label, created))
+    manifest = directory / BACKUP_SET_MANIFEST
+    record = {"schema": 1, "kind": "jibo-partition-backup-set", "created_utc": created,
+              "device_tag": device_tag, "robot_name": robot_name,
+              "robot_name_source": name_source, "robot_label": label,
+              "every_partition": set(selected) == set(available),
+              "usb_port": port, "partitions": [], "status": "reading"}
     _private_write(manifest, record)
+    # var carries the robot's name, so it is read first and can name the folder.
+    reading = tuple(sorted(selected, key=lambda partition: partition != "var"))
     try:
-        for name in selected:
-            extent = available[name]
-            if name == "var":
-                saved = backup_var(port=port, dfu_util=dfu_util)
-            elif name == "skills" and extent["transfer"] == "bounded chunks":
-                names, listing = dfu_alternatives(dfu_util, port)
-                chunks = _validate_skills_chunk_alternatives(extent["size_bytes"], names, listing)
-                saved = _backup_skills_partition_once(
-                    dfu_util, port, device_tag, extent["size_bytes"], chunks)
-            else:
-                saved = _backup_partition_once(dfu_util, port, device_tag, name,
-                                               extent["size_bytes"])
-            entry = {"name": name, "size_bytes": extent["size_bytes"],
-                     "first_lba": extent["first_lba"], "last_lba": extent["last_lba"],
-                     "image": str(Path(saved["image"]).resolve()),
-                     "sha256": saved["sha256"], "backup_manifest": str(Path(saved["manifest"]).resolve()),
-                     "backup_status": saved["status"]}
-            record["partitions"].append(entry)
-            _private_write(manifest, record)
+        with _backup_set_lock(manifest):
+            _read_backup_set(reading, available, port, dfu_util, device_tag, out, record,
+                             directory, manifest, label)
+        directory = Path(record["folder"])
+        manifest = directory / BACKUP_SET_MANIFEST
+        order = {name: index for index, name in enumerate(selected)}
+        record["partitions"].sort(key=lambda entry: order[entry["name"]])
+        del record["folder"]
         record["status"] = "complete"
         _private_write(manifest, record)
         return {"status": "backup complete", "manifest": str(manifest),
-                "operation_directory": str(directory), "partitions": record["partitions"]}
+                "operation_directory": str(directory), "robot_name": record["robot_name"],
+                "robot_label": record["robot_label"], "partitions": record["partitions"]}
     except Exception as exc:
+        directory = Path(record.pop("folder", directory))
         record.update(status="failed", error=str(exc))
-        _private_write(manifest, record)
+        _private_write(directory / BACKUP_SET_MANIFEST, record)
         raise
+
+
+def _read_backup_set(reading, available, port, dfu_util, device_tag, out, record,
+                     directory, manifest, label):
+    """Read each partition into the set folder.
+
+    ``record["folder"]`` follows the folder when var supplies the robot's name and
+    the set moves to that robot's folder before any other partition is read.
+    """
+    record["folder"] = str(directory)
+    for name in reading:
+        extent = available[name]
+        if name == "var":
+            saved = backup_var(port=port, dfu_util=dfu_util, out=directory / name)
+            found = robot_name_from_var_image(saved["image"])
+            if found:
+                if out is None and backup_folder_label(found, device_tag) != label:
+                    label = backup_folder_label(found, device_tag)
+                    directory = _move_backup_set(directory, label)
+                    manifest = directory / BACKUP_SET_MANIFEST
+                    record["folder"] = str(directory)
+                    saved = dict(saved, image=str(directory / name / Path(saved["image"]).name),
+                                 manifest=str(directory / name / "backup-manifest.json"))
+                record.update(robot_name=found, robot_name_source="var in this backup",
+                              robot_label=label)
+        elif name == "skills" and extent["transfer"] == "bounded chunks":
+            names, listing = dfu_alternatives(dfu_util, port)
+            chunks = _validate_skills_chunk_alternatives(extent["size_bytes"], names, listing)
+            saved = _backup_skills_partition_once(
+                dfu_util, port, device_tag, extent["size_bytes"], chunks, out=directory / name)
+        else:
+            saved = _backup_partition_once(dfu_util, port, device_tag, name,
+                                           extent["size_bytes"], out=directory / name)
+        record["partitions"].append({
+            "name": name, "size_bytes": extent["size_bytes"],
+            "first_lba": extent["first_lba"], "last_lba": extent["last_lba"],
+            "image": str(Path(saved["image"]).resolve()), "sha256": saved["sha256"],
+            "backup_manifest": str(Path(saved["manifest"]).resolve()),
+            "backup_status": saved["status"]})
+        _private_write(manifest, {key: value for key, value in record.items() if key != "folder"})
+
+
+# -- Saved backup sets: robot names, folders and the list ----------------------
+
+BACKUP_SET_MANIFEST = "backup-set.json"
+# Jibo's factory name: three or four hyphenated words, as checked for identity.json.
+ROBOT_NAME_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+){2,3}")
+_TOOLKIT_FOLDER_PREFIXES = ("var-backup", "partition-backup", "backup-set", "restore-set",
+                            "write-var", "set-mode", "configure-wifi", "flash-update",
+                            "operation", "calibration")
+
+
+def _valid_robot_name(value):
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if ROBOT_NAME_PATTERN.fullmatch(value) else None
+
+
+def robot_name_from_var_image(image):
+    """Read Jibo's name from a var image on this computer; None when it is absent.
+
+    Uses /jibo/identity.json, then /etc/hostname. Only the name is read and
+    returned; the image is opened read-only and never changed.
+    """
+    image = Path(image)
+    try:
+        if image.is_symlink() or not image.is_file():
+            return None
+        with tempfile.TemporaryDirectory(prefix="jibo-robot-name-") as temporary:
+            raw = images._extract(image, images.FACTORY_IDENTITY_PATH,
+                                  Path(temporary) / "identity", optional=True)
+            if raw and len(raw) <= 65536:
+                try:
+                    name = _valid_robot_name(json.loads(raw.decode("utf-8")).get("name"))
+                except (UnicodeDecodeError, ValueError, AttributeError):
+                    name = None
+                if name:
+                    return name
+            raw = images._extract(image, "/etc/hostname", Path(temporary) / "hostname",
+                                  optional=True)
+            return _valid_robot_name(raw) if raw and len(raw) <= 256 else None
+    except (images.ImageError, OSError):
+        return None
+
+
+def short_robot_tag(device_tag):
+    """A short, stable label from the USB identity hash for robots without a known name."""
+    match = re.fullmatch(r"serial-sha256:([0-9a-f]{64})", str(device_tag or ""))
+    return "robot-" + match.group(1)[:8] if match else "unknown-robot"
+
+
+def backup_folder_label(name, device_tag):
+    """Folder-safe label: the robot's name when known, else its short USB tag."""
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or ""))
+    label = re.sub(r"-{2,}", "-", label).strip(".-_")[:64].strip(".-_")
+    if not re.search(r"[A-Za-z0-9]", label):
+        return short_robot_tag(device_tag)
+    if label.lower().startswith(_TOOLKIT_FOLDER_PREFIXES):
+        label = "robot-" + label
+    return label
+
+
+def _backup_folder_stamp(created_utc):
+    return re.sub(r"[^0-9A-Za-z_-]", "-", created_utc.replace("T", "_").replace(":", "-"))
+
+
+def _robot_backup_dir(label):
+    """Jibo-Backups/<label>/, created privately; refuses a link or a file there."""
+    BACKUP_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    BACKUP_ROOT.chmod(0o700)
+    _chown_to_invoking_user(BACKUP_ROOT)
+    robot_dir = BACKUP_ROOT / label
+    if robot_dir.is_symlink():
+        raise DfuError("The backup folder for this robot is a link; choose another folder: " +
+                       str(robot_dir))
+    robot_dir.mkdir(mode=0o700, exist_ok=True)
+    if robot_dir.is_symlink() or not robot_dir.is_dir():
+        raise DfuError("The backup folder for this robot is not a folder: " + str(robot_dir))
+    robot_dir.chmod(0o700)
+    _chown_to_invoking_user(robot_dir)
+    return robot_dir
+
+
+def _new_backup_set_dir(label, created_utc):
+    """Create Jibo-Backups/<label>/<UTC time>/ privately, never reusing a folder."""
+    robot_dir = _robot_backup_dir(label)
+    stamp = _backup_folder_stamp(created_utc)
+    for attempt in range(1, 100):
+        directory = robot_dir / (stamp if attempt == 1 else "{}-{}".format(stamp, attempt))
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        directory.chmod(0o700)
+        _chown_to_invoking_user(directory)
+        return directory
+    raise DfuError("Could not create a new backup folder in " + str(robot_dir))
+
+
+def _move_backup_set(directory, label):
+    """Move a set that is still being written to its robot's folder; keep it on failure."""
+    directory = Path(directory)
+    try:
+        robot_dir = _robot_backup_dir(label)
+        for attempt in range(1, 100):
+            target = robot_dir / (directory.name if attempt == 1 else
+                                  "{}-{}".format(directory.name, attempt))
+            if target.exists() or target.is_symlink():
+                continue
+            os.rename(directory, target)
+            try:
+                directory.parent.rmdir()  # only when the provisional folder is now empty
+            except OSError:
+                pass
+            return target
+    except (OSError, DfuError):
+        pass
+    return directory
+
+
+DELETING_PREFIX = ".deleting-"
+
+
+def _being_deleted(path):
+    """True inside a backup folder that delete_backup_set is removing."""
+    try:
+        parts = Path(path).relative_to(BACKUP_ROOT).parts
+    except ValueError:
+        return False
+    return any(part.startswith(DELETING_PREFIX) for part in parts)
+
+
+def _in_backup_set(manifest_path):
+    """True for a partition copy kept inside a backup set's own folder."""
+    try:
+        return (Path(manifest_path).parent.parent / BACKUP_SET_MANIFEST).is_file()
+    except OSError:
+        return False
+
+
+def _var_backup_manifests():
+    if not BACKUP_ROOT.is_dir() or BACKUP_ROOT.is_symlink():
+        return []
+    paths = [path for path in BACKUP_ROOT.rglob("backup-manifest.json")
+             if not path.is_symlink() and not path.parent.is_symlink() and
+             not _being_deleted(path)]
+    return sorted(paths, key=lambda path: path.stat().st_mtime if path.exists() else 0,
+                  reverse=True)
+
+
+def saved_robot_name(device_tag):
+    """Jibo's name from this robot's newest saved var backup, or None. A label only."""
+    return _saved_robot_name(device_tag)
+
+
+def backup_free_bytes():
+    """Free space where backups are saved (the nearest existing folder)."""
+    folder = Path(BACKUP_ROOT).expanduser()
+    while not folder.exists() and folder != folder.parent:
+        folder = folder.parent
+    return shutil.disk_usage(folder).free
+
+
+def _saved_robot_name(device_tag, limit=5):
+    """The name in this robot's newest saved var backup. A label only, not identity."""
+    if not _has_unique_device_tag(device_tag):
+        return None
+    tried = 0
+    for manifest in _var_backup_manifests():
+        try:
+            if manifest.stat().st_size > 65536:
+                continue
+            record = json.loads(manifest.read_text())
+            tags = set(record.get("device_tags", ())) | {record.get("device_tag")}
+            if (record.get("kind") != "jibo-var-backup" or record.get("status") == "failed" or
+                    device_tag not in tags):
+                continue
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        tried += 1
+        name = robot_name_from_var_image(
+            manifest.parent / Path(str(record.get("image") or "var.img")).name)
+        if name or tried >= limit:
+            return name
+    return None
+
+
+def _backup_set_manifests():
+    """``(path, layout)`` for named (robot/time) and older (backup-set-*) folders."""
+    if not BACKUP_ROOT.is_dir() or BACKUP_ROOT.is_symlink():
+        return []
+    found = {}
+    for pattern, layout in (("*/*/" + BACKUP_SET_MANIFEST, "named"),
+                            ("backup-set-*/" + BACKUP_SET_MANIFEST, "older")):
+        for path in sorted(BACKUP_ROOT.glob(pattern)):
+            parents = (path, path.parent) + ((path.parent.parent,) if layout == "named" else ())
+            if any(item.is_symlink() for item in parents) or _being_deleted(path) or \
+                    any(item.name.startswith(".") for item in parents[1:]):
+                continue
+            found.setdefault(path, layout)
+    return list(found.items())
+
+
+def describe_backup_set(manifest, layout=None, _names=None):
+    """Summarize one backup-set.json from local files only; never raises for bad files.
+
+    ``state`` is ``complete`` (finished and every image file present at its
+    recorded size), ``missing-files``, ``incomplete`` or ``unreadable``. Image
+    hashes are checked again by restore_partitions before anything is written.
+    """
+    manifest = Path(manifest)
+    names = {} if _names is None else _names
+    entry = {"manifest": str(manifest), "folder": str(manifest.parent), "layout": layout,
+             "device_tag": None, "robot_name": None, "robot_tag": "unknown-robot",
+             "robot_label": "unknown-robot", "created_utc": None, "partitions": [],
+             "total_bytes": 0, "every_partition": False, "status": None,
+             "state": "unreadable", "restorable": False}
+    try:
+        if manifest.is_symlink() or not manifest.is_file() or \
+                manifest.stat().st_size > 1024 * 1024:
+            return entry
+        record = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        return entry
+    if not isinstance(record, dict) or record.get("kind") != "jibo-partition-backup-set":
+        return entry
+    device_tag = record.get("device_tag") if isinstance(record.get("device_tag"), str) else None
+    created = record.get("created_utc")
+    entry.update(device_tag=device_tag, robot_tag=short_robot_tag(device_tag),
+                 created_utc=created if isinstance(created, str) else None,
+                 status=record.get("status") if isinstance(record.get("status"), str) else None)
+    partitions = []
+    for item in record.get("partitions") if isinstance(record.get("partitions"), list) else ():
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        size = item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else 0
+        image = Path(str(item.get("image") or ""))
+        try:
+            present = (bool(item.get("image")) and not image.is_symlink() and image.is_file()
+                       and image.stat().st_size == size)
+        except OSError:
+            present = False
+        partitions.append({"name": item["name"], "size_bytes": size, "image": str(image),
+                           "present": present,
+                           "backup_status": str(item.get("backup_status") or "")})
+    entry["partitions"] = partitions
+    entry["total_bytes"] = sum(item["size_bytes"] for item in partitions)
+    entry["every_partition"] = record.get("every_partition") is True
+    if entry["status"] == "complete" and partitions:
+        entry["state"] = ("complete" if all(item["present"] for item in partitions)
+                          else "missing-files")
+    else:
+        entry["state"] = "incomplete"
+    entry["restorable"] = entry["state"] == "complete"
+    name = _valid_robot_name(record.get("robot_name"))
+    if name is None:
+        var = next((item for item in partitions if item["name"] == "var" and item["present"]),
+                   None)
+        if var is not None:
+            if var["image"] not in names:
+                names[var["image"]] = robot_name_from_var_image(var["image"])
+            name = names[var["image"]]
+    if name is None and device_tag:
+        if device_tag not in names:
+            names[device_tag] = _saved_robot_name(device_tag)
+        name = names[device_tag]
+    entry["robot_name"] = name
+    entry["robot_label"] = name or entry["robot_tag"]
+    return entry
+
+
+def saved_backups():
+    """Every backup set in Jibo-Backups, newest first. Reads only this computer."""
+    names = {}
+    entries = [describe_backup_set(path, layout, names) for path, layout in _backup_set_manifests()]
+    entries.sort(key=lambda entry: (entry["created_utc"] or "", entry["manifest"]), reverse=True)
+    return entries
+
+
+def _backup_set_path(backup_set):
+    manifest = Path(backup_set).expanduser()
+    if manifest.is_dir() and not manifest.is_symlink():
+        manifest /= BACKUP_SET_MANIFEST
+    if manifest.is_symlink() or not manifest.is_file():
+        raise DfuError("Select a backup-set.json manifest created by this toolkit.")
+    return manifest
+
+
+def check_backup_set_files(backup_set):
+    """Hash every image a saved backup set lists and compare it with its saved SHA-256.
+
+    Local files only: nothing is read from or written to the robot.
+    """
+    manifest = _backup_set_path(backup_set)
+    try:
+        record = json.loads(manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise DfuError("Could not read the selected backup-set manifest.") from exc
+    if not isinstance(record, dict) or record.get("kind") != "jibo-partition-backup-set":
+        raise DfuError("The selected file is not a backup set made by this toolkit.")
+    entries = [entry for entry in record.get("partitions") or () if isinstance(entry, dict)]
+    results = []
+    for index, entry in enumerate(entries, 1):
+        name = str(entry.get("name") or "?")
+        image = Path(str(entry.get("image") or ""))
+        print("Checking {} ({} of {})".format(name, index, len(entries)), flush=True)
+        try:
+            present = (bool(entry.get("image")) and not image.is_symlink() and image.is_file()
+                       and image.stat().st_size == entry.get("size_bytes"))
+            status = ("match" if present and _sha256_file(image) == entry.get("sha256") else
+                      "mismatch" if present else "missing")
+        except OSError:
+            status = "missing"
+        results.append({"name": name, "status": status})
+    return {"status": "checked", "manifest": str(manifest), "partitions": results,
+            "all_match": bool(results) and all(item["status"] == "match" for item in results)}
+
+
+def _running_in_wsl():
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
+def open_folder(path):
+    """Ask the desktop to show a local folder; True when a file browser was started.
+
+    Under sudo the browser runs as the person who started the toolkit, not root.
+    """
+    folder = Path(path).expanduser()
+    if folder.is_symlink() or not folder.is_dir():
+        return False
+    folder = folder.resolve()
+    commands = []
+    if sys.platform == "darwin":
+        commands.append(["open", str(folder)])
+    elif sys.platform.startswith("win"):
+        commands.append(["explorer", str(folder)])
+    else:
+        if _running_in_wsl():
+            explorer = shutil.which("explorer.exe") or "/mnt/c/Windows/explorer.exe"
+            converter = shutil.which("wslpath")
+            if converter and Path(explorer).exists():
+                try:
+                    windows = subprocess.run([converter, "-w", str(folder)], capture_output=True,
+                                             text=True, timeout=5, check=True).stdout.strip()
+                except (OSError, subprocess.SubprocessError):
+                    windows = ""
+                if windows:
+                    commands.append([explorer, windows])
+        opener = shutil.which("xdg-open")
+        if opener:
+            commands.append([opener, str(folder)])
+    owner = _invoking_user() if os.geteuid() == 0 else None
+    for argv in commands:
+        options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                   "stderr": subprocess.DEVNULL, "start_new_session": True}
+        if owner:
+            options.update(user=owner[0], group=owner[1],
+                           env=dict(os.environ, HOME=str(owner[2])))
+        try:
+            subprocess.Popen(argv, **options)
+            return True
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def _shared_by_newer_layout(path, keep):
+    """True when a backup set other than ``keep`` still lists ``path``."""
+    for other, _layout in _backup_set_manifests():
+        if other == keep:
+            continue
+        try:
+            record = json.loads(other.read_text())
+            if any(isinstance(entry, dict) and entry.get("image") and
+                   Path(entry["image"]).resolve() == Path(path).resolve()
+                   for entry in record.get("partitions") or ()):
+                return True
+        except (OSError, ValueError, AttributeError):
+            continue
+    return False
+
+
+def delete_backup_set(backup_set):
+    """Delete one saved backup set from this computer. The robot is never contacted.
+
+    Only a set made by the newer Backups menu (Jibo-Backups/<robot>/<time>/) can be
+    deleted; its folder holds every file it lists. Older sets reuse shared copies
+    that other backups and rollbacks rely on, so they are refused here. The caller
+    must confirm first, naming the robot and the date. A set that is being written,
+    restored or deleted elsewhere is refused.
+    """
+    manifest = _backup_set_path(backup_set)
+    root = BACKUP_ROOT.resolve()
+    folder = manifest.parent
+    if folder.is_symlink() or folder.parent.is_symlink() or \
+            folder.resolve().parent.parent != root:
+        raise DfuError("Only backups made by the Backups menu can be deleted here. "
+                       "Nothing was deleted.")
+    try:
+        record = json.loads(manifest.read_text())
+    except (OSError, ValueError) as exc:
+        raise DfuError("Could not read this backup. Nothing was deleted.") from exc
+    if not isinstance(record, dict) or record.get("kind") != "jibo-partition-backup-set":
+        raise DfuError("This folder is not a backup made by this toolkit. Nothing was deleted.")
+    if record.get("status") == "reading":
+        raise DfuError("This backup is still being saved. Nothing was deleted.")
+    resolved = folder.resolve()
+    for entry in record.get("partitions") or ():
+        image = Path(str(entry.get("image") or "")) if isinstance(entry, dict) else None
+        if image is not None and str(image) and resolved not in image.resolve().parents:
+            raise DfuError("This backup lists files outside its own folder. Nothing was deleted.")
+        if image is not None and _shared_by_newer_layout(image, manifest):
+            raise DfuError("Another saved backup uses these files. Nothing was deleted.")
+    label = describe_backup_set(manifest)["robot_label"]
+    holding = folder.parent / (DELETING_PREFIX + folder.name)
+    if holding.exists() or holding.is_symlink():
+        raise DfuError("An earlier delete of this backup did not finish. Remove " + str(holding) +
+                       " by hand. Nothing else was deleted.")
+    # The exclusive lock fails while a restore or backup holds this exact set.
+    with _backup_set_lock(manifest, exclusive=True):
+        os.rename(folder, holding)
+    shutil.rmtree(holding)
+    return {"status": "deleted", "folder": str(folder), "robot_label": label,
+            "created_utc": record.get("created_utc")}
 
 
 def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
@@ -872,6 +1413,12 @@ def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
         manifest /= "backup-set.json"
     if manifest.is_symlink() or not manifest.is_file():
         raise DfuError("Select a backup-set.json manifest created by this toolkit.")
+    # Hold the exact source even when it lives outside the default backup root.
+    with _backup_set_lock(manifest):
+        return _restore_partitions(manifest, partitions, port, dfu_util, out, confirmation)
+
+
+def _restore_partitions(manifest, partitions, port, dfu_util, out, confirmation):
     try:
         source = json.loads(manifest.read_text())
     except (OSError, ValueError) as exc:
@@ -921,6 +1468,8 @@ def restore_partitions(backup_set, partitions=None, port=None, dfu_util=None,
             _ext4_uuid_from_image(image)
     plan = {"operation": "restore selected partitions", "usb_port": port,
             "source_manifest": str(manifest),
+            "backup_robot": describe_backup_set(manifest)["robot_label"],
+            "backup_created_utc": source.get("created_utc"),
             "partitions": [{"name": name, "bytes": available[name]["size_bytes"]}
                            for name in selected]}
     if confirmation is None:
@@ -1154,25 +1703,28 @@ class _NullWriter:
         return len(data)
 
 
-def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, identity=None):
+def _backup_skills_partition_once(dfu_util, port, device_tag, capacity, chunks, identity=None,
+                                  out=None):
     existing = (_find_partition_backup(device_tag, "skills", capacity)
-                if _has_unique_device_tag(device_tag) else None)
+                if _has_unique_device_tag(device_tag) and out is None else None)
     if existing:
         try:
             _verify_or_bind_partition_identity(existing, identity)
             return existing
         except DfuError:
             existing = None
-    if shutil.disk_usage(BACKUP_ROOT.parent).free < capacity + SKILLS_CHUNK_BYTES:
+    space_root = BACKUP_ROOT.parent if out is None else Path(out).expanduser().resolve().parent
+    if shutil.disk_usage(space_root).free < capacity + SKILLS_CHUNK_BYTES:
         raise DfuError("Not enough free space to save the original skills partition.")
-    directory = _new_operation_dir(prefix="partition-backup")
+    directory = _new_operation_dir(out, "partition-backup")
     image = directory / "partition.img"
     try:
         uploaded = _upload_skills_partition(dfu_util, port, capacity, chunks,
                                             destination=image, workdir=directory)
         if identity and _ext4_uuid_from_image(image) != identity.get("ext4_uuid"):
             raise DfuError("The downloaded skills image ext4 UUID does not match the live partition.")
-        same_bytes = _find_partition_backup_by_hash("skills", capacity, uploaded["sha256"])
+        same_bytes = (_find_partition_backup_by_hash("skills", capacity, uploaded["sha256"])
+                      if out is None else None)
         if same_bytes:
             image.unlink(missing_ok=True)
             shutil.rmtree(directory, ignore_errors=True)
@@ -1363,7 +1915,9 @@ def _find_verified_backup(device_tag=None, expected_sha256=None):
                        key=lambda path: path.stat().st_mtime if path.exists() else 0,
                        reverse=True)
     for manifest_path in manifests:
-        if manifest_path.is_symlink():
+        if manifest_path.is_symlink() or _in_backup_set(manifest_path):
+            # Saved backup sets can be deleted from the Backups menu, so automatic
+            # rollback copies come only from the toolkit's own var-backup folders.
             continue
         try:
             record = json.loads(manifest_path.read_text())
@@ -1400,7 +1954,7 @@ def _select_factory_calibration_backup(device_tag, preferred, stock_var):
                            reverse=True)
         for manifest in manifests:
             if manifest.is_symlink() or manifest.parent.is_symlink() or \
-                    str(manifest) == str(preferred.get("manifest")):
+                    _in_backup_set(manifest) or str(manifest) == str(preferred.get("manifest")):
                 continue
             try:
                 record = json.loads(manifest.read_text())

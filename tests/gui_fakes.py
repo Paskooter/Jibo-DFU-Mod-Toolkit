@@ -130,6 +130,15 @@ class FakeApi:
         self.calls.append(("backup_partitions", (selected,), kwargs))
         return {"status": "backup complete", "partitions": list(selected), "manifest": "/tmp/fake-set.json"}
 
+    def saved_backups(self):
+        return []
+
+    def describe_backup_set(self, manifest):
+        import json
+        entries = json.loads(Path(manifest).read_text())["partitions"]
+        return {"manifest": str(manifest), "state": "complete", "restorable": True,
+                "partitions": [dict(e, present=True) for e in entries]}
+
     def probe_dfu_gpt(self, **kwargs):
         self.calls.append(("probe_dfu_gpt", (), kwargs))
         return {"partition_sizes_bytes": {"var": 524288000}}

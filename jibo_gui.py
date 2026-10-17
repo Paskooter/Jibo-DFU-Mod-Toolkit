@@ -831,7 +831,9 @@ class ToolkitWindow:
         if (prompt.title == "Boot screen network status" and
                 tuple(item.key for item in prompt.items) == ("install", "keep", "remove")):
             return self._build_boot_status(page, prompt)
-        self._header(page, prompt.title, prompt.detail, self._kicker())
+        # Long details must not consume the action viewport on a small display.
+        long_detail = len(prompt.detail.splitlines()) > 4
+        self._header(page, prompt.title, "" if long_detail else prompt.detail, self._kicker())
         if prompt.prompt:
             question = tk.Label(page, text=prompt.prompt, font=self.theme.bold, bg=P["bg"],
                                 fg=P["text"], anchor="w", justify="left")
@@ -844,6 +846,11 @@ class ToolkitWindow:
         area = ScrollArea(page, P["bg"])
         area.pack(fill="both", expand=True, pady=(12, 0))
         self._scroll_areas.append(area)
+        if long_detail:
+            detail = tk.Label(area.inner, text=prompt.detail, font=self.theme.base,
+                              bg=P["bg"], fg=P["muted"], anchor="w", justify="left")
+            detail.pack(fill="x", pady=(0, 16))
+            _wrapping(detail)
         rows = {}
 
         def choose(key):
@@ -964,8 +971,9 @@ class ToolkitWindow:
         self.controls = {"primary": confirm, "cancel": cancel, "review": review}
 
     def _build_multi(self, page, prompt):
-        self._header(page, prompt.title, kicker=self._kicker())
-        chosen = {key for key in prompt.initial if any(item.key == key for item in prompt.items)}
+        self._header(page, prompt.title, prompt.detail, self._kicker())
+        allowed = {item.key for item in prompt.items if item.enabled}
+        chosen = set(prompt.initial) & allowed
         tools = tk.Frame(page, bg=P["bg"])
         tools.pack(fill="x", pady=(16, 0))
         buttons = self._button_bar(page)
@@ -980,16 +988,21 @@ class ToolkitWindow:
                 row.set_selected(key in chosen)
             go.configure(text="Continue with {} selected".format(len(chosen)))
             go.state(["!disabled"] if chosen else ["disabled"])
-            count.configure(text="{} of {} selected".format(len(chosen), len(rows)))
+            sized = any(hasattr(item, "size_bytes") for item in prompt.items)
+            size = sum(getattr(item, "size_bytes", 0) for item in prompt.items
+                       if item.key in chosen)
+            count.configure(text=self.controller.flows.selection_summary(len(chosen), size)
+                            if sized else "{} of {} selected".format(len(chosen), len(rows)))
 
         def toggle(key):
-            chosen.symmetric_difference_update({key})
+            if key in allowed:
+                chosen.symmetric_difference_update({key})
             update()
 
         def everything(selected):
             chosen.clear()
             if selected:
-                chosen.update(item.key for item in prompt.items)
+                chosen.update(allowed)
             update()
 
         def submit():
@@ -1037,7 +1050,8 @@ class ToolkitWindow:
         page.bind("<n>", lambda _event: everything(False))
         page.bind("<Return>", lambda _event: submit())
         self.controls = {"options": rows, "primary": go, "cancel": cancel,
-                         "toggle": toggle, "all": everything, "chosen": chosen}
+                         "toggle": toggle, "all": everything, "chosen": chosen,
+                         "selection_summary": count}
 
     def _build_text(self, page, prompt):
         self._header(page, prompt.title, prompt.detail, self._kicker())

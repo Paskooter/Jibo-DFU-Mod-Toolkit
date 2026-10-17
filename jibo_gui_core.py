@@ -125,12 +125,13 @@ def install_prompts(flows, ask, run_work=None):
         enabled = {item.key for item in items if item.enabled}
         return answer if isinstance(answer, str) and answer in enabled else None
 
-    def select_multiple_options(title, options, initial=()):
+    def select_multiple_options(title, options, initial=(), detail=""):
         items = flows._normalise_options(options)
-        answer = ask(Prompt("multi", title, items=items, initial=tuple(initial)))
+        answer = ask(Prompt("multi", title, detail=detail, items=items, initial=tuple(initial)))
         if answer is None or isinstance(answer, str):
             return None
-        chosen = set(answer)
+        enabled = {item.key for item in items if item.enabled}
+        chosen = set(answer) & enabled
         selected = tuple(item.key for item in items if item.key in chosen)
         # The text menu cannot continue with an empty selection either.
         return selected or None

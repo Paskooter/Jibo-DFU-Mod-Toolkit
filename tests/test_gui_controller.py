@@ -24,6 +24,23 @@ def controller(api=None, answers=(), runner=core.sync_runner):
     return c, prompts
 
 
+def start(c, key):
+    """Drive moved actions through their real submenu; never add hidden actions."""
+    menu = ("more-tools" if key in ("set-mode", "configure-wifi") else
+            "backups" if key == "backup-var" else None)
+    if menu is None:
+        return c.start_action(key)
+    original = c._prompter
+    first = [True]
+    def ask(prompt):
+        if first[0]:
+            first[0] = False
+            return key
+        return original(prompt) if original else None
+    c._prompter = ask
+    return c.start_action(menu)
+
+
 def outcome(c):
     return [event[1] for event in c.drain() if event[0] == "finished"][-1]
 
@@ -56,7 +73,7 @@ def test_private_flows_do_not_change_tui_prompt_functions():
 def test_mode_write_requires_explicit_confirm(quick, approval):
     api = FakeApi(quick=quick)
     c, prompts = controller(api, ("developer", approval))
-    assert c.start_action("set-mode")
+    assert start(c, "set-mode")
     result = outcome(c)
     assert api.writes == (["set_mode_file_live" if quick else "set_mode_live"] if approval == "confirm" else [])
     assert result.status == ("verified" if approval == "confirm" else "cancelled")
@@ -202,7 +219,7 @@ def test_phoenix_card_never_follows_failed_combined_write():
 ])
 def test_phoenix_card_does_not_follow_separate_edits(action, answers):
     c, _ = controller(answers=answers)
-    c.start_action(action)
+    start(c, action)
     assert not c.should_show_phoenix(outcome(c))
 
 
@@ -268,7 +285,7 @@ def test_phoenix_browser_failure_is_nonblocking_and_keeps_guidance(raises):
 def test_mismatched_password_cancel_never_calls_device_edit(action, answers):
     api = FakeApi()
     c, prompts = controller(api, answers)
-    c.start_action(action)
+    start(c, action)
     assert outcome(c).status == "cancelled"
     assert not api.calls and not api.writes
     assert len([p for p in prompts if p.password]) == 2
@@ -292,7 +309,7 @@ def test_combined_flow_cancellation_at_every_prompt_never_writes(stop, mode):
 def test_protected_wifi_requires_two_matching_entries_and_review():
     api = FakeApi()
     c, prompts = controller(api, ("Test network", "protected", "testpass1", "testpass1", "confirm"))
-    c.start_action("configure-wifi")
+    start(c, "configure-wifi")
     assert outcome(c).status == "verified"
     assert len([p for p in prompts if p.password]) == 2
     assert "testpass1" not in repr(prompts) + repr(api.calls) + repr(c.output_state())
@@ -305,12 +322,12 @@ def test_full_var_fallback_is_an_explicit_choice_then_separate_confirmation(stat
         raise FileLayoutError(status)
     api.set_mode_file_live = quick
     c, prompts = controller(api, ("developer", "cancel"))
-    c.start_action("set-mode")
+    start(c, "set-mode")
     assert outcome(c).status == "cancelled" and not api.writes and not api.calls
     assert prompts[-1].initial == "cancel"
     assert "500 MiB" in prompts[-1].detail
     c, prompts = controller(api, ("developer", "full", "confirm"))
-    c.start_action("set-mode")
+    start(c, "set-mode")
     assert outcome(c).status == "verified"
     assert api.writes == ["set_mode_live"]
     assert prompts[-1].kind == "confirm" and prompts[-1].initial == "cancel"
@@ -348,8 +365,14 @@ def test_restore_var_selection_and_confirmation(tmp_path, approve):
     source.write_text(json.dumps({"partitions": [{"name": "var", "size_bytes": 524288000},
                                                {"name": "services", "size_bytes": 524288000}]}))
     api = FakeApi()
-    c, prompts = controller(api, ("restore-partitions", str(source), ("var",), approve))
-    c.start_action("more-tools")
+    from test_saved_backups import BackupApi
+    api.saved_backups = lambda: []
+    api.describe_backup_set = lambda p: dict(
+        manifest=str(p), state="complete", restorable=True,
+        partitions=[dict(name="var", size_bytes=524288000, present=True),
+                    dict(name="services", size_bytes=524288000, present=True)])
+    c, prompts = controller(api, ("restore-backup", "other-folder", str(source), ("var",), approve))
+    c.start_action("backups")
     assert outcome(c).status == ("verified" if approve == "confirm" else "cancelled")
     assert api.calls[-1][1] == (source, ("var",))
     assert api.writes == (["restore_partitions"] if approve == "confirm" else [])
@@ -361,11 +384,10 @@ def test_restore_var_selection_and_confirmation(tmp_path, approve):
 def test_backup_and_more_tools_use_same_device_or_image_functions():
     api = FakeApi()
     c, _ = controller(api)
-    c.start_action("backup-var")
+    start(c, "backup-var")
     assert outcome(c).lines[0] == "Var backup is ready."
     assert api.calls[-1] == ("backup_var", (), {"port": "1-1"})
     for answers, name in [(("probe-dfu-gpt",), "probe_dfu_gpt"),
-                           (("backup-partitions", ("var",)), "backup_partitions"),
                            (("inspect-backup", "/tmp/fake.img"), "inspect_var"),
                            (("edit-backup", "mode", "/tmp/fake.img", "developer"), "edit_mode")]:
         c, _ = controller(api, answers)
@@ -398,7 +420,7 @@ def test_disconnected_between_home_and_dispatch_never_starts_action():
     api = FakeApi()
     c, _ = controller(api)
     api.state = "none"
-    c.start_action("set-mode")
+    c.start_action("set-mode-wifi")
     assert outcome(c).kind == "note"
     assert not api.calls and not api.writes
 
@@ -407,8 +429,8 @@ def test_duplicate_start_and_refresh_refused_until_action_finishes():
     jobs = []
     c, _ = controller(runner=lambda target, kind: jobs.append((target, kind)))
     jobs.pop(0)[0]()
-    assert c.start_action("backup-var")
-    assert not c.start_action("backup-var")
+    assert start(c, "backup-var")
+    assert not start(c, "backup-var")
     assert not c.request_refresh()
     assert c.busy and all(not i.enabled for i in c.snapshot().items)
     jobs.pop(0)[0]()
@@ -428,7 +450,7 @@ def test_usb_probe_and_action_are_serialized_and_stale_probe_cannot_enable_actio
     c._runner = core.thread_runner
     assert c.request_refresh()
     assert entered.wait(2)
-    assert c.start_action("backup-var")
+    assert start(c, "backup-var")
     assert c.busy and not c.request_refresh()
     assert not api.calls  # action is waiting for the USB probe lock
     release.set()
@@ -461,7 +483,7 @@ def test_shutdown_releases_pending_prompt_without_writing():
     c.request_refresh()
     jobs = []
     c._runner = lambda target, kind: jobs.append(target)
-    assert c.start_action("set-mode")
+    assert c.start_action("set-mode-wifi")
     worker = threading.Thread(target=jobs.pop())
     worker.start()
     event = c._events.get(timeout=2)
@@ -470,7 +492,7 @@ def test_shutdown_releases_pending_prompt_without_writing():
     c.shutdown()
     worker.join(timeout=2)
     assert not worker.is_alive() and not c.api.writes
-    assert not c.start_action("backup-var")
+    assert not start(c, "backup-var")
 
 
 def test_output_router_captures_carriage_progress_and_restores_streams():
@@ -539,7 +561,7 @@ def test_failed_usb_refresh_disables_previously_ready_actions():
     assert snap.headline == "USB check failed"
     assert "Fake USB enumeration failed" in snap.detail
     assert not any(item.enabled for item in snap.items)
-    assert not c.start_action("set-mode") and not api.calls
+    assert not start(c, "set-mode") and not api.calls
     api.devices = lambda: [{"port": "1-1", "state": "dfu"}]
     c.request_refresh()
     assert c.snapshot().checked and any(i.enabled for i in c.snapshot().items)
@@ -549,7 +571,7 @@ def test_failed_device_action_is_not_reported_as_success():
     api = FakeApi()
     api.fail = RuntimeError("Fake readback mismatch: leave robot in DFU")
     c, _ = controller(api, ("developer", "confirm"))
-    c.start_action("set-mode")
+    start(c, "set-mode")
     result = outcome(c)
     assert result.kind == "error" and "readback mismatch" in result.lines[0]
     assert not c.busy

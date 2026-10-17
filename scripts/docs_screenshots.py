@@ -199,7 +199,10 @@ def main():
                 assert not api.writes
 
             window.show_home()
-            window.open_action("backup-var")
+            window.open_action("backups")
+            pump_until(lambda: window.prompt is not None)
+            window.controls["choose"]("backup-var")
+            window.controls["primary"].invoke()
             pump_until(lambda: float(window.progress_bar.cget("value")) == 50)
             capture("progress")
             api.progress_gate.set()
