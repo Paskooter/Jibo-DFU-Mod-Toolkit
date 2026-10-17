@@ -6,8 +6,10 @@
 #
 # Every state is rendered at 100%, 150% and 200% through the window's own DPI layout
 # (fonts and sizes in device pixels, as on a per-monitor-DPI screen). "live-*" files are
-# real windows driven through ToolkitSetupStatus and captured with their Windows frame
-# at the machine's own scale. -HighContrast switches Windows high contrast on for the run.
+# real windows driven through ToolkitSetupStatus and captured with their Windows frame.
+# Setup captures use the machine scale; the live support capture uses forced 125%
+# (see the native-100% product font-lifetime observation in the receipt).
+# -HighContrast switches Windows high contrast on for each isolated phase.
 # The Mono previews on Linux compile the same $script:ToolkitPreviewSource.
 [CmdletBinding()]
 param(
@@ -18,7 +20,7 @@ param(
     [switch]$SkipLive,
     [string]$Phase = '',
     [switch]$TimeoutProbe,
-    [int]$PhaseTimeoutSeconds = 60
+    [ValidateRange(1, 120)][int]$PhaseTimeoutSeconds = 60
 )
 $ErrorActionPreference = 'Stop'
 
@@ -287,10 +289,10 @@ public static class ToolkitPreviewWindows {
         System.Threading.Thread.Sleep(600);
         string result = Capture(hwnd, path);
         Close(hwnd); // Cancel: the "Close" choice.
-        thread.Join(5000);
+        if (!thread.Join(5000)) return "message box did not close";
         return result;
     }
-    // Real clipboard: Copy details puts exactly the summary text there and says Copied.
+    // Observe the unchanged product same-DPI font lifetime without showing a window.
     public static string FontLifetimeControl() {
         using (var view = new ToolkitSupportView(ToolkitSetupText.Failure("Synthetic failure", false), "sample", "", false)) {
             Font before = view.StepLine.Font;
@@ -306,6 +308,7 @@ public static class ToolkitPreviewWindows {
         }
     }
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
+    // Real clipboard: Copy details puts exactly the summary text there and says Copied.
     public static string ClipboardCheck(string summary) {
         string result = "not run";
         var thread = new System.Threading.Thread(delegate() {
@@ -501,6 +504,7 @@ try {
         $stall = [ToolkitPreview]::SupportStates()[0]
         # Exercise the controller unchanged at 125%; its native 100% OnLoad
         # redundantly reapplies 96 DPI and has a separately reported font bug.
+        # 125% also fits the hosted runner desktop; 150% was visibly clamped.
         [ToolkitTheme]::ForcedDpi = 120
         $receipt.live.stall_dpi = 120
         Write-PreviewProgress 'begin live stall dialog at forced 120 DPI (native 96 DPI product defect recorded separately)'

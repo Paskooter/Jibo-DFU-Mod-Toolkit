@@ -7,7 +7,7 @@ param(
     [string]$Filter = '',
     [switch]$SkipLive,
     [switch]$TimeoutProbe,
-    [int]$PhaseTimeoutSeconds = 60
+    [ValidateRange(1, 120)][int]$PhaseTimeoutSeconds = 60
 )
 $ErrorActionPreference = 'Stop'
 if (-not [IO.Path]::IsPathRooted($OutDir)) { $OutDir = Join-Path (Get-Location) $OutDir }
@@ -44,7 +44,7 @@ if (-not $TimeoutProbe -and -not $SkipLive -and -not $HighContrast) { $phases +=
 $failed = $false
 Save-Receipt
 foreach ($phase in $phases) {
-    $timeout = if ($TimeoutProbe) { 2 } else { $PhaseTimeoutSeconds }
+    $timeout = if ($phase -eq 'timeout-probe') { 2 } elseif ($TimeoutProbe) { 10 } else { $PhaseTimeoutSeconds }
     $stdout = Join-Path $OutDir "$phase.stdout.txt"
     $stderr = Join-Path $OutDir "$phase.stderr.txt"
     $phaseReceipt = Join-Path $OutDir "$phase.json"
