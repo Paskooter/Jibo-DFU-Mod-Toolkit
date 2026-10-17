@@ -114,13 +114,13 @@ def test_only_install_is_offered_and_needs_dfu():
     assert dfu["flash-update"].enabled and dfu["flash-update"].label == jibo_tui.UPDATE_ACTION_LABEL
 
 
-def test_old_device_layer_keeps_the_original_menu():
-    """Control: without the hosted API the menu is exactly the pre-hosted one."""
+def test_old_device_layer_keeps_local_package_gate_with_owner_label():
+    """The action name is stable; missing hosted support does not bypass its gate."""
     api = FakeApi()
     api.packages = []
     items = {item.key: item for item in jibo_tui.TerminalMenu(api).items}
     assert "download-phoenix" not in items
-    assert items["flash-update"].label == "Install an official update package"
+    assert items["flash-update"].label == jibo_tui.UPDATE_ACTION_LABEL
     assert not items["flash-update"].enabled
     assert items["flash-update"].reason == "No packages found in ./updates."
 

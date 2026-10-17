@@ -365,7 +365,6 @@ def test_restore_var_selection_and_confirmation(tmp_path, approve):
     source.write_text(json.dumps({"partitions": [{"name": "var", "size_bytes": 524288000},
                                                {"name": "services", "size_bytes": 524288000}]}))
     api = FakeApi()
-    from test_saved_backups import BackupApi
     api.saved_backups = lambda: []
     api.describe_backup_set = lambda p: dict(
         manifest=str(p), state="complete", restorable=True,

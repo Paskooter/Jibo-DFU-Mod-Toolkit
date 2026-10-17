@@ -776,7 +776,8 @@ class ToolkitWindow:
         self._render_download_controls()
 
     def _render_download_controls(self):
-        active = self.controller.download_active
+        active = self.controller.work_active
+        self.progress_cancel.configure(text=self.controller.work_cancel_label)
         if active and not self._cancel_shown:
             self.progress_cancel.state(["!disabled"])
             self.progress_cancel.pack(anchor="e", padx=20, pady=(0, 16))
@@ -791,7 +792,7 @@ class ToolkitWindow:
     def cancel_download(self):
         if self.controller.cancel_download():
             self.progress_cancel.state(["disabled"])
-            self.progress_status.configure(text="Canceling... what was already saved is kept.")
+            self.progress_status.configure(text=self.controller.work_cancel_message)
 
     def _stop_progress(self):
         if getattr(self, "_progress_running", False):

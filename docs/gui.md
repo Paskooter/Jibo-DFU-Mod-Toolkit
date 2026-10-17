@@ -70,7 +70,7 @@ Available operations use `jibo_tui.execute_action()` and the original
   explicitly approve starting the RAM loader. This step does not write eMMC.
   When DFU appears, the toolkit waits for USB access and the recovery loader to
   settle for up to 25 seconds, never past the entry timeout.
-- **Mode / Wi-Fi:** normal, developer, int-developer and OOBE, protected or
+- **More tools → Mode / Wi-Fi:** normal, developer, int-developer and OOBE, protected or
   open networks, repeated hidden password entry, quick file editing where
   supported, and the same explicit slower full-var fallback.
 - **Set mode and configure Wi-Fi:** developer modes show a checked-by-default
@@ -79,7 +79,7 @@ Available operations use `jibo_tui.execute_action()` and the original
   **not removal**. The separate Remove button maps to `remove`. Install and
   removal use the existing 500 MiB full-var transaction with rollback and
   SHA-256 readback; the exact shared review still precedes writing.
-- **Save/check var backup:** reuse the backend's verified robot-specific
+- **Backups → Save/check var backup:** reuse the backend's verified robot-specific
   baseline, show transfer progress and the resulting path.
 - **Flash a package:** select from the toolkit folder's `updates` directory or
   choose a hosted Phoenix image. The default is **Keep this Jibo's calibration
@@ -116,7 +116,14 @@ Available operations use `jibo_tui.execute_action()` and the original
 - **Interrupted flash:** keep the rollback copy and record. Resume currently
   refuses before USB action; select the package again for a new reviewed flash.
   For official and Phoenix packages, `flash-update --verify-readback` enables extra checks.
-- **More tools:** partition-layout check, selected-partition backup/restore,
+- **Backups:** fresh full/selected partition sets, size checklists, reviewed
+  restore, and a saved-backups manager with name/date/partition/size details,
+  local checksum checks, folder opening and reviewed deletion of one new set.
+  Older sets and original rollback images are listed without moving them.
+  **Stop after this partition** keeps the current read intact and skips later reads;
+  the active USB window still cannot be closed mid-transfer.
+  See [backup management and safety](backups.md).
+- **More tools:** separate mode and Wi-Fi actions, partition-layout check,
   writing an edited var image, inspecting/editing local backups, and
   **Remove boot-screen Wi-Fi/IP status**. To restore only var from a backup
   set, choose the manifest/folder and select only var. To write a standalone

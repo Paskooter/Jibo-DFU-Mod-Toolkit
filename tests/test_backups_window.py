@@ -1,9 +1,12 @@
 """Real Tk Backups screens. Synthetic data only; no device transport."""
 import os
+import threading
 import time
+from unittest.mock import patch
 import pytest
 import jibo_gui_core as core
 import jibo_tui as tui
+import jibo_dfu as dfu
 from test_gui_window import window
 from test_saved_backups import offline, capture_set, BackupApi, NAME
 
@@ -73,6 +76,8 @@ def test_real_window_drives_backend_backup_and_cancel_default_restore(offline):
     root = gui.create_root()
     w = gui.ToolkitWindow(root, c)
     errors = []
+    gate = threading.Event()
+    entered = threading.Event()
     root.report_callback_exception = lambda *a: errors.append(a)
     def pump(predicate):
         deadline = time.monotonic() + 8
@@ -120,6 +125,28 @@ def test_real_window_drives_backend_backup_and_cancel_default_restore(offline):
             w.controls["cancel"].invoke()
             pump(lambda: not c.busy and w.page_name == "result")
             assert not offline.forbidden and len(api.saved_backups()) == 1
+            original = dfu._upload_var
+            def held_read(*args, **kw):
+                entered.set()
+                assert gate.wait(10), "UI did not release the offline read"
+                return original(*args, **kw)
+            offline.uploads.clear()
+            with patch.object(dfu, "_upload_var", held_read):
+                w.show_home()
+                w.open_action("backups")
+                pump(lambda: w.prompt is not None)
+                choose("backup-all")
+                w.controls["choose"]("start")
+                w.controls["primary"].invoke()
+                pump(lambda: entered.is_set() and w.progress_cancel.winfo_viewable())
+                assert w.progress_cancel.cget("text") == "Stop after this partition"
+                w.progress_cancel.invoke()
+                assert not c.shutdown_if_safe(), "Closing must never cut a USB read"
+                gate.set()
+                pump(lambda: not c.busy and w.page_name == "result")
+            assert offline.uploads == ["var"]
+            assert any(e["state"] == "incomplete" for e in api.saved_backups())
     finally:
+        gate.set()
         c.shutdown()
         if not w.closed: w.close()

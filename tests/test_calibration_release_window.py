@@ -29,7 +29,7 @@ def test_more_tools_window_has_no_calibration_service_entries(window):
         assert w.controller.start_action("more-tools")
         assert len(captured) == 1
         assert captured[0].title == "More tools"
-        assert rendered[0][0] == ["probe-dfu-gpt", "backup-partitions", "restore-partitions", "write-var",
+        assert rendered[0][0] == ["set-mode", "configure-wifi", "probe-dfu-gpt", "write-var",
                                   "remove-boot-network-status", "inspect-backup", "edit-backup"]
         assert all(rendered[0][1])
         outcomes = [event[1] for event in w.controller.drain() if event[0] == "finished"]

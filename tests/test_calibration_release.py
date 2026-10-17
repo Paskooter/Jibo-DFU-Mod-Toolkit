@@ -47,6 +47,8 @@ class ReleaseTests(unittest.TestCase):
             return "confirm"
         if title == "More tools":
             return None
+        if title == "Backups":
+            return "backup-var"
         return keys[0] if keys else None
 
     def run_surface(self, surface, action):
@@ -79,7 +81,7 @@ class ReleaseTests(unittest.TestCase):
         for surface in ("tui", "gui"):
             with self.subTest(surface=surface), patch.object(dfu, "_backup_var_without_event", return_value=self.backup), \
                     patch.object(dfu, "calibration_identity", return_value=self.identity):
-                lines = self.run_surface(surface, "backup-var")
+                lines = self.run_surface(surface, "backups")
                 self.assert_local_only()
                 self.assertFalse(any("Calibration sharing" in line or "Removal receipt" in line for line in lines))
                 self.assertIn("Var backup is ready.", lines)
@@ -125,8 +127,8 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(len(self.prompts), 1)
                 title, options = self.prompts[0]
                 self.assertEqual(title, "More tools")
-                self.assertEqual([item.key for item in options], ["probe-dfu-gpt", "backup-partitions",
-                    "restore-partitions", "write-var", "remove-boot-network-status", "inspect-backup", "edit-backup"])
+                self.assertEqual([item.key for item in options], ["set-mode", "configure-wifi",
+                    "probe-dfu-gpt", "write-var", "remove-boot-network-status", "inspect-backup", "edit-backup"])
                 self.assert_local_only()
 
     def test_hidden_actions_refuse_before_hardware_or_prompts(self):

@@ -5,6 +5,7 @@ not import jibo_dfu, which keeps the CLI and the terminal interface acyclic.
 """
 
 import curses
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -223,8 +224,7 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
                  is_rcm and readiness.shofel_dfu_available, shofel_dfu_reason),
         MenuItem("set-mode-wifi", "Set mode and configure Wi-Fi" + quick,
                  is_dfu, connection_reason),
-        MenuItem("flash-update", UPDATE_ACTION_LABEL if hosted_available else
-                 "Install an official update package",
+        MenuItem("flash-update", UPDATE_ACTION_LABEL,
                  is_dfu and not missing_update and (bool(packages) or hosted_available),
                  update_reason),
         MenuItem("backups", BACKUPS_MENU_LABEL),
@@ -445,6 +445,7 @@ def _progress_session(screen, title, detail, events, cancel, thread):
     screen.timeout(100)
     dim = getattr(curses, "A_DIM", 0)
     line, cancelling = "Starting...", False
+    started = time.monotonic()
     while True:
         try:
             while True:
@@ -453,7 +454,10 @@ def _progress_session(screen, title, detail, events, cancel, thread):
             pass
         row, height, _width = _screen_heading(screen, title, detail)
         _addstr(screen, row + 1, 0, line)
-        _addstr(screen, height - 1, 0, "Canceling..." if cancelling else "Esc or c  Cancel", dim)
+        _addstr(screen, height - 2, 0, "Elapsed: {} s".format(int(time.monotonic() - started)), dim)
+        _addstr(screen, height - 1, 0,
+                getattr(cancel, "cancel_message", "Canceling...") if cancelling else
+                "Esc or c  " + getattr(cancel, "cancel_label", "Cancel"), dim)
         screen.refresh()
         if not thread.is_alive():
             return
@@ -477,7 +481,8 @@ def run_with_progress(title, work, cancel, detail=""):
         except Exception as exc:  # handed back to the flow, never raised here
             box["error"] = exc
 
-    thread = threading.Thread(target=target, name="jibo-hosted-work", daemon=True)
+    context = copy_context()
+    thread = threading.Thread(target=lambda: context.run(target), name="jibo-progress-work", daemon=True)
     thread.start()
     try:
         if _terminal_available():
@@ -1426,13 +1431,36 @@ RESTORE_REVIEW_INTRO = ("These partitions on the connected Jibo will be replaced
 OTHER_FOLDER_KEY = "other-folder"
 BACKUP_DETAIL_KEYS = ("restore", "open-folder", "check-files", "delete")
 _STATE_TEXT = {"complete": "Ready to restore", "missing-files": "Files missing",
-               "incomplete": "Not finished", "unreadable": "Cannot be read"}
+               "incomplete": "Not finished", "unreadable": "Cannot be read",
+               "rollback-image": "Original rollback image (kept)"}
 
 
 @dataclass(frozen=True)
 class PartitionItem(MenuItem):
     """A checklist row that carries its size, so a window can total the selection."""
     size_bytes: int = 0
+
+
+class BackupReadCancel:
+    """Cooperative read-only stop: finish the current partition, never cut USB."""
+    allow_close = False
+    cancel_label = "Stop after this partition"
+    cancel_message = "Stopping after this partition. Saved files will be kept."
+
+    def __init__(self):
+        self._event = threading.Event()
+
+    def cancel(self):
+        self._event.set()
+
+    def cancelled(self):
+        return self._event.is_set()
+
+
+@dataclass(frozen=True)
+class BackupReadProgress:
+    message: str
+    phase: str = "prepare"
 
 
 def size_label(value):
@@ -1522,6 +1550,8 @@ def backup_detail_lines(entry, current_tag=None, identified=True):
         lines.append("  {}  {}{}".format(item["name"], size_label(item["size_bytes"]),
                                          "" if item["present"] else "  (file missing)"))
     lines.append("Folder: " + entry["folder"])
+    if entry.get("restore_reason"):
+        lines.append(entry["restore_reason"])
     return lines
 
 
@@ -1583,7 +1613,15 @@ def _run_backup_set(api, readiness, selected, available, title):
                            prompt="Start the backup?", detail="\n".join(lines), initial="start")
     if choice != "start":
         return {"status": "cancelled", "message": "No backup was started."}
-    return api.backup_partitions(tuple(selected), port=readiness.port)
+    result, error = run_with_progress(
+        title, lambda report, token: api.backup_partitions(
+            tuple(selected), port=readiness.port, cancel=token.cancelled,
+            progress=lambda message: report(BackupReadProgress(message))),
+        BackupReadCancel(), detail="Read only. Stop waits for the current partition to finish; "
+                                  "saved files are kept. Keep USB connected.")
+    if error is not None:
+        raise error
+    return result
 
 
 def partition_checklist(available):
@@ -1700,6 +1738,8 @@ def _backup_detail_flow(api, readiness, entry, tag, identified):
     elif not same_robot:
         restore_reason = ("The connected Jibo is a different robot. Connect this backup's Jibo "
                           "to restore it.")
+    elif entry.get("restore_reason"):
+        restore_reason = entry["restore_reason"]
     elif not entry["restorable"]:
         restore_reason = "This backup is not complete, so it cannot be restored."
     else:
@@ -1710,9 +1750,9 @@ def _backup_detail_flow(api, readiness, entry, tag, identified):
                  restore_reason or "Choose the partitions to put back, then review before "
                                    "anything is written."),
         MenuItem("open-folder", "Open folder", reason="Show this backup's files on this computer."),
-        MenuItem("check-files", "Check files", entry["state"] == "complete",
+        MenuItem("check-files", "Check files", entry["state"] in ("complete", "rollback-image"),
                  "Re-reads the saved files on this computer and compares their checksums. "
-                 "The robot is not used." if entry["state"] == "complete" else
+                 "The robot is not used." if entry["state"] in ("complete", "rollback-image") else
                  "Some files are missing from this backup."),
         MenuItem("delete", "Delete this backup", deletable,
                  "Removes this backup from this computer. The robot is not changed."

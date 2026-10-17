@@ -309,14 +309,29 @@ class GuiController:
     def download_active(self):
         """True while a Phoenix list check or download runs; it never uses USB."""
         with self._lock:
+            return self._work_cancel is not None and getattr(self._work_cancel, "allow_close", True)
+
+    @property
+    def work_active(self):
+        with self._lock:
             return self._work_cancel is not None
+
+    @property
+    def work_cancel_label(self):
+        with self._lock:
+            return getattr(self._work_cancel, "cancel_label", "Cancel download")
+
+    @property
+    def work_cancel_message(self):
+        with self._lock:
+            return getattr(self._work_cancel, "cancel_message", "Canceling... what was already saved is kept.")
 
     def cancel_download(self):
         """Ask running network work to stop; a partial download is kept for resume."""
         with self._lock:
             token = self._work_cancel
             if token is not None:
-                self._note = "Canceling the download..."
+                self._note = self.work_cancel_message
         if token is None:
             return False
         token.cancel()
@@ -642,7 +657,8 @@ class GuiController:
         with self._lock:
             pending = self._pending
             work = self._work_cancel
-            if self._busy and work is None and (pending is None or pending.answered):
+            if self._busy and (work is None or not getattr(work, "allow_close", True)) and \
+                    (pending is None or pending.answered):
                 return False
             self._closing = True
             if work is not None:
