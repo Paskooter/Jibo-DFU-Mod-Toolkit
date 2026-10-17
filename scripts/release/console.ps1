@@ -11,17 +11,36 @@ function Protect-ToolkitText([string]$Text) {
     $clean = $clean -replace '/(?:home|Users)/[^/\s]+', '[user folder]'
     return $clean
 }
+function Get-ToolkitWindowsLabel {
+    if ($env:OS -ne 'Windows_NT') { return [Environment]::OSVersion.VersionString }
+    # Local registry only: never block the first UI on a WMI/CIM provider. The
+    # compatibility ProductName can say Windows 10 on Windows 11. Build alone
+    # cannot distinguish a client from Server (which also uses build 26100).
+    try { $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop }
+    catch { return 'Windows (version unavailable)' }
+    $build = 0; $revision = 0
+    $hasBuild = [string]$windows.CurrentBuild -match '^[0-9]{4,6}$' -and [int]::TryParse([string]$windows.CurrentBuild, [ref]$build)
+    $hasRevision = [string]$windows.UBR -match '^[0-9]{1,10}$' -and [int]::TryParse([string]$windows.UBR, [ref]$revision)
+    $name = 'Windows'
+    $product = [string]$windows.ProductName
+    if ($hasBuild -and $windows.InstallationType -eq 'Client' -and $product -match '^Windows (10|11)( [A-Za-z0-9 .()-]{1,80})?$') {
+        $edition = $Matches[2]
+        if ($build -ge 22000) { $name = 'Windows 11' + $edition }
+        elseif ($build -ge 10240 -and $Matches[1] -eq '10') { $name = $product }
+    } elseif ($hasBuild -and $windows.InstallationType -in @('Server','Server Core') -and $product -match '^Windows Server [A-Za-z0-9 .()-]{1,80}$') {
+        $name = $product
+    }
+    if (-not $hasBuild) { return 'Windows (version unavailable)' }
+    if ([string]$windows.DisplayVersion -match '^[0-9]{2}H[12]$') { $name += ' ' + $windows.DisplayVersion }
+    $number = [string]$build
+    if ($hasRevision) { $number += '.' + $revision }
+    return "$name (build $number)"
+}
 function Initialize-ToolkitLog([string]$Root, [string]$Build = 'unknown', [string]$ExistingPath = $env:JIBO_DFU_SETUP_LOG) {
     if (-not $Root) { $Root = $env:LOCALAPPDATA }
     if (-not $Root) { $Root = [IO.Path]::GetTempPath() }
     $script:ToolkitBuild = $Build
-    $script:ToolkitWindowsVersion = [Environment]::OSVersion.VersionString
-    if ($env:OS -eq 'Windows_NT') {
-        try {
-            $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-            $script:ToolkitWindowsVersion = "$($windows.ProductName) $($windows.DisplayVersion) (build $($windows.CurrentBuild).$($windows.UBR))"
-        } catch { } # Older Windows still has the CLR version string.
-    }
+    $script:ToolkitWindowsVersion = Get-ToolkitWindowsLabel
     $script:ToolkitWslVersion = 'not checked'
     $script:ToolkitStep = $null
     $script:ToolkitFailedStep = $null
@@ -230,6 +249,16 @@ function Write-ToolkitInteractionEvents {
         Write-ToolkitLog $event.Kind @{ at_utc=$event.Utc; question=$event.Message; step=$script:ToolkitStep }
     }
 }
+function Write-ToolkitClipboardEvents {
+    if (-not ('ToolkitSetupStatus' -as [type]) -or -not [ToolkitSetupStatus].GetMethod('DrainClipboardFailures')) { return }
+    foreach ($event in [ToolkitSetupStatus]::DrainClipboardFailures()) {
+        Write-ToolkitLog 'clipboard-copy-failed' @{
+            at_utc=$event.Utc; exception_type=$event.ExceptionType; category=$event.Category
+            hresult=$event.HResult; apartment=$event.Apartment
+            managed_thread_id=$event.ManagedThreadId; summary_length=$event.SummaryLength
+        }
+    }
+}
 function Set-ToolkitUserWait([bool]$Active, [string]$Instructions = '') {
     $script:ToolkitWaitingForUser = $Active
     if ('ToolkitSetupStatus' -as [type]) { [ToolkitSetupStatus]::UserWait($Active, $Instructions) }
@@ -262,6 +291,30 @@ public class ToolkitInteractionEvent {
     public string Kind, Utc, Message;
     public ToolkitInteractionEvent(string kind, string message) {
         Kind = kind; Message = message; Utc = System.DateTime.UtcNow.ToString("o");
+    }
+}
+// Copy diagnostics contain only bounded provenance, never an Exception object,
+// message, stack trace or the support/clipboard text. Unknown/custom type names
+// are not safe to log; the fixed category still distinguishes broad failures.
+public sealed class ToolkitClipboardFailure {
+    public readonly string Utc, ExceptionType, Category, HResult, Apartment;
+    public readonly int ManagedThreadId, SummaryLength;
+    public ToolkitClipboardFailure(System.Exception error, int summaryLength) {
+        Utc = System.DateTime.UtcNow.ToString("o");
+        var type = error.GetType();
+        ExceptionType = type == typeof(System.Runtime.InteropServices.ExternalException) ? "System.Runtime.InteropServices.ExternalException" :
+            type == typeof(System.Threading.ThreadStateException) ? "System.Threading.ThreadStateException" :
+            type == typeof(System.InvalidOperationException) ? "System.InvalidOperationException" :
+            type == typeof(System.ArgumentNullException) ? "System.ArgumentNullException" :
+            type == typeof(System.ArgumentException) ? "System.ArgumentException" : "other";
+        Category = error is System.Threading.ThreadStateException ? "thread-state" :
+            error is System.Runtime.InteropServices.ExternalException ? "external" :
+            error is System.InvalidOperationException ? "invalid-operation" :
+            error is System.ArgumentException ? "argument" : "unexpected";
+        HResult = "0x" + error.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture);
+        Apartment = System.Threading.Thread.CurrentThread.GetApartmentState().ToString();
+        ManagedThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
+        SummaryLength = summaryLength;
     }
 }
 // Plain-language presentation only. Keys are the exact logged strings (step names,
@@ -491,6 +544,15 @@ public static class ToolkitSetupText {
             f = F("error", "USB support stopped", "The toolkit\u2019s USB connection stopped unexpectedly.", "When nothing is being written to Jibo, close the toolkit window, then open the toolkit again.");
         else if (text.StartsWith("Install Microsoft App Installer"))
             f = F("error", "USB support cannot be installed automatically", "This PC is missing Microsoft\u2019s App Installer, which setup uses to install USB support.", "Install App Installer from the Microsoft Store, or install usbipd-win from its GitHub releases page. Then open the toolkit again.");
+        else if (text.StartsWith("usbipd-win setup returned")) {
+            int checkAt = text.IndexOf(" Check usbipd --version", System.StringComparison.Ordinal);
+            f = F("error", "USB support is not ready", checkAt < 0 ? text : text.Substring(0, checkAt),
+                "Open a fresh PowerShell window and run usbipd --version. Share its output and these details when asking for help. No USB connection was attempted.");
+        }
+        else if (text.StartsWith("usbipd-win installer exited with code") && text.IndexOf("Restart Windows as requested", System.StringComparison.Ordinal) >= 0)
+            f = F("info", "Restart Windows to finish USB setup", text.Substring(0, text.IndexOf('.') + 1), "Restart Windows as requested by the usbipd-win installer, then open the toolkit again.");
+        else if (text.StartsWith("usbipd-win installer"))
+            f = F("error", "USB support setup stopped", text, "Check the usbipd-win installer and Windows permission prompt. Share these details if it keeps failing.");
         else if (text.StartsWith("Setup exited with code"))
             f = F("error", "A Windows installer reported a problem", "The installer stopped with an error.", "Restart Windows if it asked you to, then open the toolkit again.");
         else if (text.StartsWith("GUI or USB support exited with code"))
@@ -1355,7 +1417,10 @@ public sealed class ToolkitSupportView : Panel {
     }
     public void DoCopy() {
         try { Clipboard.SetText(summary); CopyState = "copied"; }
-        catch (Exception) { CopyState = "failed"; }
+        catch (Exception error) {
+            CopyState = "failed";
+            ToolkitSetupStatus.RecordClipboardFailure(error, summary == null ? 0 : summary.Length);
+        }
         Relayout();
         if (CopyState == "failed") { Details.Focus(); Details.SelectAll(); }
         HelpLine.Announce();
@@ -1593,6 +1658,7 @@ public class ToolkitSetupStatus {
     public static IntPtr OwnerHandle { get { return ownerHandle; } }
     static readonly ToolkitQuestionState question = new ToolkitQuestionState();
     static readonly ConcurrentQueue<ToolkitInteractionEvent> events = new ConcurrentQueue<ToolkitInteractionEvent>();
+    static readonly ConcurrentQueue<ToolkitClipboardFailure> clipboardFailures = new ConcurrentQueue<ToolkitClipboardFailure>();
     static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
     static double stepStart, lastExternalAttention, externalStart, questionStart;
     static bool externalWait, forceClose, reminded;
@@ -1628,6 +1694,15 @@ public class ToolkitSetupStatus {
         var result = new System.Collections.Generic.List<ToolkitInteractionEvent>();
         ToolkitInteractionEvent item;
         while (events.TryDequeue(out item)) result.Add(item);
+        return result.ToArray();
+    }
+    public static void RecordClipboardFailure(Exception error, int summaryLength) {
+        clipboardFailures.Enqueue(new ToolkitClipboardFailure(error, summaryLength));
+    }
+    public static ToolkitClipboardFailure[] DrainClipboardFailures() {
+        var result = new System.Collections.Generic.List<ToolkitClipboardFailure>();
+        ToolkitClipboardFailure item;
+        while (clipboardFailures.TryDequeue(out item)) result.Add(item);
         return result.ToArray();
     }
     public static void Start() {
@@ -1804,6 +1879,11 @@ function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
                 [ToolkitConsoleNative]::MessageBox($owner, "Could not copy the details or open the log folder. $where. Look it over before sharing it.", 'Jibo DFU Toolkit', 0x00010010) | Out-Null
             }
             return $false
+        } finally {
+            # Details joins its STA dialog thread. Persist only after it returns,
+            # on this PowerShell runspace, including fallback/wrapper errors.
+            # Diagnostics must not replace the user's decision on a log I/O error.
+            try { Write-ToolkitClipboardEvents } catch { }
         }
     }
     Write-Host $summary

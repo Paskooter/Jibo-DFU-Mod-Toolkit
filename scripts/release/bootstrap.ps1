@@ -251,7 +251,7 @@ try {
     Write-ToolkitLog 'build' @{ build=$revision }
     $archive = Join-Path $PayloadRoot 'payload.tar.gz'
     $usbScript = Join-Path $PayloadRoot 'run.ps1'
-    if (-not (Test-Path $archive) -or -not (Test-Path $usbScript)) { throw 'Embedded payload is incomplete.' }
+    if (-not (Test-Path $archive) -or -not (Test-Path $usbScript) -or -not (Test-Path (Join-Path $PayloadRoot 'usbipd.ps1') -PathType Leaf)) { throw 'Embedded payload is incomplete.' }
     if ($SelfCheck) { Complete-ToolkitStep; Write-ToolkitLog 'setup-end' @{result='ok'; exit_code=0}; Write-Output 'Bootstrap scripts and Linux payload are present; WSL setup not attempted.'; exit 0 }
     Start-ToolkitSetup
     Set-ToolkitStep 'Checking Windows and WSL'
@@ -286,16 +286,34 @@ try {
     }
     $Distro = Select-ToolkitDistribution -Rows $rows -Requested $Distro -Root $PayloadRoot
     Write-Host "Using Linux: $Distro."
-    $usb = Get-Command usbipd.exe -ErrorAction SilentlyContinue
-    if (-not $usb) { $usb = Get-Command usbipd -ErrorAction SilentlyContinue }
+    . (Join-Path $PayloadRoot 'usbipd.ps1')
+    $usb = Resolve-UsbipdExecutable
     if (-not $usb) {
         if (-not (Confirm-Setup 'Install usbipd-win using the interactive Windows installer?')) { throw 'USB setup declined.' }
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
         if (-not $winget) { throw 'Install Microsoft App Installer (winget) or usbipd-win from https://github.com/dorssel/usbipd-win/releases, then reopen this app.' }
         Set-ToolkitStep 'Installing Windows components'
-        Invoke-ApprovedAdmin $winget.Source 'install --interactive --exact --id dorssel.usbipd-win'
-        Set-ToolkitUserWait $true 'Waiting for you: finish any usbipd-win installer window, restart Windows if requested, then reopen the EXE. Look for its installer window or flashing shield icon on the taskbar.'
-        throw 'usbipd-win setup finished. Reopen this app so Windows refreshes PATH.'
+        # Only this package's documented no-update result may be recovered, and
+        # only after probing the actual executable again. Other setup callers keep
+        # Invoke-ApprovedAdmin's existing nonzero/UAC/reboot behavior.
+        $install = Invoke-ToolkitElevated -File $winget.Source -Arguments 'install --interactive --exact --id dorssel.usbipd-win' -TimeoutSeconds 900 -AllowWait
+        if ($null -eq $install.ExitCode) { throw 'usbipd-win installer did not report an exit code. No USB handoff was attempted.' }
+        $status = [int]$install.ExitCode
+        $hex = '0x{0:X8}' -f ([int64]$status -band 4294967295L)
+        if ($status -notin @(0, -1978335189)) {
+            $hint = if ($status -in @(3010, 1641, -1978334967, -1978334966, -1978334965)) { 'Restart Windows as requested, then reopen the toolkit.' } else { 'Check the usbipd-win installer and Windows administrator approval; no USB handoff was attempted.' }
+            $error = New-Object Exception "usbipd-win installer exited with code $status ($hex). $hint"
+            $error.Data['ToolkitExitCode'] = $status
+            throw $error
+        }
+        $usb = Resolve-UsbipdExecutable
+        if (-not $usb) {
+            $reason = if ($status -eq -1978335189) { 'WinGet found no applicable update, but no usable usbipd executable was found.' } else { 'The installer finished, but no usable usbipd executable was found.' }
+            $error = New-Object Exception "usbipd-win setup returned $status ($hex). $reason Check usbipd --version in a fresh PowerShell window and review the usbipd-win installer status, then reopen the toolkit. No USB handoff was attempted."
+            $error.Data['ToolkitExitCode'] = $status
+            throw $error
+        }
+        Write-ToolkitLog 'usbipd-ready' @{ exit_code=$status; installer_status=$hex; result='ok' }
     }
     $linuxUser = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-un')
     $linuxUid = Native -Arguments @('--distribution', $Distro, '--exec', 'id', '-u')
@@ -329,7 +347,7 @@ try {
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
         Set-ToolkitUserWait $true 'Waiting for you: approve USB sharing at the Windows administrator prompt. If it is hidden, look for a flashing shield icon on the taskbar.'
         try {
-            $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper) -TimeoutSeconds 180 -AllowWait
+            $usbResult = Invoke-ToolkitNative -File 'powershell.exe' -Arguments @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $usbScript, '-UsbOnly', '-Distro', $Distro, '-ConsoleHelper', $consoleHelper, '-UsbipdPath', $usb) -TimeoutSeconds 180 -AllowWait
         } finally { Set-ToolkitUserWait $false }
         if ($usbResult.ExitCode -ne 0) {
             $error = New-Object Exception "USB handoff failed or administrator approval was declined. No GUI was started. $($usbResult.StartError) $($usbResult.Output -join ' ')"
@@ -340,7 +358,7 @@ try {
         $permissions = Start-WslUsbAccess -Name $Distro -User $linuxUser -Uid $linuxUid -Gid $linuxGid -Helper "$target/wsl-usb-permissions.sh" -Session $session
         if ($permissions.WaitForExit(200)) { throw 'The WSL USB permission watcher failed to start.' }
         $consoleHelper = Join-Path $PSScriptRoot 'console.ps1'
-        $monitorArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}"' -f $usbScript, $Distro, $consoleHelper
+        $monitorArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}" -UsbipdPath "{3}"' -f $usbScript, $Distro, $consoleHelper, $usb
         $monitor = Start-ToolkitProcess -FilePath powershell.exe -ArgumentList $monitorArgs
         Set-ToolkitStep 'Opening the toolkit'
         $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole -ReadyTimeoutSeconds $script:ToolkitPolicy.Seconds

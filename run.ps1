@@ -5,14 +5,15 @@ param(
     [switch]$UsbOnly,
     [switch]$MonitorUsb,
     [switch]$Gui,
-    [string]$ConsoleHelper
+    [string]$ConsoleHelper,
+    [string]$UsbipdPath
 )
 
 $ErrorActionPreference = 'Stop'
 $JiboVendorId = '0955'
 $JiboProductIds = @('7740', '701a')
 $RepoRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$UsbipdPath = $null
+
 $ElevationDeclined = $false
 $ElevationFailures = @{}
 $AttachFailures = @{}
@@ -352,6 +353,7 @@ function Select-Distribution {
 
 try {
     # The release EXE uses windowless native capture in both USB-only paths.
+    . (Join-Path $PSScriptRoot 'usbipd.ps1')
     if ($ConsoleHelper) {
         if (-not $UsbOnly -or -not $Distro) { throw '-ConsoleHelper requires -UsbOnly and an explicit -Distro.' }
         . $ConsoleHelper
@@ -368,15 +370,9 @@ try {
     $script:SelectedDistro = Select-Distribution -Distributions $distributions -Requested $Distro
 
     if (-not $ManualUsb) {
-        $usbipdCommand = Get-Command 'usbipd.exe' -ErrorAction SilentlyContinue
-        if (-not $usbipdCommand) {
-            $usbipdCommand = Get-Command 'usbipd' -ErrorAction SilentlyContinue
-        }
-        if ($usbipdCommand) {
-            $script:UsbipdPath = $usbipdCommand.Source
-        }
-        else {
-            $reason = 'usbipd-win is not installed or is not on PATH; automatic USB attachment is unavailable.'
+        $script:UsbipdPath = Resolve-UsbipdExecutable -PreferredPath $UsbipdPath
+        if (-not $script:UsbipdPath) {
+            $reason = 'No usable usbipd-win executable was found; automatic USB attachment is unavailable.'
             Write-ManualUsbInstructions -Reason $reason
             if (-not $UsbOnly) {
                 Write-Host 'If needed, install usbipd-win from an Administrator PowerShell with:'
@@ -416,10 +412,7 @@ try {
     }
 
     if ($ManualUsb) {
-        $script:UsbipdPath = (Get-Command 'usbipd.exe' -ErrorAction SilentlyContinue).Source
-        if (-not $script:UsbipdPath) {
-            $script:UsbipdPath = (Get-Command 'usbipd' -ErrorAction SilentlyContinue).Source
-        }
+        $script:UsbipdPath = Resolve-UsbipdExecutable -PreferredPath $UsbipdPath
         $manualDevices = @()
         if ($script:UsbipdPath) {
             $manualDevices = @(Get-JiboUsbDevices)
@@ -447,7 +440,7 @@ try {
     if (-not $ManualUsb -and $script:UsbipdPath -and -not $script:StateWarningShown) {
         # Keep USB reattachment running while WSL owns the interactive console.
         # The child uses -File; no encoded PowerShell command is needed.
-        $monitorArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}"' -f $PSCommandPath, $script:SelectedDistro
+        $monitorArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -UsbipdPath "{2}"' -f $PSCommandPath, $script:SelectedDistro, $script:UsbipdPath
         $monitor = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
             -ArgumentList $monitorArguments -NoNewWindow -PassThru
     }

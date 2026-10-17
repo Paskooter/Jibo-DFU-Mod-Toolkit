@@ -1,5 +1,5 @@
 # Parse and exercise the bootstrap without real WSL, USB, installs or UAC.
-param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'))
+param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'), [string]$Scenario = '*')
 $ErrorActionPreference = 'Stop'
 $bootstrapText = [IO.File]::ReadAllText($BootstrapPath)
 if ($bootstrapText -match 'Read-Host') { throw 'Windowless bootstrap must never wait for console input' }
@@ -91,6 +91,7 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     [IO.File]::WriteAllText((Join-Path $fixture 'payload.tar.gz'), 'not read on refusal')
     [IO.File]::WriteAllText((Join-Path $fixture 'run.ps1'), 'not run on refusal')
+    Copy-Item (Join-Path (Split-Path (Split-Path (Split-Path $BootstrapPath))) 'usbipd.ps1') $fixture
     [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
     $child = Join-Path $fixture 'refusal.ps1'
     $childText = @'
@@ -279,6 +280,18 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return
     }
     [IO.File]::WriteAllText((Join-Path $fixture 'revision.txt'), ('a' * 40))
     $child = Join-Path $fixture 'flow.ps1'
+    $usbHelper = Join-Path (Split-Path (Split-Path (Split-Path $BootstrapPath))) 'usbipd.ps1'
+    if (Test-Path $usbHelper) { Copy-Item $usbHelper $fixture }
+    $programFiles = Join-Path $fixture 'Program Files'
+    $usbFolder = Join-Path $programFiles 'usbipd-win'
+    New-Item -ItemType Directory -Path $usbFolder -Force | Out-Null
+    $fixtureUsb = Join-Path $usbFolder 'usbipd.exe'
+    if ($env:OS -eq 'Windows_NT') {
+        Add-Type -TypeDefinition 'public class FixtureUsb { public static void Main(string[] a) { if (a.Length != 1 || a[0] != "--version") System.Environment.Exit(91); if (System.Environment.GetEnvironmentVariable("USBIPD_FIXTURE_MODE") == "broken") { System.Console.WriteLine("token=fixture-secret"); System.Environment.Exit(17); } System.Console.WriteLine("5.3.0"); } }' -OutputAssembly $fixtureUsb -OutputType ConsoleApplication
+    } else {
+        [IO.File]::WriteAllText($fixtureUsb, "#!/bin/sh`n[ `"`$1`" = --version ] && [ `$# = 1 ] || exit 91`nif [ `"`$USBIPD_FIXTURE_MODE`" = broken ]; then printf 'token=fixture-secret\n'; exit 17; fi`nprintf '5.3.0\n'`n")
+        & chmod +x $fixtureUsb
+    }
     $childText = @'
 param($Bootstrap, $Payload, $Case)
 # Native dialogs are an external boundary; console.ps1 is exercised separately.
@@ -290,6 +303,12 @@ Import-Module Microsoft.PowerShell.Utility
 $global:UacCase = $Case
 $global:UacTrace = Join-Path $Payload ($Case + '.jsonl')
 $env:LOCALAPPDATA = Join-Path $Payload $Case
+$env:ProgramFiles = Join-Path $Payload 'Program Files'
+$env:ProgramW6432 = $env:ProgramFiles
+$global:FixtureUsb = Join-Path $env:ProgramFiles 'usbipd-win/usbipd.exe'
+$global:UsbInstallCase = $Case -like 'usb-*' -and $Case -notin @('usb-declined','usb-installed-stale-path','usb-installed-current-path')
+if ($global:UsbInstallCase) { $env:ProgramFiles = Join-Path $Payload $Case; $env:ProgramW6432 = $env:ProgramFiles }
+function Get-ItemProperty { param($LiteralPath,$Name,$ErrorAction); return $null } # No real registry inventory.
 function Record($Kind, $Values) { [IO.File]::AppendAllText($global:UacTrace, (([pscustomobject]@{Kind=$Kind; Values=@($Values)} | ConvertTo-Json -Compress) + "`n")) }
 function wsl.exe {
     Record 'wsl' $args
@@ -309,7 +328,7 @@ function wsl.exe {
             'newest' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-22.04 Stopped 2`n Ubuntu-24.04 Stopped 2" }
             'wsl1-decline' { return "$header`n* Ubuntu-22.04 Stopped 1" }
             'unhealthy-private' { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
-            { $_ -in @('wrong-os-decline','old-version-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','grant-failed','usb-declined','watcher-failed','success') } { return "$header`n* Ubuntu-22.04 Stopped 2" }
+            { $_ -like 'usb-*' -or $_ -in @('wrong-os-decline','old-version-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','grant-failed','watcher-failed','success') } { return "$header`n* Ubuntu-22.04 Stopped 2" }
             default { return "$header`n* NVIDIA-Workbench Stopped 2" }
         }
     }
@@ -337,14 +356,33 @@ function wsl.exe {
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
 function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 } }
-function Get-Command { param($Name, $ErrorAction); return [pscustomobject]@{Source='fixture-usbipd'} }
-function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
+function Get-Command {
+    param($Name, $ErrorAction, $CommandType)
+    if ($Name -like 'usbipd*' -and ($global:UacCase -eq 'usb-installed-stale-path' -or $global:UsbInstallCase)) { return $null }
+    if ($Name -eq 'winget.exe') { if ($global:UacCase -eq 'usb-winget-missing') { return $null }; return [pscustomobject]@{Source='winget-fixture'; CommandType='Application'} }
+    return [pscustomobject]@{Source=$global:FixtureUsb; CommandType='Application'}
+}
+function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Install usbipd-win' -and $global:UsbInstallCase -and $global:UacCase -ne 'usb-install-refused') { return 'yes' }; if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
 function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Get-Item { param($LiteralPath); return [pscustomobject]@{Length=$(if ($global:UacCase -eq 'size-mismatch') { 12 } else { 360684292 })} }
 function Get-FileHash { param($LiteralPath, $Algorithm); Record 'hash' @($Algorithm); return [pscustomobject]@{Hash=$(if ($global:UacCase -eq 'hash-mismatch') { '0' * 64 } else { '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f' })} }
 function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $WindowStyle)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
+    if ($FilePath -eq 'winget-fixture') {
+        if ($Verb -ne 'RunAs' -or $ArgumentList -cne 'install --interactive --exact --id dorssel.usbipd-win') { throw 'Installer consent/arguments changed' }
+        if ($global:UacCase -eq 'usb-uac-cancelled') { throw 'Synthetic UAC cancellation' }
+        if ($global:UacCase -in @('usb-fresh-ready','usb-noop-ready','usb-noop-broken','usb-reboot-ready','usb-failure-ready')) {
+            $directory = Join-Path $env:ProgramFiles 'usbipd-win'
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+            Copy-Item $global:FixtureUsb (Join-Path $directory 'usbipd.exe')
+            if ($global:UacCase -eq 'usb-noop-broken') { $env:USBIPD_FIXTURE_MODE = 'broken' }
+        }
+        $exit = switch ($global:UacCase) { 'usb-fresh-ready' {0}; 'usb-fresh-missing' {0}; 'usb-reboot-ready' {3010}; 'usb-winget-reboot' {-1978334967}; 'usb-failure-ready' {1603}; default {-1978335189} }
+        $process = [pscustomobject]@{ExitCode=$exit; Handle=1; HasExited=$true}
+        $process | Add-Member ScriptMethod WaitForExit { param($Timeout); return $true }
+        return $process
+    }
     $isGui = $ArgumentList -match '^--distribution ([A-Za-z0-9._-]+) --user ([^\s"]+) --exec "bash" "([^"]+/wsl-user-launch.sh)" "([^"]+/jibo-dfu)" "([^"]+)" "([^"]+)"$'
     if ($isGui) { Record 'wsl' @('--distribution', $Matches[1], '--user', $Matches[2], '--exec', 'bash', $Matches[3], $Matches[4], $Matches[5], $Matches[6]) }
     $process = [pscustomobject]@{Id=4242; HasExited=($isGui -or ($global:UacCase -eq 'watcher-failed' -and $FilePath -match 'wsl.exe$')); ExitCode=$(if ($isGui) { 41 } else { 0 }); Handle=1}
@@ -358,7 +396,7 @@ if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed')) {
+    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing') | Where-Object { $_ -like $Scenario }) {
         try {
             $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
             $code = $LASTEXITCODE
@@ -369,7 +407,15 @@ exit $LASTEXITCODE
             $downloads = @($events | Where-Object { $_.Kind -eq 'download' })
             $imports = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--import' })
             $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
-            if ($admin.Count) { throw 'distro setup requested UAC' }
+            $usbInstallCase = $case -like 'usb-*' -and $case -notin @('usb-declined','usb-installed-stale-path','usb-installed-current-path')
+            if ($admin.Count -and -not $usbInstallCase) { throw 'distro setup requested UAC' }
+            if ($usbInstallCase) {
+                $expectedAdmin = if ($case -in @('usb-install-refused','usb-winget-missing')) {0} else {1}
+                if ($admin.Count -ne $expectedAdmin -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Install usbipd-win') { throw 'USB install did not ask/install exactly once' }
+                if ($case -notin @('usb-noop-ready','usb-fresh-ready') -and (@($events | Where-Object Kind -eq 'usb').Count -or @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'once' }).Count)) { throw 'Unready USB prerequisite reached handoff/grant' }
+                if ($case -in @('usb-noop-missing','usb-noop-broken') -and $text -notmatch 'usbipd-win.*-1978335189.*0x8A15002B') { throw ('Missing actionable no-op status: ' + $text) }
+                if ($text -match 'fixture-secret') { throw 'Probe output leaked' }
+            }
             if ($case -notlike 'explicit-*') {
                 if ($text -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali') { throw 'tool/custom distro was listed' }
                 if (@($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali' }).Count) { throw 'tool/custom distro was probed/used' }
@@ -378,7 +424,9 @@ exit $LASTEXITCODE
             $chosen = switch ($case) {
                 'ubuntu24' { 'Ubuntu-24.04' }; 'private' { 'Jibo-DFU-Toolkit' }; 'private-priority' { 'Jibo-DFU-Toolkit' }
                 'default-preferred' { 'Ubuntu-22.04' }; 'newest' { 'Ubuntu-24.04' }; 'explicit-good' { 'NVIDIA-Workbench' }
-                'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }
+                'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }; 'usb-installed-stale-path' { 'Ubuntu-22.04' }
+                'usb-installed-current-path' { 'Ubuntu-22.04' }
+                { $_ -in @('usb-noop-ready','usb-fresh-ready') } { 'Ubuntu-22.04' }
             }
             if ($case -in $declines) {
                 if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
@@ -387,7 +435,16 @@ exit $LASTEXITCODE
                 if ($code -ne 41 -or $gui.Count -ne 1 -or $gui[0].Values[1] -cne $chosen -or $text -notmatch ('Using Linux: ' + [regex]::Escape($chosen))) { throw ('wrong GUI choice/exit: ' + $text) }
                 $user = if ($chosen -eq 'Jibo-DFU-Toolkit') { 'jibo' } else { 'fixture' }
                 if (($gui[0].Values -join '|') -notmatch ('\|--user\|' + $user + '\|') -or ($gui[0].Values -join ' ') -match '/AppRun') { throw 'GUI was not direct normal-user launch' }
-                if ($case -ne 'create-success' -and ($prompts.Count -or $downloads.Count -or $imports.Count)) { throw 'existing matching distro prompted or installed' }
+                if ($case -ne 'create-success' -and -not $usbInstallCase -and ($prompts.Count -or $downloads.Count -or $imports.Count)) { throw 'existing matching distro prompted or installed' }
+                if ($case -in @('success','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-fresh-ready')) {
+                    $resolved = if ($usbInstallCase) { Join-Path (Join-Path (Join-Path $fixture $case) 'usbipd-win') 'usbipd.exe' } else { $fixtureUsb }
+                    $handoff = @($events | Where-Object Kind -eq 'usb')
+                    if ($handoff.Count -ne 1 -or $handoff[0].Values -notcontains '-UsbipdPath') { throw 'Resolved usbipd path lost before USB-only child' }
+                    $index = [Array]::IndexOf([object[]]$handoff[0].Values, '-UsbipdPath')
+                    if ($handoff[0].Values[$index+1] -cne $resolved) { throw 'USB-only child received another executable' }
+                    $monitors = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '-MonitorUsb' })
+                    if ($monitors.Count -ne 1 -or [string]$monitors[0].Values[1] -notlike ('*-UsbipdPath "' + $resolved + '"*')) { throw 'Resolved usbipd path lost before monitor child' }
+                }
                 $grant = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'once' })
                 if ($grant.Count -ne 1 -or $grant[0].Values[3] -ne 'root') { throw 'password-free root USB grant did not run once' }
                 $watch = @($events | Where-Object { $_.Kind -eq 'start' -and [string]$_.Values[1] -match '--user root' })

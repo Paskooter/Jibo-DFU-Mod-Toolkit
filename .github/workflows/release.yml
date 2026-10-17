@@ -80,6 +80,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File scripts/release/test-console.ps1 -Case all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native usbipd executable fixtures (Windows PowerShell 5.1)
+        if: always() && matrix.platform == 'Windows'
+        run: |
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.platform == 'Windows'
+        with:
+          name: usbipd-native-receipts
+          path: usbipd-native-receipts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require complete native usbipd receipts
+        if: always() && matrix.platform == 'Windows'
+        run: |
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install native Mac build-only prerequisites
         if: matrix.platform == 'macOS'
         run: |
@@ -112,6 +129,27 @@ jobs:
           release-out/*.AppImage --appimage-extract-and-run --version
           release-out/*.AppImage --appimage-extract-and-run --self-check
           xvfb-run -a release-out/*.AppImage --appimage-extract-and-run --gui-smoke
+      - name: Native support wrapper fixture (Windows PowerShell 5.1)
+        if: always() && matrix.platform == 'Windows'
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.platform == 'Windows'
+        with:
+          name: support-native-receipts
+          path: support-native-receipts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require complete native support wrapper receipts
+        if: always() && matrix.platform == 'Windows'
+        timeout-minutes: 1
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Validate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Record artifact hashes and byte sizes
         shell: bash
         run: |

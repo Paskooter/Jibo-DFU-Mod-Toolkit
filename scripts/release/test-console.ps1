@@ -445,6 +445,9 @@ public class ToolkitSetupStatus {
         return $process
     }
     foreach ($name in @('payload.tar.gz','run.ps1','wsl-usb-permissions.sh','wsl-user-launch.sh','wsl-provision.sh')) { [IO.File]::WriteAllText((Join-Path $fixture $name), 'fixture') }
+    # Console lifecycle isolates prerequisite discovery; the real resolver and
+    # native probes are exercised by test-bootstrap.ps1/test_windows_usbipd.py.
+    [IO.File]::WriteAllText((Join-Path $fixture 'usbipd.ps1'), 'function Resolve-UsbipdExecutable { return "fixture-usbipd" }')
     $mockHelper = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1')) + @'
 
 function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }

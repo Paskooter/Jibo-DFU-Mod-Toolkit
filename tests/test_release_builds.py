@@ -363,7 +363,7 @@ def test_windows_selfcheck_requires_embedded_license_and_notice(tmp_path, monkey
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
     monkeypatch.setattr(sys, 'argv', ['bootstrap', '--self-check'])
     for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh',
-                 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1'):
+                 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1', 'usbipd.ps1'):
         with pytest.raises(RuntimeError, match='Missing embedded Windows helper: ' + name):
             module.main()
         (tmp_path / name).write_text('synthetic helper')

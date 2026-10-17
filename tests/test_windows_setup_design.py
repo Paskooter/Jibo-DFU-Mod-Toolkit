@@ -59,7 +59,10 @@ def test_every_logged_setup_string_has_plain_window_wording(tmp_path):
     steps += ['Starting setup', 'Checking Windows and WSL', 'Cleaning up USB support']
     questions = ps_strings(QUESTION_CALL, BOOTSTRAP)
     waits = ps_strings(WAIT_CALL, BOOTSTRAP, CONSOLE)
-    assert len(steps) >= 12 and len(questions) == 3 and len(waits) == 5
+    # Successful usbipd install now re-probes and continues in this process;
+    # the old unconditional reopen/PATH-refresh wait is intentionally gone.
+    assert len(steps) >= 12 and len(questions) == 3 and len(waits) == 4
+    assert not any('then reopen the EXE' in wait for wait in waits)
     data = catalogue(tmp_path, sorted(set(steps)), questions, waits, [])
     for step, text in data['steps'].items():
         assert text, 'no plain wording for logged step: ' + step
@@ -99,6 +102,26 @@ def test_failure_wording_states_what_happened_and_what_to_try(tmp_path, message,
         assert 'closed the question' in text['what'] and 'Not now' in text['what']
     for line in (text['headline'], text['what'], text['try']):
         assert 'wsl --shutdown' not in line and not re.search(r'\bstalled\b', line), line
+
+
+@pytest.mark.parametrize('message,headline', [
+    ('usbipd-win setup returned -1978335189 (0x8A15002B). WinGet found no applicable update, but no usable usbipd executable was found.', 'USB support is not ready'),
+    ('usbipd-win setup returned 0 (0x00000000). The installer finished, but no usable usbipd executable was found.', 'USB support is not ready'),
+    ('usbipd-win installer exited with code 3010 (0x00000BC2). Restart Windows as requested, then reopen the toolkit.', 'Restart Windows to finish USB setup'),
+    ('usbipd-win installer exited with code 1603 (0x00000643). Check the usbipd-win installer and Windows administrator approval; no USB handoff was attempted.', 'USB support setup stopped'),
+])
+def test_usbipd_failure_is_specific_without_generic_reboot_advice(tmp_path, message, headline):
+    full = 'Step: Installing Windows components\r\n' + message + '\r\nTry: Check for an installer or Windows administrator approval prompt. Restart Windows if requested.'
+    text = catalogue(tmp_path, [], [], [], [{'message': full, 'wait': False}])['failures'][full]
+    assert text['headline'] == headline
+    assert 'usbipd' in text['what'].lower()
+    if '3010' in message:
+        assert 'Restart Windows' in text['try']
+    else:
+        assert 'restart' not in text['try'].lower() and 'reinstall' not in text['try'].lower()
+    if '0x8A15002B' in message:
+        assert '-1978335189' in text['what'] and '0x8A15002B' in text['what']
+        assert 'usbipd --version' in text['try']
 
 
 def test_early_fallback_box_explains_its_windows_buttons(tmp_path):

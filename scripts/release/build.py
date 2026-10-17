@@ -421,7 +421,7 @@ def windows(payload):
     for file in ('payload.tar.gz', 'payload.sha256', 'revision.txt', 'Windows-Python-LICENSE.txt'):
         args += ['--add-data', str(payload / file) + ';.']
     for file in ('scripts/release/bootstrap.ps1', 'scripts/release/console.ps1', 'scripts/release/wsl-usb-permissions.sh',
-                 'scripts/release/wsl-user-launch.sh', 'scripts/release/wsl-provision.sh', 'run.ps1', 'LICENSE', 'NOTICE.md',
+                 'scripts/release/wsl-user-launch.sh', 'scripts/release/wsl-provision.sh', 'run.ps1', 'usbipd.ps1', 'LICENSE', 'NOTICE.md',
                  'THIRD-PARTY-NOTICES.md'):
         args += ['--add-data', str(ROOT / file) + ';.']
     run(*args, ROOT / 'scripts/release/windows_launcher.py')

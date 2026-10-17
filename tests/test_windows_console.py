@@ -121,7 +121,7 @@ def test_self_check_requires_the_console_controller(tmp_path, monkeypatch):
             archive.addfile(entry, io.BytesIO(b'x'))
     (root / 'payload.sha256').write_text(hashlib.sha256((root / 'payload.tar.gz').read_bytes()).hexdigest())
     for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh',
-                 'wsl-provision.sh', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md'):
+                 'wsl-provision.sh', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'usbipd.ps1'):
         (root / name).write_text('fixture')
     with pytest.raises(RuntimeError, match='Missing embedded Windows helper: console.ps1'):
         module.main()

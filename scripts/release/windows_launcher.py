@@ -204,7 +204,7 @@ def _main(args):
         return 0
     if args == ['--self-check']:
         for helper in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh',
-                       'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1'):
+                       'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1', 'usbipd.ps1'):
             if not (root / helper).is_file():
                 raise RuntimeError('Missing embedded Windows helper: ' + helper)
         with tarfile.open(archive) as source:

@@ -32,7 +32,7 @@ def test_first_line_identifies_build_before_actions(tmp_path, monkeypatch, capsy
     (tmp_path / 'payload.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest())
     (tmp_path / 'revision.txt').write_text('a' * 40)
     for name in ('bootstrap.ps1', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh',
-                 'wsl-provision.sh', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1'):
+                 'wsl-provision.sh', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'console.ps1', 'usbipd.ps1'):
         (tmp_path / name).write_text('fixture')
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
     monkeypatch.setattr(sys, 'argv', ['toolkit'] + args)
