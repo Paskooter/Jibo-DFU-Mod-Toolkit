@@ -193,8 +193,8 @@ Windows-build input, not a user download.
    hosts and a Jibo. CI is not a USB acceptance test. Do not ship a known-broken platform.
 2. Pick the version, then from your reviewed clean checkout:
    ```sh
-   git tag -a v1.0.1 -m 'Jibo DFU Toolkit v1.0.1'
-   git push origin v1.0.1
+   git tag -a v1.0.2 -m 'Jibo DFU Toolkit v1.0.2'
+   git push origin v1.0.2
    ```
    Only maintainers perform these commands; the build agent must not create tags.
 3. Wait for every build and the aggregate job to pass. The tag job creates a
