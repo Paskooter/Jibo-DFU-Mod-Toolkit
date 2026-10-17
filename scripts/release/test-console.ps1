@@ -93,6 +93,52 @@ if ($Case -eq 'setup-stalls') {
     } finally { Remove-Item -Recurse -Force $tmp }
     exit 0
 }
+if ($Case -eq 'installer-wait') {
+    # An approved --interactive installer that never finishes (e.g. winget asking in
+    # its hidden console) must not leave setup "Waiting for you" forever. Real
+    # Wait-ToolkitProcess and a real child process; only the UAC launch is mocked.
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-installer-wait-' + [guid]::NewGuid().ToString('N'))
+    $script:child = $null; $script:childId = $null
+    try {
+        Initialize-ToolkitLog -Root $tmp -Build ('9' * 40)
+        Set-ToolkitStep 'Installing Windows components'
+        $binary = (Get-Process -Id $PID).Path
+        function Start-Process { param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$PassThru); if ($Verb -ne 'RunAs' -or $WindowStyle -ne 'Hidden') { throw 'UAC scope changed' }; $script:child = [Diagnostics.Process]::Start($binary, '-NoProfile -Command "Start-Sleep 60"'); $script:childId = $script:child.Id; return $script:child }
+        $script:dialogs = @()
+        function Show-ToolkitSupportDialog { param($Message,[switch]$AllowWait); $script:dialogs += ,@($Message, [bool]$AllowWait); return ($script:dialogs.Count -eq 1) }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $failed = $null
+        try { Invoke-ToolkitElevated -File winget.exe -Arguments 'install --interactive --exact --id dorssel.usbipd-win' -TimeoutSeconds 900 -AllowWait -InstallerWaitSeconds 0.4 | Out-Null }
+        catch { $failed = $_.Exception }
+        if (-not $failed -or -not $failed.Data['ToolkitStall'] -or $failed.Message -notmatch '^usbipd-win installer did not finish within 0.4 seconds') { throw ('Unfinished installer did not end in a visible failure: ' + $failed) }
+        if ($timer.Elapsed.TotalSeconds -lt 0.8 -or $timer.Elapsed.TotalSeconds -gt 10) { throw ('Keep waiting did not give one more full wait: ' + $timer.Elapsed.TotalSeconds) }
+        if ($script:dialogs.Count -ne 2 -or -not $script:dialogs[0][1] -or -not $script:dialogs[1][1] -or $script:dialogs[0][0] -notmatch 'github.com/dorssel/usbipd-win/releases') { throw 'Keep waiting / Stop setup was not offered with the manual install route' }
+        # Invoke-ToolkitElevated disposes its handle; look the child up again by id.
+        if (-not (Get-Process -Id $script:childId -ErrorAction SilentlyContinue)) { throw 'Stop setup stopped the installer without the user choosing to' }
+        if ($script:ToolkitWaitingForUser) { throw 'Setup still shows Waiting for you after stopping' }
+        $rows = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json })
+        if (-not @($rows | Where-Object event -eq 'installer-wait-stopped').Count -or -not @($rows | Where-Object event -eq 'keep-waiting').Count) { throw 'Installer wait decisions were not logged' }
+        if (@($rows | Where-Object event -eq 'command-end')[-1].exit_code -ne 124) { throw 'Unfinished installer was not recorded as stalled' }
+        # Asked twice: Keep waiting, then Stop setup. Plain wording for both screens.
+        Add-Type -TypeDefinition $script:ToolkitQuestionModelSource
+        $ask = [ToolkitSetupText]::Failure($script:dialogs[0][0], $true)
+        $stop = [ToolkitSetupText]::Failure("Step: Installing Windows components`r`n" + $failed.Message + "`r`nTry: x", $false)
+        if ($ask.Headline -ne 'USB support is taking a long time to install' -or $ask.Try -notmatch 'Keep waiting' -or $ask.Try -notmatch 'Stop setup' -or $ask.Try -notlike '*https://github.com/dorssel/usbipd-win/releases*') { throw ('Question wording: ' + $ask.Headline + ' / ' + $ask.Try) }
+        if ($stop.Headline -ne 'USB support was not installed' -or $stop.Try -notlike 'Install it yourself: download the file ending in x64.msi from https://github.com/dorssel/usbipd-win/releases*') { throw ('Failure wording: ' + $stop.Headline + ' / ' + $stop.Try) }
+        # An installer that finishes while the question is open is a success.
+        $script:dialogs = @()
+        function Start-Process { param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$PassThru); $script:child2 = [Diagnostics.Process]::Start($binary, '-NoProfile -Command "exit 0"'); return $script:child2 }
+        function Show-ToolkitSupportDialog { param($Message,[switch]$AllowWait); $script:dialogs += ,@($Message, [bool]$AllowWait); $null = $script:child2.WaitForExit(20000); return $false }
+        $done = Invoke-ToolkitElevated -File winget.exe -Arguments 'install --interactive --exact --id dorssel.usbipd-win' -TimeoutSeconds 900 -AllowWait -InstallerWaitSeconds 0.01
+        if ($done.ExitCode -ne 0) { throw 'An installer that finished during the question was reported as failed' }
+        Write-Output "PASS console: $Case"
+    } finally {
+        if ($script:childId) { Stop-Process -Id $script:childId -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    }
+    exit 0
+}
 if ($Case -eq 'setup-download') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     Add-Type -TypeDefinition @'
@@ -273,7 +319,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
+    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE

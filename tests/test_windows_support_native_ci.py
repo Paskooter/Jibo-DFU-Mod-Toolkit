@@ -118,8 +118,12 @@ def test_partial_output_and_running_receipt_survive_real_hang(tmp_path):
         try:
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
+                # stdout and stderr are separate pipes copied by separate tasks, so
+                # one can land before the other. Wait for both in the same deadline.
                 output = tmp_path / 'capture/stdout.txt'
-                if output.exists() and 'incremental stdout' in output.read_text():
+                errors = tmp_path / 'capture/stderr.txt'
+                if (output.exists() and 'incremental stdout' in output.read_text() and
+                        errors.exists() and 'incremental stderr' in errors.read_text()):
                     break
                 time.sleep(0.02)
             else:

@@ -325,12 +325,18 @@ try {
         # Only this package's documented no-update result may be recovered, and
         # only after probing the actual executable again. Other setup callers keep
         # Invoke-ApprovedAdmin's existing nonzero/UAC/reboot behavior.
-        $install = Invoke-ToolkitElevated -File $winget.Source -Arguments 'install --interactive --exact --id dorssel.usbipd-win' -TimeoutSeconds 900 -AllowWait
+        # winget runs elevated with its console hidden, so it must never ask in
+        # that console (winget-cli PromptFlow.cpp: source/package agreements are
+        # prompted unless accepted or --disable-interactivity is given). The
+        # user already agreed to install usbipd-win above. --interactive still
+        # shows the installer's own window. If it has not finished 180 s after
+        # approval (console.ps1), the user is asked: Keep waiting or Stop setup.
+        $install = Invoke-ToolkitElevated -File $winget.Source -Arguments 'install --interactive --exact --id dorssel.usbipd-win --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity' -TimeoutSeconds 900 -AllowWait -InstallerWaitSeconds $script:ToolkitUsbipdInstallerWaitSeconds
         if ($null -eq $install.ExitCode) { throw 'usbipd-win installer did not report an exit code. No USB handoff was attempted.' }
         $status = [int]$install.ExitCode
         $hex = '0x{0:X8}' -f ([int64]$status -band 4294967295L)
         if ($status -notin @(0, -1978335189)) {
-            $hint = if ($status -in @(3010, 1641, -1978334967, -1978334966, -1978334965)) { 'Restart Windows as requested, then reopen the toolkit.' } else { 'Check the usbipd-win installer and Windows administrator approval; no USB handoff was attempted.' }
+            $hint = if ($status -in @(3010, 1641, -1978334967, -1978334966, -1978334965)) { 'Restart Windows as requested, then reopen the toolkit.' } elseif ($status -eq -1978335230) { "WinGet on this PC is too old for automatic setup. Install usbipd-win yourself: $script:ToolkitUsbipdManualInstall" } else { 'Check the usbipd-win installer and Windows administrator approval; no USB handoff was attempted.' }
             $error = New-Object Exception "usbipd-win installer exited with code $status ($hex). $hint"
             $error.Data['ToolkitExitCode'] = $status
             throw $error

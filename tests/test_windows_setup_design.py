@@ -126,6 +126,24 @@ def test_usbipd_failure_is_specific_without_generic_reboot_advice(tmp_path, mess
         assert 'usbipd --version' in text['try']
 
 
+@pytest.mark.parametrize('wait,headline', [
+    (True, 'USB support is taking a long time to install'),
+    (False, 'USB support was not installed'),
+])
+def test_unfinished_usbipd_installer_gives_the_manual_route(tmp_path, wait, headline):
+    message = ('usbipd-win installer did not finish within 180 seconds after Windows approval. If its installer window is open, '
+               'finish it. Otherwise install usbipd-win yourself: download the x64 .msi from github.com/dorssel/usbipd-win/releases, '
+               'run it, restart Windows if it asks, then reopen the toolkit.')
+    if not wait:
+        message = 'Step: Installing Windows components\r\n' + message + '\r\nTry: Check for an installer or Windows administrator approval prompt. Restart Windows if requested.'
+    text = catalogue(tmp_path, [], [], [], [{'message': message, 'wait': wait}])['failures'][message]
+    assert text['headline'] == headline and '3 minutes' in text['what']
+    assert 'https://github.com/dorssel/usbipd-win/releases' in text['try'] and 'x64.msi' in text['try']
+    assert ('Keep waiting' in text['try'] and 'Stop setup' in text['try']) == wait
+    for line in (text['headline'], text['what'], text['try']):
+        assert not re.search(r'\b(?:stalled|winget|administrator|UAC)\b', line), line
+
+
 def test_early_fallback_box_explains_its_windows_buttons(tmp_path):
     import importlib.util
     spec = importlib.util.spec_from_file_location('design_launcher', ROOT / 'scripts/release/windows_launcher.py')

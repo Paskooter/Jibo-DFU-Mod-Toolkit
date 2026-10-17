@@ -272,7 +272,9 @@ function Show-ToolkitQuestion { param($Question); return ((Read-Host $Question) 
 function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Start-ToolkitSetup {}
 function Stop-ToolkitSetup {}
-function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
+function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); Record 'support' @($Message, [bool]$AllowWait); return $false }
+# Short installer limit for fixtures only; console.ps1's real value is 180 seconds.
+$script:ToolkitUsbipdInstallerWaitSeconds = 1
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh')) {
@@ -371,15 +373,33 @@ function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $WindowStyle)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
     if ($FilePath -eq 'winget-fixture') {
-        if ($Verb -ne 'RunAs' -or $ArgumentList -cne 'install --interactive --exact --id dorssel.usbipd-win') { throw 'Installer consent/arguments changed' }
+        if ($Verb -ne 'RunAs') { throw 'Installer consent changed' }
+        $blocked = $null
+        if ($global:UacCase -eq 'usb-winget-hidden-prompt') {
+            # Models winget-cli PromptFlow.cpp HandleSourceAgreementsForOneSource on a
+            # PC that never used winget: unless --accept-source-agreements or
+            # --disable-interactivity is given, winget asks Y/N on its own console.
+            # That console is hidden, so nobody can answer and it never exits.
+            $words = -split [string]$ArgumentList
+            if ($words -notcontains '--accept-source-agreements' -and $words -notcontains '--disable-interactivity') { $blocked = 'source-agreements' }
+        } elseif ($global:UacCase -eq 'usb-installer-never-finishes') {
+            $blocked = 'installer'  # Any arguments: an installer nobody finishes.
+        } elseif ($ArgumentList -cne 'install --interactive --exact --id dorssel.usbipd-win --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity') { throw 'Installer consent/arguments changed' }
+        if ($blocked) {
+            Record 'winget-blocked' @($blocked)
+            $process = [pscustomobject]@{Handle=1; HasExited=$false; Id=4250; ExitCode=$null}
+            $process | Add-Member ScriptMethod WaitForExit { param($Timeout); return $false }
+            $process | Add-Member ScriptMethod Kill { Record 'kill' @($this.Id) }
+            return $process
+        }
         if ($global:UacCase -eq 'usb-uac-cancelled') { throw 'Synthetic UAC cancellation' }
-        if ($global:UacCase -in @('usb-fresh-ready','usb-noop-ready','usb-noop-broken','usb-reboot-ready','usb-failure-ready')) {
+        if ($global:UacCase -in @('usb-fresh-ready','usb-noop-ready','usb-noop-broken','usb-reboot-ready','usb-failure-ready','usb-winget-hidden-prompt')) {
             $directory = Join-Path $env:ProgramFiles 'usbipd-win'
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
             Copy-Item $global:FixtureUsb (Join-Path $directory 'usbipd.exe')
             if ($global:UacCase -eq 'usb-noop-broken') { $env:USBIPD_FIXTURE_MODE = 'broken' }
         }
-        $exit = switch ($global:UacCase) { 'usb-fresh-ready' {0}; 'usb-fresh-missing' {0}; 'usb-reboot-ready' {3010}; 'usb-winget-reboot' {-1978334967}; 'usb-failure-ready' {1603}; default {-1978335189} }
+        $exit = switch ($global:UacCase) { 'usb-fresh-ready' {0}; 'usb-winget-hidden-prompt' {0}; 'usb-fresh-missing' {0}; 'usb-reboot-ready' {3010}; 'usb-winget-reboot' {-1978334967}; 'usb-failure-ready' {1603}; default {-1978335189} }
         $process = [pscustomobject]@{ExitCode=$exit; Handle=1; HasExited=$true}
         $process | Add-Member ScriptMethod WaitForExit { param($Timeout); return $true }
         return $process
@@ -397,10 +417,25 @@ if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing') | Where-Object { $_ -like $Scenario }) {
+    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-winget-hidden-prompt','usb-installer-never-finishes') | Where-Object { $_ -like $Scenario }) {
         try {
-            $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
-            $code = $LASTEXITCODE
+            if ($case -in @('usb-winget-hidden-prompt','usb-installer-never-finishes')) {
+                # These model a winget/installer that never exits. Bound the whole
+                # child so a regression fails here instead of hanging the job.
+                $info = New-Object Diagnostics.ProcessStartInfo
+                $info.FileName = $hostBinary
+                $info.Arguments = '-NoProfile -File "{0}" -Bootstrap "{1}" -Payload "{2}" -Case {3}' -f $child, $path, $fixture, $case
+                $info.UseShellExecute = $false; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+                $bounded = [Diagnostics.Process]::Start($info)
+                $out = $bounded.StandardOutput.ReadToEndAsync(); $err = $bounded.StandardError.ReadToEndAsync()
+                if (-not $bounded.WaitForExit(60000)) { $bounded.Kill(); $null = $bounded.WaitForExit(5000); throw 'Setup waited forever for a winget/installer that never exits (60-second fixture bound)' }
+                $bounded.WaitForExit()
+                $messages = @($out.Result, $err.Result)
+                $code = $bounded.ExitCode
+            } else {
+                $messages = @(& $hostBinary -NoProfile -File $child -Bootstrap $path -Payload $fixture -Case $case 2>&1)
+                $code = $LASTEXITCODE
+            }
             $text = $messages -join "`n"
             $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
             $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
@@ -413,9 +448,20 @@ exit $LASTEXITCODE
             if ($usbInstallCase) {
                 $expectedAdmin = if ($case -in @('usb-install-refused','usb-winget-missing')) {0} else {1}
                 if ($admin.Count -ne $expectedAdmin -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Install usbipd-win') { throw 'USB install did not ask/install exactly once' }
-                if ($case -notin @('usb-noop-ready','usb-fresh-ready') -and (@($events | Where-Object Kind -eq 'usb').Count -or @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'once' }).Count)) { throw 'Unready USB prerequisite reached handoff/grant' }
+                if ($case -notin @('usb-noop-ready','usb-fresh-ready','usb-winget-hidden-prompt') -and (@($events | Where-Object Kind -eq 'usb').Count -or @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'once' }).Count)) { throw 'Unready USB prerequisite reached handoff/grant' }
                 if ($case -in @('usb-noop-missing','usb-noop-broken') -and $text -notmatch 'usbipd-win.*-1978335189.*0x8A15002B') { throw ('Missing actionable no-op status: ' + $text) }
                 if ($text -match 'fixture-secret') { throw 'Probe output leaked' }
+                if (@($events | Where-Object Kind -eq 'kill').Count) { throw 'Setup stopped the usbipd-win installer without the user choosing to' }
+                if ($case -eq 'usb-winget-hidden-prompt') {
+                    if (@($events | Where-Object Kind -eq 'winget-blocked').Count) { throw 'winget could still ask in its hidden console' }
+                }
+                if ($case -eq 'usb-installer-never-finishes') {
+                    $support = @($events | Where-Object Kind -eq 'support')
+                    $manual = 'github.com/dorssel/usbipd-win/releases'
+                    if ($support.Count -ne 2 -or -not $support[0].Values[1] -or $support[1].Values[1]) { throw ('Unfinished installer did not ask once, then show the failure: ' + ($support | ConvertTo-Json -Compress)) }
+                    if ($support[0].Values[0] -notmatch '^usbipd-win installer did not finish within 1 seconds' -or $support[0].Values[0] -notlike ('*' + $manual + '*') -or $support[1].Values[0] -notlike ('*' + $manual + '*')) { throw ('Unfinished installer did not give the manual install route: ' + ($support | ConvertTo-Json -Compress)) }
+                    if ($code -ne 1 -or $gui.Count) { throw ('Unfinished installer did not end setup visibly: ' + $text) }
+                }
             }
             if ($case -notlike 'explicit-*') {
                 if ($text -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali') { throw 'tool/custom distro was listed' }
@@ -427,7 +473,7 @@ exit $LASTEXITCODE
                 'default-preferred' { 'Ubuntu-22.04' }; 'newest' { 'Ubuntu-24.04' }; 'explicit-good' { 'NVIDIA-Workbench' }
                 'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }; 'usb-installed-stale-path' { 'Ubuntu-22.04' }
                 'usb-installed-current-path' { 'Ubuntu-22.04' }
-                { $_ -in @('usb-noop-ready','usb-fresh-ready') } { 'Ubuntu-22.04' }
+                { $_ -in @('usb-noop-ready','usb-fresh-ready','usb-winget-hidden-prompt') } { 'Ubuntu-22.04' }
             }
             if ($case -in $declines) {
                 if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
@@ -438,7 +484,7 @@ exit $LASTEXITCODE
                 $user = if ($chosen -eq 'Jibo-DFU-Toolkit') { 'jibo' } else { 'fixture' }
                 if (($gui[0].Values -join '|') -notmatch ('\|--user\|' + $user + '\|') -or ($gui[0].Values -join ' ') -match '/AppRun') { throw 'GUI was not direct normal-user launch' }
                 if ($case -ne 'create-success' -and -not $usbInstallCase -and ($prompts.Count -or $downloads.Count -or $imports.Count)) { throw 'existing matching distro prompted or installed' }
-                if ($case -in @('success','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-fresh-ready')) {
+                if ($case -in @('success','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-fresh-ready','usb-winget-hidden-prompt')) {
                     $resolved = if ($usbInstallCase) { Join-Path (Join-Path (Join-Path $fixture $case) 'usbipd-win') 'usbipd.exe' } else { $fixtureUsb }
                     $handoff = @($events | Where-Object Kind -eq 'usb')
                     if ($handoff.Count -ne 1 -or $handoff[0].Values -notcontains '-UsbipdPath') { throw 'Resolved usbipd path lost before USB-only child' }

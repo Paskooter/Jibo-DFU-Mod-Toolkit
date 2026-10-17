@@ -89,8 +89,10 @@ def outer_probe(folder, case, runner, pwsh):
             process = subprocess.Popen([pwsh, '-NoProfile', '-NonInteractive', '-File', str(wrapper)], cwd=folder, stdout=out, stderr=err)
             while process.poll() is None:
                 adopt()
-                if ready.exists():
-                    observed = state(int(ready.read_text()))  # read-only, never signal authority
+                # The leaf creates the file, then writes its PID: read '' until then.
+                text = ready.read_text() if ready.exists() else ''
+                if text.isdigit():
+                    observed = state(int(text))  # read-only, never signal authority
                     if not observations or observations[-1]['state'] != observed['state']:
                         observations.append(observed)
                 if time.monotonic() - started > 22:

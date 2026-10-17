@@ -348,6 +348,7 @@ public static class ToolkitSetupText {
     public const string HelpLine = "Copy the details and paste them in the #help channel on the Phoenix Discord. Please look them over before posting.";
     public const string CopiedLine = "Copied. Paste it in #help with Ctrl+V.";
     public const string CopyFailedLine = "Could not copy. Select the text below, then press Ctrl+C.";
+    public const string ManualUsb = "download the file ending in x64.msi from https://github.com/dorssel/usbipd-win/releases, run it, restart Windows if it asks, then open the toolkit again.";
     static ToolkitStepText S(string title, string description, int phase) {
         var s = new ToolkitStepText(); s.Title = title; s.Description = description; s.Phase = phase; return s;
     }
@@ -550,6 +551,14 @@ public static class ToolkitSetupText {
             f = F("error", "USB support stopped", "The toolkit\u2019s USB connection stopped unexpectedly.", "When nothing is being written to Jibo, close the toolkit window, then open the toolkit again.");
         else if (text.StartsWith("Install Microsoft App Installer"))
             f = F("error", "USB support cannot be installed automatically", "This PC is missing Microsoft\u2019s App Installer, which setup uses to install USB support.", "Install App Installer from the Microsoft Store, or install usbipd-win from its GitHub releases page. Then open the toolkit again.");
+        else if (text.StartsWith("usbipd-win installer did not finish"))
+            f = allowWait
+                ? F("stall", "USB support is taking a long time to install", "The usbipd-win installer has not finished after " + (waited ?? "a few minutes") + ".",
+                    "If you can see its window, finish it, then choose Keep waiting. If not, choose Stop setup and install it yourself: " + ManualUsb)
+                : F("error", "USB support was not installed", "The usbipd-win installer did not finish within " + (waited ?? "a few minutes") + ", so setup stopped.",
+                    "Install it yourself: " + ManualUsb + " If a usbipd-win window is still open, finish or close it first.");
+        else if (text.StartsWith("usbipd-win installer exited with code -1978335230"))
+            f = F("error", "USB support cannot be installed automatically", "Microsoft\u2019s App Installer on this PC is too old to install USB support.", "Install it yourself: " + ManualUsb);
         else if (text.StartsWith("usbipd-win setup returned")) {
             int checkAt = text.IndexOf(" Check usbipd --version", System.StringComparison.Ordinal);
             f = F("error", "USB support is not ready", checkAt < 0 ? text : text.Substring(0, checkAt),
@@ -1993,7 +2002,17 @@ function ConvertTo-ToolkitNativeLines([string]$Text) {
     }
     return @($lines)
 }
-function Invoke-ToolkitElevated([string]$File, [string]$Arguments, [double]$TimeoutSeconds = 180, [switch]$AllowWait) {
+# The usbipd-win way out when its installer cannot finish. Logged and copied text;
+# no https:// because Protect-ToolkitText removes full URLs from logs and details.
+$script:ToolkitUsbipdManualInstall = 'download the x64 .msi from github.com/dorssel/usbipd-win/releases, run it, restart Windows if it asks, then reopen the toolkit.'
+# Seconds after Windows approval before setup asks about a usbipd-win install that
+# has not finished: winget's first-run source update and the ~4.5 MB MSI download
+# usually take well under a minute, and the short usbipd-win wizard about another
+# minute. Keep waiting restarts it; nothing is stopped without the user's choice.
+$script:ToolkitUsbipdInstallerWaitSeconds = 180
+# InstallerWaitSeconds bounds how long an approved --interactive installer may run
+# while setup shows "Waiting for you". 0 keeps the old unbounded user wait.
+function Invoke-ToolkitElevated([string]$File, [string]$Arguments, [double]$TimeoutSeconds = 180, [switch]$AllowWait, [double]$InstallerWaitSeconds = 0) {
     $started = [DateTime]::UtcNow
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $code = 1; $message = ''; $process = $null
@@ -2009,7 +2028,9 @@ function Invoke-ToolkitElevated([string]$File, [string]$Arguments, [double]$Time
         }
         if ($interactive) { Set-ToolkitUserWait $true 'Waiting for you: finish the usbipd-win installer. Look for its installer window or a flashing shield icon on the taskbar. Restart Windows if the installer asks.' }
         $null = $process.Handle
-        if (-not (Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait)) {
+        $installerWait = if ($interactive) { $InstallerWaitSeconds } else { 0 }
+        $installerMessage = "usbipd-win installer did not finish within $installerWait seconds after Windows approval. If its installer window is open, finish it. Otherwise install usbipd-win yourself: $script:ToolkitUsbipdManualInstall"
+        if (-not (Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait -UserWaitSeconds $installerWait -UserWaitMessage $installerMessage)) {
             $code = 124
             $error = New-Object TimeoutException "$script:ToolkitStep stalled: administrator command did not finish. Check Windows prompts, then restart Windows and reopen."
             $error.Data['ToolkitStall'] = $true
@@ -2028,11 +2049,30 @@ function Invoke-ToolkitElevated([string]$File, [string]$Arguments, [double]$Time
         if ($process -is [Diagnostics.Process]) { $process.Dispose() }
     }
 }
-function Wait-ToolkitProcess($Process, [double]$TimeoutSeconds = 120, [switch]$AllowWait) {
+function Wait-ToolkitProcess($Process, [double]$TimeoutSeconds = 120, [switch]$AllowWait, [double]$UserWaitSeconds = 0, [string]$UserWaitMessage = '') {
     $timer = [Diagnostics.Stopwatch]::StartNew()
+    $userTimer = [Diagnostics.Stopwatch]::StartNew()
     while (-not $Process.WaitForExit(100)) {
         Write-ToolkitInteractionEvents
-        if ($script:ToolkitWaitingForUser) { $timer.Restart(); continue }
+        if ($script:ToolkitWaitingForUser) {
+            $timer.Restart()
+            # A user wait is never a stall, but an installer that cannot be seen
+            # must not keep setup paused forever. Ask; never kill it unasked.
+            if ($UserWaitSeconds -le 0 -or $userTimer.Elapsed.TotalSeconds -lt $UserWaitSeconds) { continue }
+            Write-ToolkitLog 'stall' @{ step=$script:ToolkitStep; error=$UserWaitMessage; limit_seconds=$UserWaitSeconds; waiting_for='installer' }
+            if (Show-ToolkitSupportDialog $UserWaitMessage -AllowWait) {
+                Write-ToolkitLog 'keep-waiting' @{ step=$script:ToolkitStep }
+                $userTimer.Restart()
+                continue
+            }
+            if ($Process.WaitForExit(0)) { return $true }
+            # Stop setup leaves the elevated installer alone: stopping it could
+            # interrupt a driver install, and a normal user cannot stop it anyway.
+            Write-ToolkitLog 'installer-wait-stopped' @{ step=$script:ToolkitStep; limit_seconds=$UserWaitSeconds; installer_left_running=$true }
+            $exception = New-Object TimeoutException $UserWaitMessage
+            $exception.Data['ToolkitStall'] = $true
+            throw $exception
+        }
         if (Test-ToolkitStall -ElapsedSeconds $timer.Elapsed.TotalSeconds -LimitSeconds $TimeoutSeconds) {
             $message = "$script:ToolkitStep stalled: no completion after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"
             Write-ToolkitLog 'stall' @{ step=$script:ToolkitStep; error=$message; limit_seconds=$TimeoutSeconds }

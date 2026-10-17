@@ -21,7 +21,7 @@ import tempfile
 from jibo_flash_schema import CONTRACT, validate_shape, check_schema
 
 ASSETS = Path(__file__).resolve().parent / 'assets' / 'flash-images'
-TOOLKIT_VERSION = "1.0.2"
+TOOLKIT_VERSION = "1.0.3"
 CAPABILITIES = frozenset(CONTRACT['capabilities'])
 PROFILES = frozenset(CONTRACT['profiles'])
 STRATEGIES = frozenset(CONTRACT['strategies'])
