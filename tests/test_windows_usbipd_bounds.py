@@ -234,3 +234,49 @@ $r=Resolve-UsbipdExecutable
     assert (tmp_path/'probe.log').read_text().splitlines() == ['first', 'second']
     assert result['seconds'] < 3.3
     assert result['diagnostics']['ReadersReleased']
+
+
+def test_cleanup_withheld_probe_returns_inside_documented_total(tmp_path):
+    """Withheld product cleanup must still return within the 2s+2s API total.
+
+    Mirrors the native bounds-pipe-preflight mutant: product containment
+    termination is removed, so an inherited-pipe descendant keeps both readers
+    pending until the final cleanup wait expires. The deadline is measured
+    from API entry to return, the same interval the native receipt checks
+    (it measured 4029 ms against 4000 when Run used a later private clock and
+    no return reserve). Real POSIX children; this is not native acceptance.
+    """
+    from fixtures.usbipd_probe_contract import probe_binary
+
+    text = HELPER.read_text()
+    assert 'if(grouped) {' in text, 'containment mutation seam changed'
+    mutant = tmp_path / 'withheld.ps1'
+    mutant.write_text(text.replace('if(grouped) {', 'if(grouped && milliseconds<0) {'))
+    path = probe_binary(tmp_path, 'pipe')
+    script = tmp_path / 'case.ps1'
+    script.write_text("$ErrorActionPreference='Stop'\n. " + q(mutant) + '''
+$t=[Diagnostics.Stopwatch]::StartNew()
+$r=Test-UsbipdExecutable -Path PATH -TimeoutSeconds 2
+$elapsed=$t.Elapsed.TotalMilliseconds
+$s=$script:UsbipdLastSupervision
+[pscustomobject]@{accepted=[bool]$r; elapsed_ms=$elapsed; readers=$s.ReadersReleased; stopped=$s.ContainmentStopped} | ConvertTo-Json -Compress
+'''.replace('PATH', q(path)))
+    process = subprocess.Popen([PWSH, '-NoProfile', '-File', str(script)],
+                               env={**os.environ, 'TMPDIR': str(tmp_path)},
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               start_new_session=True)
+    try:
+        out, err = process.communicate(timeout=20)
+    finally:
+        # Test-owned session only: the mutant deliberately leaves descendants.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=3)
+    assert process.returncode == 0, out + err
+    result = json.loads(out.strip().splitlines()[-1])
+    print(json.dumps(result, sort_keys=True))
+    assert not result['accepted'] and not result['stopped'], 'cleanup-withheld condition not entered'
+    assert not result['readers'], 'pipe readers released; withheld wait not exercised'
+    assert 3000 <= result['elapsed_ms'] <= 4000, 'cleanup wait escaped the documented 4000 ms API total'

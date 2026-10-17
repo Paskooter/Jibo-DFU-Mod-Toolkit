@@ -181,10 +181,15 @@ public sealed class UsbipdInvocation {
         await stream.WriteAsync(bytes,0,bytes.Length).ConfigureAwait(false);
         await stream.FlushAsync().ConfigureAwait(false);
     }
-    public void Run(string host, string helper, string input, int milliseconds) {
-        Stopwatch clock=Stopwatch.StartNew();
-        // Reserve cleanup inside, never after, the caller's total budget.
-        int work=Math.Max(0,milliseconds-300);
+    // Time after the final cleanup wait (handle release, dispatch back to the
+    // caller and its result check) also belongs inside the total budget.
+    const int ReturnReserve=150;
+    public void Run(string host, string helper, string input, Stopwatch clock, int milliseconds) {
+        // One clock: the caller's, started at API entry, so dispatch/JIT before
+        // this method is counted. Reserve cleanup and return inside, never
+        // after, the caller's total budget.
+        int finish=Math.Max(0,milliseconds-ReturnReserve);
+        int work=Math.Max(0,finish-300);
         bool windows=Environment.OSVersion.Platform==PlatformID.Win32NT;
         IntPtr job=IntPtr.Zero;
         Process p=new Process();
@@ -235,7 +240,7 @@ public sealed class UsbipdInvocation {
                 if(windows) {
                     bool sent=TerminateJobObject(job,1);
                     Accounting status;
-                    while(sent && clock.ElapsedMilliseconds<milliseconds) {
+                    while(sent && clock.ElapsedMilliseconds<finish) {
                         if(!QueryInformationJobObject(job,1,out status,Marshal.SizeOf(typeof(Accounting)),IntPtr.Zero)) break;
                         if(status.Active==0) { ContainmentStopped=true; break; }
                         Thread.Sleep(2);
@@ -245,9 +250,9 @@ public sealed class UsbipdInvocation {
             }
             if(started) {
                 try { if(!p.HasExited) p.Kill(); } catch {}
-                int left=Math.Max(0,milliseconds-(int)clock.ElapsedMilliseconds);
+                int left=Math.Max(0,finish-(int)clock.ElapsedMilliseconds);
                 try { p.WaitForExit(left); } catch {}
-                left=Math.Max(0,milliseconds-(int)clock.ElapsedMilliseconds);
+                left=Math.Max(0,finish-(int)clock.ElapsedMilliseconds);
                 try { ReadersReleased=a!=null && b!=null && Task.WaitAll(new Task[]{a,b},left); } catch {}
                 // EOF must have released both readers BEFORE success is usable.
                 if(!ReadersReleased || !ContainmentStopped) Output=null;
@@ -282,7 +287,7 @@ function Invoke-UsbipdBounded([string]$PreferredPath, [double]$Seconds, [double]
     $script:UsbipdLastSupervision=$supervisor
     $remaining=[int](1000*($Seconds-$timer.Elapsed.TotalSeconds))
     if ($remaining -le 300) { return $null }
-    $supervisor.Run((Join-Path $PSHOME $hostName),$script:UsbipdHelperPath,$inputText,$remaining)
+    $supervisor.Run((Join-Path $PSHOME $hostName),$script:UsbipdHelperPath,$inputText,$timer,[int](1000*$Seconds))
     if (-not $supervisor.Output) { return $null }
     try { return ($supervisor.Output | ConvertFrom-Json -ErrorAction Stop).Path } catch { return $null }
 }
