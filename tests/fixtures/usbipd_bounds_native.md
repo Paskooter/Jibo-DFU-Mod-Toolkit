@@ -76,6 +76,15 @@ Aliases/functions from PATH lookup must NOT count: assert `CommandType` is exact
    ProgramFiles and persisted machine/user PATH. Supply fake uninstall strings
    and invalid relative/UNC directories as poison **data**, never commands. Assert
    exact source precedence, no user/process/machine PATH change and real version.
+   `source-program32` tests the **ProgramFiles fallback**, not ProgramFiles(x86):
+   on the native 64-bit runner, child startup normalizes ProgramFiles to
+   ProgramW6432. The harness preserves its deliberately distinct fallback root
+   in USBIPD_BOUNDS_PROGRAMFILES and restores it at the first injected read
+   boundary after worker startup. Parent/worker roots and actual filesystem
+   candidates are retained in the hashed receipts. The portable measured-state
+   replay in test_windows_usbipd_programfiles.py must fail on the old harness;
+   its real-resolver removal control deletes only the product ProgramFiles
+   candidate and requires the unchanged phase predicate to reject readiness.
 5. Missing/relative/UNC/quote preferred paths: null, no inventory entry and no
    fallback. Healthy alternate path must exist as a control.
 6. Broken first PE (delayed 1s), healthy second: exact later path, both entries,

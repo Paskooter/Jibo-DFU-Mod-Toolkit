@@ -600,13 +600,19 @@ function Run-BoundsCase {
             if ($name -eq 'program64') { $env:ProgramW6432=Join-Path (Split-Path $fixture) $name } else { $env:ProgramFiles=Join-Path (Split-Path $fixture) $name }
         }
     }
+    # A native 64-bit child's startup normalizes ProgramFiles to ProgramW6432.
+    # Keep the deliberately distinct fallback fixture in a private variable and
+    # restore it at the first injected read boundary, AFTER worker startup.
+    $env:USBIPD_BOUNDS_PROGRAMFILES=$env:ProgramFiles
     Save-Json (Join-Path $OutputRoot 'discovery-parent.json') @{program64=$env:ProgramW6432; program=$env:ProgramFiles; process64=[Environment]::Is64BitProcess; expected_program32=(Join-Path (Join-Path (Join-Path (Split-Path $fixture) 'program32') 'usbipd-win') 'usbipd.exe')}
     $before=@([Environment]::GetEnvironmentVariable('Path','Process'),[Environment]::GetEnvironmentVariable('Path','User'),[Environment]::GetEnvironmentVariable('Path','Machine')) | ConvertTo-Json -Compress
     # Only the documented narrow read seams enter the product's private worker.
     function Get-Command {
         param($Name,$CommandType,$ErrorAction)
         if ($CommandType -cne 'Application' -or $Name -notin @('usbipd.exe','usbipd')) { [IO.File]::WriteAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'poison.entered'),'bad lookup'); throw 'Forbidden bounds lookup' }
-        [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'discovery-worker.jsonl'),((@{name=$Name; program64=$env:ProgramW6432; program=$env:ProgramFiles; process64=[Environment]::Is64BitProcess} | ConvertTo-Json -Compress)+"`n"))
+        $inherited=$env:ProgramFiles
+        if ($env:USBIPD_BOUNDS_CASE -eq 'source-program32') { $env:ProgramFiles=$env:USBIPD_BOUNDS_PROGRAMFILES }
+        [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'discovery-worker.jsonl'),((@{name=$Name; inherited_program=$inherited; program64=$env:ProgramW6432; program=$env:ProgramFiles; process64=[Environment]::Is64BitProcess} | ConvertTo-Json -Compress)+"`n"))
         [IO.File]::AppendAllText((Join-Path $env:USBIPD_BOUNDS_DIRECTORY 'inventory.txt'),('lookup:'+ $Name + "`n"))
         if ($env:USBIPD_BOUNDS_CASE -like 'source-*' -or $env:USBIPD_BOUNDS_CASE -eq 'blocked-discovery') { return $null }
         if ($env:USBIPD_BOUNDS_CASE -like 'shared-*') {
