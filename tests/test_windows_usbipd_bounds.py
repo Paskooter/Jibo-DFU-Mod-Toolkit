@@ -39,6 +39,8 @@ def execute(tmp_path, body, env=None, timeout=23):
         assert process.returncode == 0, out + err
         result = json.loads(out.strip())
         print(json.dumps({'helper': str(HELPER), **result}, sort_keys=True))
+        from fixtures.usbipd_probe_contract import assert_owned_cleanup
+        assert_owned_cleanup(err)
         return result
     finally:
         try:
@@ -104,26 +106,29 @@ $r=Resolve-UsbipdExecutable
 
 @pytest.mark.parametrize('mode', ['hang', 'pipe'])
 def test_owned_descendants_and_pipe_readers_released(tmp_path, mode):
-    path = binary(tmp_path, mode)
-    # Observation occurs BEFORE execute's owned-session cleanup. PID is read only,
-    # never signalling authority; separate entry and live-state observations.
-    result = execute(tmp_path, '''
-$t=[Diagnostics.Stopwatch]::StartNew()
-$r=Test-UsbipdExecutable -Path PATH -TimeoutSeconds 2
-$child=[int][IO.File]::ReadAllText($env:BOUNDS_CHILD)
-$parent=[int][IO.File]::ReadAllText($env:BOUNDS_PARENT)
-$alive=$false
-try { $s=[IO.File]::ReadAllText('/proc/'+$child+'/stat'); $alive=($s -notmatch '\\) Z ') } catch {}
-$parentAlive=$false
-try { $s=[IO.File]::ReadAllText('/proc/'+$parent+'/stat'); $parentAlive=($s -notmatch '\\) Z ') } catch {}
-[pscustomobject]@{accepted=$r; seconds=$t.Elapsed.TotalSeconds; parent=$parent; parentAlive=$parentAlive; child=$child; childAlive=$alive; diagnostics=$script:UsbipdLastSupervision} | ConvertTo-Json -Compress -Depth 5
-'''.replace('PATH', q(path)), env_for(tmp_path, mode), timeout=10)
+    from fixtures.usbipd_probe_contract import admission, observation, probe_binary
+
+    path = probe_binary(tmp_path, mode)
+    # Force slow admission INSIDE containment. .NET and fixture entry use one
+    # monotonic clock; observe parents/children/readers before outer rescue.
+    result = execute(tmp_path, admission(1.25) + observation(
+        'Test-UsbipdExecutable -Path ' + q(path) + ' -TimeoutSeconds 2'),
+        env_for(tmp_path, mode), timeout=10)
     assert (tmp_path/'probe.log').read_text().splitlines() == ['probe']
+    assert (tmp_path/'admission.entered').read_text() == 'entered'
+    assert result['clockOrdered']
+    assert result['child'] is not None, 'descendant fixture was never entered'
     assert not result['accepted'], 'descendant/pipe holder accepted'
     assert not result['childAlive'], 'exact created sleep child survives resolver return'
     assert not result['parentAlive'], 'exact created CLI parent survives resolver return'
-    assert result['seconds'] < 3, 'cleanup is outside the probe deadline'
+    assert 0 <= result['enteredSeconds'] < 3, 'cleanup is outside the entered-probe deadline'
+    # Source and native fixture document 2s probe + 2s fixed isolation allowance.
+    # The deliberate admission control must exceed the old, wrong whole-call 3s.
+    assert 3 < result['seconds'] < 4, 'direct API total/startup contract not exercised'
     assert result['diagnostics']['ReadersReleased'], 'supervisor pipe readers not released'
+    assert result['diagnostics']['ContainmentStopped'], 'owned context not stopped'
+    assert not result['diagnostics']['TimedOut'], 'owner cutoff hid the entered 2s timeout'
+    assert 'fixture-secret' not in json.dumps(result)
 
 
 @pytest.mark.parametrize('boundary', ['lookup', 'filesystem'])

@@ -287,7 +287,9 @@ function Invoke-UsbipdBounded([string]$PreferredPath, [double]$Seconds, [double]
 function Test-UsbipdExecutable([string]$Path, [double]$TimeoutSeconds=5) {
     if (-not (Test-UsbipdLocalPath $Path)) { return $false }
     # Direct probe API has a fixed, bounded 2s isolation-startup allowance; the
-    # resolver instead shares ONE 15s envelope including all startup and cleanup.
+    # argument bounds entered worker execution, NOT worker admission/CLI entry.
+    # Slow startup/filesystem work may exhaust the total without entering a CLI.
+    # The resolver instead shares ONE 15s envelope including startup and cleanup.
     return [bool](Invoke-UsbipdBounded $Path ($TimeoutSeconds+2) $TimeoutSeconds)
 }
 function Resolve-UsbipdExecutable([string]$PreferredPath) {

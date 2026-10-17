@@ -3,13 +3,17 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Run','Validate','Check','SelfTest','Phase')][string]$Mode = 'Run',
-    [string]$ToolkitRoot = (Split-Path (Split-Path $PSScriptRoot)),
+    [string]$ToolkitRoot = '',
     [string]$OutputRoot = (Join-Path (Get-Location) 'usbipd-native-receipts'),
     [string]$RunId,
     [string]$PhaseName,
     [string]$ScratchRoot
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 may bind defaults before $PSScriptRoot is available.
+if (-not $PSBoundParameters.ContainsKey('ToolkitRoot')) {
+    $ToolkitRoot = Split-Path (Split-Path $PSScriptRoot)
+}
 Import-Module Microsoft.PowerShell.Utility
 Import-Module Microsoft.PowerShell.Management
 $SelfPath = $PSCommandPath

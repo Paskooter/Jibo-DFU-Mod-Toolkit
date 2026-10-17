@@ -20,19 +20,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PWSH = os.environ.get('PWSH') or shutil.which('pwsh')
 PORTABLE = pytest.mark.skipif(not PWSH or os.name == 'nt', reason='portable Linux shell OS fixtures')
+PROBE_HELPER = Path(os.environ.get('USBIPD_HELPER', ROOT/'usbipd.ps1'))
 
 
 def psquote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def run_ps(tmp_path, text, env=None, timeout=20):
+def run_ps(tmp_path, text, env=None, timeout=20, owned=False):
     assert PWSH is not None
     script = tmp_path / 'probe.ps1'
     script.write_text("$ErrorActionPreference='Stop'\n" + text)
-    return subprocess.run([PWSH, '-NoProfile', '-File', str(script)],
+    argv = [PWSH, '-NoProfile', '-File', str(script)]
+    if owned:
+        supervisor = ROOT/'tests/fixtures/usbipd_bounds_supervise.py'
+        argv = [sys.executable, str(supervisor), str(timeout), *argv]
+    return subprocess.run(argv,
                           env={**os.environ, 'TMPDIR': str(tmp_path), **(env or {})},
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, timeout=timeout+4 if owned else timeout)
 
 
 def fake_usb(tmp_path):
@@ -171,14 +176,65 @@ if ($resolved -cne $env:FIXTURE_USB -or $env:PATH -cne $before) { throw 'Resolut
 
 
 @PORTABLE
-def test_bounded_version_probe_kills_hanging_cli_without_output_leak(tmp_path):
-    binary = fake_usb(tmp_path)
+@pytest.mark.parametrize('mode', ['hang', 'late'])
+def test_bounded_version_probe_kills_hanging_cli_without_output_leak(tmp_path, mode):
+    from fixtures.usbipd_probe_contract import admission, assert_owned_cleanup, observation, probe_binary
+
+    binary = probe_binary(tmp_path, mode)
     started = time.monotonic()
-    result = run_ps(tmp_path, '. ' + psquote(ROOT/'usbipd.ps1') + '\nif (Test-UsbipdExecutable -Path ' + psquote(binary) + ' -TimeoutSeconds 0.2) { throw "Hang accepted" }',
-                    {'FIXTURE_MODE': 'hang', 'FIXTURE_TRACE': str(tmp_path/'native.log')}, timeout=8)
+    # Test .2s ENTERED execution independently of admission. The same isolated
+    # worker gets the documented direct-2s API's 4s TOTAL, not a larger CLI limit.
+    text = '. ' + psquote(PROBE_HELPER) + admission(1.25)
+    text += observation('Invoke-UsbipdBounded ' + psquote(binary) + ' 4 0.2')
+    result = run_ps(tmp_path, text, timeout=8, owned=True)
+    print(result.stderr.strip())
     assert result.returncode == 0, result.stdout + result.stderr
     assert time.monotonic() - started < 5
-    assert (tmp_path/'native.log').read_text().endswith('\t--version\n')
+    assert (tmp_path/'native.log').read_text() == str(binary) + '\t--version\n'
+    value = json.loads(result.stdout)
+    print(json.dumps(value, sort_keys=True))
+    assert (tmp_path/'admission.entered').read_text() == 'entered'
+    assert value['clockOrdered']
+    assert not value['accepted'], '.2s worker limit failed to reject hanging/late version'
+    assert value['seconds'] < 4, 'isolated probe escaped its independently bounded total'
+    assert 0 <= value['enteredSeconds'] < 3, 'entered-probe cleanup escaped its existing bound'
+    if mode == 'hang':
+        assert value['child'] is not None, 'hanging descendant fixture was never entered'
+    assert not value['parentAlive'] and not value['childAlive']
+    assert value['diagnostics']['ReadersReleased'] and value['diagnostics']['ContainmentStopped']
+    assert not value['diagnostics']['TimedOut'], 'owner deadline hid an untested worker timeout'
+    assert 'fixture-secret' not in result.stdout + result.stderr
+    assert_owned_cleanup(result.stderr)
+
+
+@PORTABLE
+def test_short_direct_probe_bounds_cold_admission_without_claiming_cli_entry(tmp_path):
+    from fixtures.usbipd_probe_contract import admission, assert_owned_cleanup, probe_binary
+
+    binary = probe_binary(tmp_path, 'hang')
+    started = time.monotonic()
+    text = '. ' + psquote(PROBE_HELPER) + admission(2.5) + '''
+$t=[Diagnostics.Stopwatch]::StartNew()
+$r=Test-UsbipdExecutable -Path PATH -TimeoutSeconds 0.2
+[pscustomobject]@{accepted=$r; seconds=$t.Elapsed.TotalSeconds; diagnostics=$script:UsbipdLastSupervision} | ConvertTo-Json -Compress -Depth 5
+'''.replace('PATH', psquote(binary))
+    result = run_ps(tmp_path, text, timeout=8, owned=True)
+    print(result.stderr.strip())
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert time.monotonic() - started < 5
+    value = json.loads(result.stdout)
+    print(json.dumps(value, sort_keys=True))
+    assert (tmp_path/'admission.entered').read_text() == 'entered'
+    # This test proves ONLY admission cutoff. The entered .2s test above must
+    # independently prove actual version entry, child death and reader release.
+    assert not (tmp_path/'native.log').exists()
+    assert not (tmp_path/'cli.entry').exists()
+    assert not value['accepted']
+    assert value['seconds'] < 0.2 + 2
+    assert value['diagnostics']['TimedOut']
+    assert value['diagnostics']['ContainmentStopped'] and value['diagnostics']['ReadersReleased']
+    assert 'fixture-secret' not in result.stdout + result.stderr
+    assert_owned_cleanup(result.stderr)
 
 
 @PORTABLE

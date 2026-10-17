@@ -3,10 +3,14 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Run','Validate','Check')][string]$Mode = 'Run',
-    [string]$SourceRoot = (Split-Path (Split-Path $PSScriptRoot)),
+    [string]$SourceRoot = '',
     [string]$OutputRoot = (Join-Path (Get-Location) 'support-native-receipts')
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 may bind defaults before $PSScriptRoot is available.
+if (-not $PSBoundParameters.ContainsKey('SourceRoot')) {
+    $SourceRoot = Split-Path (Split-Path $PSScriptRoot)
+}
 $SupportRunner = $PSCommandPath
 function Assert-Support($Condition, [string]$Reason) { if (-not $Condition) { throw $Reason } }
 function Save-SupportJson([string]$Path, $Value) {

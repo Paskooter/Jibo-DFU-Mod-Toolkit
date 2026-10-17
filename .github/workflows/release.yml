@@ -80,6 +80,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File scripts/release/test-console.ps1 -Case all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows test executable before native fixtures
+        if: matrix.platform == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-exe
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 7
       - name: Native usbipd executable fixtures (Windows PowerShell 5.1)
         if: always() && matrix.platform == 'Windows'
         run: |
