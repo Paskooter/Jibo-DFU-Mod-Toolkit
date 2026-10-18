@@ -264,9 +264,10 @@ try {
 
 function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
 function Invoke-ToolkitNative {
-    param($File, [string[]]$Arguments)
+    param($File, [string[]]$Arguments, $TimeoutSeconds)
+    if ($Arguments -contains '--system') { Record 'system-timeout' @($TimeoutSeconds) }
     $output = if ($File -eq 'powershell.exe') { @(& powershell.exe @Arguments) } else { @(& wsl.exe @Arguments) }
-    return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null}
+    return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null; TimedOut=($LASTEXITCODE -eq 124)}
 }
 function Show-ToolkitQuestion { param($Question); return ((Read-Host $Question) -match '^(?i:y|yes)$') }
 function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
@@ -275,6 +276,8 @@ function Stop-ToolkitSetup {}
 function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); Record 'support' @($Message, [bool]$AllowWait); return $false }
 # Short installer limit for fixtures only; console.ps1's real value is 180 seconds.
 $script:ToolkitUsbipdInstallerWaitSeconds = 1
+# Short display-fix wait for fixtures only; console.ps1's real value is 30 seconds.
+$script:ToolkitDisplayRepairWaitSeconds = 1
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'console.ps1'), $mockHelper)
     foreach ($file in @('payload.tar.gz', 'run.ps1', 'wsl-usb-permissions.sh', 'wsl-user-launch.sh', 'wsl-provision.sh')) {
@@ -312,6 +315,8 @@ $global:UsbInstallCase = $Case -like 'usb-*' -and $Case -notin @('usb-declined',
 if ($global:UsbInstallCase) { $env:ProgramFiles = Join-Path $Payload $Case; $env:ProgramW6432 = $env:ProgramFiles }
 function Get-ItemProperty { param($LiteralPath,$Name,$ErrorAction); return $null } # No real registry inventory.
 function Record($Kind, $Values) { [IO.File]::AppendAllText($global:UacTrace, (([pscustomobject]@{Kind=$Kind; Values=@($Values)} | ConvertTo-Json -Compress) + "`n")) }
+$global:WestonSessions = 2
+$global:WestonMode = 'copy'
 function wsl.exe {
     Record 'wsl' $args
     $global:LASTEXITCODE = 0
@@ -325,6 +330,8 @@ function wsl.exe {
             'nonstandard-decline' { return "$header`n* My-Ubuntu Stopped 2`n Debian Stopped 2`n Kali Stopped 2" }
             'ubuntu24' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-24.04 Stopped 2" }
             'private' { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
+            { $_ -like 'display-*' -and $_ -ne 'display-copy-user-distro' } { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
+            'display-copy-user-distro' { return "$header`n* Ubuntu-22.04 Stopped 2" }
             'private-priority' { return "$header`n* Ubuntu-24.04 Stopped 2`n Jibo-DFU-Toolkit Stopped 2" }
             'default-preferred' { return "$header`n* Ubuntu-22.04 Stopped 2`n Ubuntu-24.04 Stopped 2" }
             'newest' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-22.04 Stopped 2`n Ubuntu-24.04 Stopped 2" }
@@ -355,7 +362,23 @@ function wsl.exe {
     if ($args -contains 'printenv') { return '/home/fixture/path with spaces' }
     if ($args -contains 'wslpath') { return ('/mnt/c/fixture/' + (Split-Path $args[-1] -Leaf)) }
     if ($args -contains 'once' -and $global:UacCase -eq 'grant-failed') { $global:LASTEXITCODE=1; return 'Synthetic grant failure' }
-    if ($args -contains 'display-mode') { return 'shared' }
+    if ($args -contains 'display-mode') { if ($global:UacCase -like 'display-*') { return 'copy' }; return 'shared' }
+    if ($args -contains 'display-detail') {
+        # Weston appends a session to its log on every start (compositor/main.c).
+        if ($global:UacCase -eq 'display-detail-broken') { return 'garbage' }
+        return ('mode={0} sessions={1} eio={2}' -f $global:WestonMode, $global:WestonSessions, $(if ($global:WestonMode -eq 'copy') { 1 } else { 0 }))
+    }
+    if ($args -contains '--system') {
+        # Only the toolkit's own system distro may be touched (Repair-ToolkitDisplay).
+        switch ($global:UacCase) {
+            'display-repair-ok' { $global:WestonSessions++; $global:WestonMode = 'shared' }
+            'display-repair-still-copy' { $global:WestonSessions++; $global:WestonMode = 'copy' }
+            'display-repair-command-failed' { $global:LASTEXITCODE = 1; return 'pkill: no process found' }
+            'display-repair-hang' { $global:LASTEXITCODE = 124; return 'stalled' }
+            'display-repair-never-back' { }
+        }
+        return
+    }
     if ($args -contains 'bash' -and ($args -join ' ') -match '/wsl-user-launch.sh|/AppRun') { $global:LASTEXITCODE = 41 }
 }
 function powershell.exe { Record 'usb' $args; $global:LASTEXITCODE = if ($global:UacCase -eq 'usb-declined') { 3 } else { 0 } }
@@ -417,7 +440,7 @@ if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-winget-hidden-prompt','usb-installer-never-finishes') | Where-Object { $_ -like $Scenario }) {
+    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-winget-hidden-prompt','usb-installer-never-finishes','display-repair-ok','display-repair-still-copy','display-repair-command-failed','display-repair-hang','display-repair-never-back','display-detail-broken','display-copy-user-distro') | Where-Object { $_ -like $Scenario }) {
         try {
             if ($case -in @('usb-winget-hidden-prompt','usb-installer-never-finishes')) {
                 # These model a winget/installer that never exits. Bound the whole
@@ -439,7 +462,7 @@ exit $LASTEXITCODE
             $text = $messages -join "`n"
             $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
             $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
-            $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' -and $_.Values -notcontains 'display-mode' })
+            $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' -and $_.Values -notcontains 'display-mode' -and $_.Values -notcontains 'display-detail' })
             $downloads = @($events | Where-Object { $_.Kind -eq 'download' })
             $imports = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--import' })
             $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
@@ -472,7 +495,7 @@ exit $LASTEXITCODE
                 'ubuntu24' { 'Ubuntu-24.04' }; 'private' { 'Jibo-DFU-Toolkit' }; 'private-priority' { 'Jibo-DFU-Toolkit' }
                 'default-preferred' { 'Ubuntu-22.04' }; 'newest' { 'Ubuntu-24.04' }; 'explicit-good' { 'NVIDIA-Workbench' }
                 'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }; 'usb-installed-stale-path' { 'Ubuntu-22.04' }
-                'usb-installed-current-path' { 'Ubuntu-22.04' }
+                'usb-installed-current-path' { 'Ubuntu-22.04' }; 'display-repair-ok' { 'Jibo-DFU-Toolkit' }
                 { $_ -in @('usb-noop-ready','usb-fresh-ready','usb-winget-hidden-prompt') } { 'Ubuntu-22.04' }
             }
             if ($case -in $declines) {
@@ -522,6 +545,33 @@ exit $LASTEXITCODE
             }
             if ($case -eq 'unhealthy-private' -and ($downloads.Count -or $imports.Count -or $prompts.Count)) { throw 'existing unhealthy private distro was changed' }
             if ($case -eq 'grant-failed' -and @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'watcher started after grant failure' }
+            # Copy-mode display fix (bootstrap.ps1 Repair-ToolkitDisplay). Every
+            # scenario: a system-distro call may only ever target the toolkit's
+            # own private Linux, with the exact restart argv and a bound.
+            $system = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--system' })
+            foreach ($call in $system) {
+                if (($call.Values -join '|') -cne '--distribution|Jibo-DFU-Toolkit|--system|--user|root|--exec|pkill|-x|weston') { throw ('Display fix touched something other than the toolkit''s own display: ' + ($call.Values -join ' ')) }
+            }
+            if ($case -like 'display-*') {
+                if (@($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -contains '--shutdown' -or $_.Values -contains '--terminate' -or $_.Values -contains '--unregister') }).Count) { throw 'Display fix stopped or removed a Linux distribution' }
+                if (@($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains 'display-mode' }).Count -ne 1) { throw 'Display preflight was not run exactly once' }
+                $expectedRepairs = if ($case -in @('display-copy-user-distro','display-detail-broken')) { 0 } else { 1 }
+                if ($system.Count -ne $expectedRepairs) { throw ('Expected ' + $expectedRepairs + ' display fix attempt(s), saw ' + $system.Count) }
+                $bounds = @($events | Where-Object Kind -eq 'system-timeout')
+                if ($bounds.Count -ne $expectedRepairs -or @($bounds | Where-Object { [double]$_.Values[0] -le 0 -or [double]$_.Values[0] -gt 15 }).Count) { throw 'Display fix command was not bounded to 15 seconds' }
+                if ($expectedRepairs -and $text -notmatch '(?m)^Fixing a Windows display problem\r?$') { throw 'Setup window did not show the display fix step' }
+                $support = @($events | Where-Object Kind -eq 'support')
+                if ($case -eq 'display-repair-ok') {
+                    # The fixture GUI always exits 41 (like every chosen-distro case); only a copy refusal is wrong.
+                    if (@($support | Where-Object { $_.Values[0] -match 'COPY MODE' }).Count) { throw ('Repaired display still refused: ' + $support[0].Values[0]) }
+                    $repairAt = [Array]::IndexOf([object[]]$events, $system[0]); $guiAt = [Array]::IndexOf([object[]]$events, $gui[0])
+                    if ($repairAt -lt 0 -or $guiAt -le $repairAt) { throw 'GUI did not start after the display fix' }
+                } else {
+                    if ($support.Count -ne 1 -or $support[0].Values[0] -notmatch 'WARN:COPY MODE' -or $support[0].Values[0] -notmatch 'wsl --shutdown' -or $support[0].Values[0] -match 'Save and close your other Linux work, restart Windows') { throw ('Display refusal text wrong: ' + ($support | ConvertTo-Json -Compress)) }
+                    $fixed = $support[0].Values[0] -match 'automatic fix didn''t work'
+                    if ($fixed -ne ($case -ne 'display-copy-user-distro')) { throw ('Refusal does not say whether the automatic fix ran: ' + $support[0].Values[0]) }
+                }
+            }
             $passed++; Write-Output "PASS scenario: $case"
         } catch { $failedCases += $case; Write-Output "FAIL scenario: $case - $($_.Exception.Message)" }
     }

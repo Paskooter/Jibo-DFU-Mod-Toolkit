@@ -85,6 +85,7 @@ def test_every_logged_setup_string_has_plain_window_wording(tmp_path):
 
 @pytest.mark.parametrize('message,wait,tone,headline', [
     ('Windows display is not ready (WARN:COPY MODE).', False, 'error', 'Windows could not display the toolkit'),
+    ('Step: Fixing a Windows display problem\r\nWindows display is not ready (WARN:COPY MODE), and the automatic fix didn\'t work. The toolkit window was not opened. Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.\r\nTry: Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.', False, 'error', 'Windows could not display the toolkit'),
     ('Windows toolkit window could not be verified within 120 seconds.', False, 'error', 'The toolkit window could not open'),
     ('Downloading Ubuntu stalled: no bytes arrived for 120 seconds. Check your internet connection, then reopen the toolkit.', True, 'stall', 'The download seems stuck'),
     ('Unpacking the toolkit stalled: no completion after 300 seconds. Close other WSL work, run wsl --shutdown in PowerShell, then reopen. Restart Windows if it happens again.', True, 'stall', 'Setup is taking longer than expected'),
@@ -103,7 +104,39 @@ def test_failure_wording_states_what_happened_and_what_to_try(tmp_path, message,
     if message.startswith('You closed'):
         assert 'closed the question' in text['what'] and 'Not now' in text['what']
     for line in (text['headline'], text['what'], text['try']):
+        if message.startswith(('Windows display is not ready', 'Step: Fixing a Windows display problem')):
+            continue  # Copy mode's way out IS wsl --shutdown; see the dedicated test below.
         assert 'wsl --shutdown' not in line and not re.search(r'\bstalled\b', line), line
+
+
+DISPLAY_FIX_STEP = ('Fixing a Windows display problem', 'This is a known Windows issue. It takes a few seconds.')
+DISPLAY_TRY = ('Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), '
+               'then open the toolkit again. Restart Windows if it still happens.')
+
+
+def test_copy_mode_fix_and_refusal_wording(tmp_path):
+    """Owner-facing strings for the automatic copy-mode fix, pinned on purpose."""
+    failed = 'Windows display is not ready (WARN:COPY MODE), and the automatic fix didn\'t work. The toolkit window was not opened. ' + DISPLAY_TRY
+    unfixed = 'Windows display is not ready (WARN:COPY MODE). The toolkit window was not opened. ' + DISPLAY_TRY
+    full = 'Step: Fixing a Windows display problem\r\n' + failed + '\r\nTry: ' + DISPLAY_TRY
+    data = catalogue(tmp_path, ['Fixing a Windows display problem'], [], [],
+                     [{'message': full, 'wait': False}, {'message': unfixed, 'wait': False}])
+    step = data['steps']['Fixing a Windows display problem']
+    assert (step['title'], step['description']) == DISPLAY_FIX_STEP and step['phase'] == 4
+    after = data['failures'][full]
+    assert after['headline'] == 'Windows could not display the toolkit'
+    assert after['what'] == 'Windows reported WARN:COPY MODE, and the automatic fix didn\u2019t work. The toolkit window was not opened.'
+    assert after['try'] == DISPLAY_TRY
+    before = data['failures'][unfixed]
+    assert before['what'] == 'Windows reported WARN:COPY MODE. The toolkit window was not opened.' and before['try'] == DISPLAY_TRY
+    shown = ' '.join([step['title'], step['description'], after['headline'], after['what'], after['try'], before['what']])
+    for word in ('weston', 'compositor', 'virtiofs', 'shared memory', 'gfxredir', 'system distro'):
+        assert word not in shown.lower(), word
+    # Restarting Windows is the last resort now, not the first step.
+    assert not after['try'].startswith('Restart') and after['try'].index('wsl --shutdown') < after['try'].index('Restart Windows')
+    source = BOOTSTRAP.read_text()
+    assert source.count("didn''t work. The toolkit window was not opened. " + DISPLAY_TRY) == 1
+    assert 'Save and close your other Linux work, restart Windows' not in source
 
 
 @pytest.mark.parametrize('message,headline', [

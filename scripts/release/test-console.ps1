@@ -490,7 +490,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-questions','setup-wait-behind','support-not-topmost','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
+    foreach ($scenario in @('setup-questions','setup-wait-behind','support-not-topmost','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight','display-copy-repaired')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE
@@ -595,12 +595,16 @@ public class ToolkitSetupStatus {
     }
     $global:ConsoleFixtureTicks = 0
     $global:ConsoleFixtureReady = $null
+    $global:ConsoleWestonSessions = 3
+    $global:ConsoleWestonMode = 'copy'
     function wsl.exe {
         Record 'wsl' $args
         $global:LASTEXITCODE = 0
         if ($args[0] -eq '--version') { if ($global:ConsoleFixtureCase -eq 'setup-decline') { $global:LASTEXITCODE=1; return 'missing' }; return 'WSLg 1.0' }
-        if ($args[0] -eq '--list') { return "NAME STATE VERSION`n* Ubuntu-22.04 Stopped 2" }
-        if ($args -contains 'display-mode') { if ($global:ConsoleFixtureCase -eq 'display-copy-preflight') { return 'copy' }; return 'shared' }
+        if ($args[0] -eq '--list') { if ($global:ConsoleFixtureCase -eq 'display-copy-repaired') { return "NAME STATE VERSION`n* Jibo-DFU-Toolkit Stopped 2" }; return "NAME STATE VERSION`n* Ubuntu-22.04 Stopped 2" }
+        if ($args -contains 'display-mode') { if ($global:ConsoleFixtureCase -in @('display-copy-preflight','display-copy-repaired')) { return 'copy' }; return 'shared' }
+        if ($args -contains 'display-detail') { return ('mode={0} sessions={1} eio={2}' -f $global:ConsoleWestonMode, $global:ConsoleWestonSessions, [int]($global:ConsoleWestonMode -eq 'copy')) }
+        if ($args -contains '--system') { $global:ConsoleWestonSessions++; $global:ConsoleWestonMode = 'shared'; return }
         if ($args -contains 'getconf') { return 'glibc 2.35' }
         if ($args -contains 'uname') { return 'x86_64' }
         if ($args -contains 'id') { if ($args[-1] -eq '-un') { return 'fixture' }; return '1000' }
@@ -706,7 +710,7 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); [Toolk
     $hide = @($events | Where-Object { $_.Kind -eq 'console' -and $_.Values[0] -in @(0,6) })
     $show = @($events | Where-Object { $_.Kind -eq 'console' -and $_.Values[0] -eq 9 })
     $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' })
-    $success = $Case -in @('gui-success','show-console','watcher-handle')
+    $success = $Case -in @('gui-success','show-console','watcher-handle','display-copy-repaired')
     if ($code -ne $(if ($success) { 0 } elseif ($Case -in @('gui-failed','never-ready','terminal-failed','gui-handle')) { 41 } else { 1 })) { throw "Wrong exit code: $code" }
     if ($hide.Count -or $show.Count -or $prompts.Count) { throw 'Windowless launcher touched a console or waited for console input' }
     $started = @($events | Where-Object Kind -eq 'setup-start')
@@ -726,6 +730,25 @@ function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); [Toolk
         }
     }
     if ($Case -eq 'display-copy-preflight' -and @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[1] -match 'wsl-user-launch.sh' }).Count) { throw 'Known copy mode started a GUI' }
+    if ($Case -in @('display-copy-preflight','display-copy-repaired')) {
+        $system = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--system' })
+        $expected = if ($Case -eq 'display-copy-repaired') { 1 } else { 0 }
+        if ($system.Count -ne $expected) { throw ('Display fix attempts: expected ' + $expected + ', saw ' + $system.Count) }
+        if ($system.Count -and ($system[0].Values -join '|') -cne '--distribution|Jibo-DFU-Toolkit|--system|--user|root|--exec|pkill|-x|weston') { throw 'Display fix argv is not the toolkit''s own system distro' }
+        if (@($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -contains '--shutdown' -or $_.Values -contains '--terminate') }).Count) { throw 'Display fix stopped a Linux distribution' }
+    }
+    if ($Case -eq 'display-copy-repaired') {
+        $log = @(Get-ChildItem -Recurse -Filter 'setup-*.log' -Path $fixture | ForEach-Object { Get-Content $_.FullName } | ForEach-Object { $_ | ConvertFrom-Json })
+        $fixStep = @($log | Where-Object { $_.event -eq 'step-start' -and $_.step -eq 'Fixing a Windows display problem' })
+        $begin = @($log | Where-Object event -eq 'display-repair-start')
+        $end = @($log | Where-Object event -eq 'display-repair-end')
+        if ($fixStep.Count -ne 1 -or $begin.Count -ne 1 -or $end.Count -ne 1) { throw 'Display fix step or its log events are missing' }
+        if ($begin[0].mode -ne 'copy' -or $begin[0].sessions -ne 3 -or $begin[0].shared_memory_eio -ne $true) { throw ('display-repair-start lacks the before state: ' + ($begin[0] | ConvertTo-Json -Compress)) }
+        if ($end[0].result -ne 'ok' -or $end[0].mode -ne 'shared' -or $end[0].sessions -ne 4) { throw ('display-repair-end lacks the after state: ' + ($end[0] | ConvertTo-Json -Compress)) }
+        $opening = @($log | Where-Object { $_.event -eq 'step-start' -and $_.step -eq 'Opening the toolkit' })
+        if ($opening.Count -lt 2 -or [array]::IndexOf($log, $opening[-1]) -le [array]::IndexOf($log, $end[0])) { throw 'Opening the toolkit did not resume after the display fix' }
+        if (-not @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[1] -match 'wsl-user-launch.sh' }).Count) { throw 'Repaired display did not start the GUI' }
+    }
     if ($Case -eq 'window-copy' -and @($events | Where-Object Kind -eq 'idle-close').Count -ne 1) { throw 'Copy-mode window was not closed by idle request' }
     if ($Case -in @('window-copy','window-missing') -and -not @($events | Where-Object Kind -eq 'window-probe').Count) { throw 'Windows readiness check did not run' }
     if ($Case -eq 'terminal-failed' -and @($events | Where-Object Kind -eq 'dialog').Count -ne 1) { throw 'Terminal failure needs a visible dialog fallback' }

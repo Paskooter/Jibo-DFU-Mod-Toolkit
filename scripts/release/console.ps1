@@ -101,6 +101,7 @@ function Get-ToolkitStepPolicy([string]$Name) {
         'Checking the toolkit' { $seconds = 120 }
         'Connecting USB' { $seconds = 180; $hint = 'Check for a Windows administrator approval prompt. Reconnect the USB cable and reopen the toolkit.'; $wait = $true }
         'Opening the toolkit' { $seconds = 120; $wait = $true }
+        'Fixing a Windows display problem' { $seconds = 75; $hint = 'Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.' }
         'Cleaning up USB support' { $seconds = 30 }
     }
     return [pscustomobject]@{ Seconds=$seconds; Hint=$hint; AllowWait=$wait }
@@ -370,6 +371,7 @@ public static class ToolkitSetupText {
             case "Checking the toolkit": return S("Checking the toolkit", "Making sure the toolkit starts correctly.", 2);
             case "Connecting USB": return S("Connecting USB", "Letting the toolkit use USB so it can talk to Jibo.", 3);
             case "Opening the toolkit": return S("Opening the toolkit", "The toolkit window appears in a moment.", 4);
+            case "Fixing a Windows display problem": return S("Fixing a Windows display problem", "This is a known Windows issue. It takes a few seconds.", 4);
             case "Cleaning up USB support": return S("Closing USB support", "Releasing the USB connection.", 4);
         }
         return null;
@@ -518,8 +520,11 @@ public static class ToolkitSetupText {
             f = F("error", "The toolkit window could not open", "Setup could not confirm a visible, responding toolkit window. No robot operation was enabled.",
                 "Save and close your other Linux work, restart Windows, then open the toolkit again. Use Copy details if this happens again.");
         else if (text.StartsWith("Windows display is not ready"))
-            f = F("error", "Windows could not display the toolkit", "Windows reported WARN:COPY MODE. The toolkit window was not opened, and no Linux apps were stopped.",
-                "Save and close your other Linux work, restart Windows, then open the toolkit again. You do not need to set up the toolkit\u2019s Linux again.");
+            f = F("error", "Windows could not display the toolkit",
+                text.IndexOf("automatic fix", System.StringComparison.Ordinal) >= 0
+                    ? "Windows reported WARN:COPY MODE, and the automatic fix didn\u2019t work. The toolkit window was not opened."
+                    : "Windows reported WARN:COPY MODE. The toolkit window was not opened.",
+                "Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.");
         else if (text.StartsWith("Opening the toolkit stalled"))
             f = F("stall", "The toolkit window did not appear", "The toolkit has not opened after " + (waited ?? "a while") + ".",
                 allowWait ? keepWaiting + " If you stop, restart Windows before opening the toolkit again." : "Restart Windows, then open the toolkit again.");
@@ -2016,6 +2021,9 @@ function ConvertTo-ToolkitNativeLines([string]$Text) {
 # The usbipd-win way out when its installer cannot finish. Logged and copied text;
 # no https:// because Protect-ToolkitText removes full URLs from logs and details.
 $script:ToolkitUsbipdManualInstall = 'download the x64 .msi from github.com/dorssel/usbipd-win/releases, run it, restart Windows if it asks, then reopen the toolkit.'
+# Longest wait for the toolkit's own Linux display to come back after the
+# automatic copy-mode fix (bootstrap.ps1 Repair-ToolkitDisplay).
+$script:ToolkitDisplayRepairWaitSeconds = 30
 # Seconds after Windows approval before setup asks about a usbipd-win install that
 # has not finished: winget's first-run source update and the ~4.5 MB MSI download
 # usually take well under a minute, and the short usbipd-win wizard about another

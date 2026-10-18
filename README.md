@@ -36,10 +36,15 @@ choose **Keep waiting** or **Stop setup**; closing that decision stops setup. Ru
 combined with `-Distro NAME`. Source launchers keep their terminal.
 
 The Windows download also checks the Linux display's current mode before opening
-the GUI. If Windows reports **WARN:COPY MODE**, setup stops visibly instead of
-opening an invisible window. Save and close other Linux work, restart Windows,
-then reopen the toolkit; do not remove or reinstall its private Linux. Setup
-never restarts other Linux apps or the shared display automatically. A Linux
+the GUI. If Windows reports **WARN:COPY MODE** (a known WSL bug when the toolkit's
+Linux starts again while other Linux apps keep WSL running), setup shows
+**Fixing a Windows display problem** and restarts the display of the toolkit's own
+private Linux once; that takes a few seconds and touches no other Linux app. If
+that does not work, or you chose your own distribution with `-Distro`, setup stops
+visibly instead of opening an invisible window: save your other Linux work, run
+`wsl --shutdown` in PowerShell (this closes all Linux apps), then open the toolkit
+again, and restart Windows only if it still happens. Do not remove or reinstall
+its private Linux. A Linux
 mapped-window signal alone is not success: setup also checks this launch's Windows
 window for visibility and responsiveness. Robot operations stay unavailable until
 that check succeeds. If it cannot confirm the window within two minutes, it closes

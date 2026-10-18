@@ -127,6 +127,17 @@ five stages are **Check Windows**, **Set up Linux**, **Prepare toolkit**,
 time. Downloads show received MB, total MB and a real percentage; other work uses
 an activity indicator. It closes when the actual Tk main window reports readiness.
 
+Before starting the GUI, setup reads the current WSLg display mode. Copy mode
+(`[WARN:COPY MODE]`, renders nothing on WSLg 1.0.73) comes from a known WSL bug
+(microsoft/openvmm#4274, microsoft/wslg#1456). For the private `Jibo-DFU-Toolkit`
+distro only, setup shows **Fixing a Windows display problem** and runs
+`wsl --distribution Jibo-DFU-Toolkit --system --user root --exec pkill -x weston` once (15 s
+limit). Each user distro has its own system distro instance (WSLg README), and
+WSLGd restarts weston; setup waits up to 30 s for a new weston session in shared
+mode, then opens the toolkit. Otherwise, or for a `-Distro` choice, it refuses
+with WARN:COPY MODE and the `wsl --shutdown` advice. It never runs `--shutdown` or
+`--terminate` and never touches another distro.
+
 Consent questions are embedded in that same window, with **What happens** and
 **How long** explanations. Private Linux uses **Set it up** / **Not now**; Windows
 Linux-support and USB-support installation use **Install** / **Not now**. The safe

@@ -128,7 +128,57 @@ function Install-PrivateDistribution([string]$Root) {
         if (Test-Path $download) { Remove-Item -LiteralPath $download -Force }
     }
 }
-function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session, $Permissions, $Monitor, [switch]$ShowConsole, [double]$ReadyTimeoutSeconds = 120) {
+function Get-WslDisplayDetail([string]$Name, [string]$User, [string]$Target) {
+    # Read-only: mode of the current weston session, how many sessions the log
+    # holds, and whether this session's shared-memory probe hit EIO.
+    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'bash', "$Target/wsl-user-launch.sh", 'display-detail') -TimeoutSeconds 10
+    $text = ($result.Output -join "`n").Trim()
+    if ($result.ExitCode -ne 0 -or $text -notmatch '^mode=(missing|starting|copy|shared) sessions=([0-9]+) eio=([01])$') { return $null }
+    return [pscustomobject]@{ Mode=$Matches[1]; Sessions=[int]$Matches[2]; Eio=($Matches[3] -eq '1') }
+}
+function Repair-ToolkitDisplay([string]$Name, [string]$User, [string]$Target, [double]$WaitSeconds = 30) {
+    # Known WSL bug (microsoft/openvmm#4274, microsoft/wslg#1456): after a distro
+    # session ends, the next weston's startup shared-memory probe is the share's
+    # first create, gets FUSE node 1 and fails with EIO, so weston stays in copy
+    # mode, which renders nothing on WSLg 1.0.73. The second create works, so a
+    # restarted weston comes up shared. WSLGd restarts weston when it exits
+    # (WSLGd/ProcessMonitor.cpp). The WSLg README says "Every WSL 2 user distro is
+    # paired with its own instance of the system distro", in its own PID
+    # namespace: pkill in THIS distro's system distro reaches only the toolkit's
+    # own display, which has no window open yet. Never any other distro, never
+    # --shutdown/--terminate, never a process in a user distro. pkill sends
+    # SIGTERM; weston exits cleanly and removes its X socket (weston-mirror
+    # compositor/main.c, xwayland/launcher.c), so no umount is needed.
+    if ($Name -cne 'Jibo-DFU-Toolkit') { throw 'Display repair is only allowed for the toolkit''s private Linux.' }
+    # Bounded: 10 s detail + 15 s restart + $WaitSeconds polling (+ one 10 s poll),
+    # inside this step's 75-second limit (console.ps1). Then refuse visibly.
+    Set-ToolkitStep 'Fixing a Windows display problem'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $before = Get-WslDisplayDetail -Name $Name -User $User -Target $Target
+    Write-ToolkitLog 'display-repair-start' @{ distro=$Name; mode=$(if ($before) { $before.Mode } else { 'unknown' }); sessions=$(if ($before) { $before.Sessions } else { -1 }); shared_memory_eio=$(if ($before) { $before.Eio } else { $null }) }
+    $result = 'detail-unavailable'; $after = $null
+    if ($before) {
+        $restart = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments @('--distribution', $Name, '--system', '--user', 'root', '--exec', 'pkill', '-x', 'weston') -TimeoutSeconds 15
+        Write-ToolkitLog 'display-repair-command' @{ exit_code=$restart.ExitCode; timed_out=[bool]$restart.TimedOut }
+        $result = 'command-failed'
+        if ($restart.ExitCode -eq 0) {
+            $result = 'timeout'
+            $wait = [Diagnostics.Stopwatch]::StartNew()
+            while ($true) {
+                Start-Sleep -Milliseconds 500
+                $after = Get-WslDisplayDetail -Name $Name -User $User -Target $Target
+                if ($after -and $after.Sessions -gt $before.Sessions -and $after.Mode -eq 'shared') { $result = 'ok'; break }
+                if ($after -and $after.Sessions -gt $before.Sessions -and $after.Mode -eq 'copy') { $result = 'still-copy'; break }
+                if ($wait.Elapsed.TotalSeconds -ge $WaitSeconds) { break }
+            }
+        }
+    }
+    Write-ToolkitLog 'display-repair-end' @{ distro=$Name; result=$result; mode=$(if ($after) { $after.Mode } else { 'unknown' }); sessions=$(if ($after) { $after.Sessions } else { -1 }); shared_memory_eio=$(if ($after) { $after.Eio } else { $null }); duration_seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3) }
+    if ($result -ne 'ok') { return $false }
+    Set-ToolkitStep 'Opening the toolkit'
+    return $true
+}
+function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$Session, $Permissions, $Monitor, [switch]$ShowConsole, [double]$ReadyTimeoutSeconds = 120, [double]$DisplayRepairWaitSeconds = 30) {
     # Supervise readiness and USB support without ever allocating a console.
     if (-not (Test-WslDistributionName $Name) -or $User -notmatch '^[^\s"]+$') { throw 'Invalid WSL GUI identity.' }
     $run = Join-Path ([IO.Path]::GetTempPath()) ('jibo-dfu-' + [guid]::NewGuid().ToString('N'))
@@ -139,15 +189,22 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
     $guiStarted = [DateTime]::UtcNow
     $guiTimer = [Diagnostics.Stopwatch]::StartNew()
     try {
-        # The mapped Linux marker cannot establish Windows visibility. Refuse
-        # the known broken display mode before starting a GUI or robot action.
-        # This is read-only: even a private distro is not authority to restart
-        # a compositor whose scope we cannot prove on this Windows installation.
+        # The mapped Linux marker cannot establish Windows visibility. Copy mode
+        # renders nothing, so never start the GUI in it. For the toolkit's own
+        # private Linux, first restart only that Linux's display once
+        # (Repair-ToolkitDisplay explains why that scope is safe). A distro the
+        # user chose is shared with their other apps: refuse without touching it.
         $display = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'bash', "$Target/wsl-user-launch.sh", 'display-mode') -TimeoutSeconds 10
         $displayMode = ($display.Output -join "`n").Trim()
         Write-ToolkitLog 'display-mode' @{ mode=$displayMode; exit_code=$display.ExitCode }
         if ($display.ExitCode -eq 0 -and $displayMode -eq 'copy') {
-            throw 'Windows display is not ready (WARN:COPY MODE). The toolkit window was not opened. Save and close your other Linux work, restart Windows, then open the toolkit again. No Linux distributions were stopped.'
+            if ($Name -cne 'Jibo-DFU-Toolkit') {
+                throw 'Windows display is not ready (WARN:COPY MODE). The toolkit window was not opened. Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.'
+            }
+            if ($DisplayRepairWaitSeconds -le 0) { $DisplayRepairWaitSeconds = 30 }
+            if (-not (Repair-ToolkitDisplay -Name $Name -User $User -Target $Target -WaitSeconds $DisplayRepairWaitSeconds)) {
+                throw 'Windows display is not ready (WARN:COPY MODE), and the automatic fix didn''t work. The toolkit window was not opened. Save your other Linux work, run wsl --shutdown in PowerShell (this closes all Linux apps), then open the toolkit again. Restart Windows if it still happens.'
+            }
         }
         $readyFile = Join-Path $run 'ready'
         $linuxReady = Native -Arguments @('--distribution', $Name, '--user', $User, '--exec', 'wslpath', '-u', '--', $readyFile)
@@ -396,7 +453,7 @@ try {
         $monitorArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UsbOnly -MonitorUsb -Distro "{1}" -ConsoleHelper "{2}" -UsbipdPath "{3}"' -f $usbScript, $Distro, $consoleHelper, $usb
         $monitor = Start-ToolkitProcess -FilePath powershell.exe -ArgumentList $monitorArgs
         Set-ToolkitStep 'Opening the toolkit'
-        $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole -ReadyTimeoutSeconds $script:ToolkitPolicy.Seconds
+        $code = Invoke-WslGui -Name $Distro -User $linuxUser -Target $target -Session $session -Permissions $permissions -Monitor $monitor -ShowConsole:$ShowConsole -ReadyTimeoutSeconds $script:ToolkitPolicy.Seconds -DisplayRepairWaitSeconds $script:ToolkitDisplayRepairWaitSeconds
         if ($code -ne 0) { $launcherExitCode = $code; Complete-ToolkitStep -Result failed -ExitCode $code -ErrorText "GUI or USB support exited with code $code." }
     } catch {
         $failureCode = if ($_.Exception.Data['ToolkitExitCode']) { [int]$_.Exception.Data['ToolkitExitCode'] } else { 1 }
