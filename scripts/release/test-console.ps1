@@ -22,7 +22,8 @@ if ($Case -eq 'setup-questions') {
             $flags = [Reflection.BindingFlags]'Static,NonPublic'
             $window = [ToolkitSetupStatus].GetField('window',$flags).GetValue($null)
             $view = [ToolkitSetupStatus].GetField('view',$flags).GetValue($null)
-            if (-not $window.TopMost -or -not $window.ControlBox -or $window.AcceptButton -ne $view.No -or $window.CancelButton -ne $view.No -or $view.No.Text -ne 'No' -or $view.Chip.Text -ne 'Your answer is needed' -or $view.Title.Text -notmatch 'Set up Linux.*' -or $view.Footnote.Text -notmatch 'Closing.*No' -or $view.Yes.Enabled) { throw 'Question view state/text/default was not visible' }
+            # Never TopMost: an installer the user must finish has to be able to cover it.
+            if ($window.TopMost -or -not $window.ControlBox -or $window.AcceptButton -ne $view.No -or $window.CancelButton -ne $view.No -or $view.No.Text -ne 'No' -or $view.Chip.Text -ne 'Your answer is needed' -or $view.Title.Text -notmatch 'Set up Linux.*' -or $view.Footnote.Text -notmatch 'Closing.*No' -or $view.Yes.Enabled) { throw 'Question view state/text/default was not visible' }
             # Advance the real question's own model, not the command/stall clock.
             $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
             $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
@@ -91,6 +92,176 @@ if ($Case -eq 'setup-stalls') {
         } finally { Set-ToolkitUserWait $false }
         Write-Output "PASS console: $Case"
     } finally { Remove-Item -Recurse -Force $tmp }
+    exit 0
+}
+# The setup window must never cover a window the user has to work in (the usbipd-win
+# or WSL installer, a UAC prompt). Owner report on build d04ed3c: the installer
+# opened underneath the TopMost setup window and even a taskbar click could not
+# raise it. Portable source checks everywhere; real windows and z-order on Windows.
+$script:ToolkitZOrderFixtureSource = @'
+using System;
+using System.Drawing;
+using System.Threading;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+public static class ToolkitZOrderFixture {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int index);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    static Form installer; static Thread thread;
+    public static IntPtr Installer;
+    public static bool TopMostStyle(IntPtr h) { return (GetWindowLong(h, -20) & 0x8) != 0; } // WS_EX_TOPMOST
+    // True when a is above b: GW_HWNDPREV walks from b toward the top of the z-order.
+    public static bool Above(IntPtr a, IntPtr b) {
+        for (IntPtr h = GetWindow(b, 3); h != IntPtr.Zero; h = GetWindow(h, 3)) if (h == a) return true;
+        return false;
+    }
+    // A stand-in for the usbipd-win installer: smaller, opened over the same spot.
+    public static void Open(IntPtr over) {
+        RECT r; if (!GetWindowRect(over, out r)) throw new Exception("setup window has no bounds");
+        int w = Math.Max(200, (r.Right - r.Left) / 2), h = Math.Max(150, (r.Bottom - r.Top) / 2);
+        var bounds = new Rectangle(r.Left + (r.Right - r.Left - w) / 2, r.Top + (r.Bottom - r.Top - h) / 2, w, h);
+        var ready = new ManualResetEvent(false);
+        thread = new Thread(delegate() {
+            installer = new Form(); installer.Text = "Stand-in usbipd-win installer"; installer.ShowInTaskbar = true;
+            installer.StartPosition = FormStartPosition.Manual; installer.Bounds = bounds;
+            installer.Shown += delegate { Installer = installer.Handle; ready.Set(); };
+            Application.Run(installer);
+        });
+        thread.IsBackground = true; thread.SetApartmentState(ApartmentState.STA); thread.Start();
+        if (!ready.WaitOne(10000)) throw new Exception("stand-in installer did not open");
+    }
+    // What clicking the installer's taskbar button does: top of the normal band, then activate.
+    public static void Raise() {
+        installer.Invoke((Action)delegate {
+            SetWindowPos(Installer, IntPtr.Zero, 0, 0, 0, 0, 0x0013); // HWND_TOP, SWP_NOSIZE|NOMOVE|NOACTIVATE
+            installer.Activate(); SetForegroundWindow(Installer);
+        });
+        Thread.Sleep(200);
+    }
+    public static void Close() {
+        if (installer != null && !installer.IsDisposed) { try { installer.Invoke((Action)delegate { installer.Close(); }); } catch (Exception) { } }
+        if (thread != null) thread.Join(5000);
+    }
+    // Watches for a dialog by title; once shown, records whether it is TopMost and
+    // whether the installer can be raised above it, then closes it (= Close).
+    public static string DialogState = "not run";
+    public static Thread WatchDialog(string title) {
+        var t = new Thread(delegate() {
+            IntPtr h = IntPtr.Zero; var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (h == IntPtr.Zero && clock.ElapsedMilliseconds < 10000) { Thread.Sleep(100); h = FindWindowW(null, title); }
+            // Details() blocks until its dialog closes; never leave the scenario hanging.
+            if (h == IntPtr.Zero) { Console.Error.WriteLine("support dialog not found"); Environment.Exit(3); }
+            Thread.Sleep(400);
+            bool topmost = TopMostStyle(h);
+            Raise();
+            bool above = Above(Installer, h);
+            DialogState = "topmost=" + topmost + ";installer_above=" + above;
+            PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero); // WM_CLOSE
+        });
+        t.IsBackground = true; t.Start();
+        return t;
+    }
+}
+'@
+function Assert-ToolkitNoTopMostSource {
+    $root = Split-Path $BootstrapPath
+    $source = [IO.File]::ReadAllText((Join-Path $root 'console.ps1'))
+    if ($source -match 'TopMost\s*=\s*true') { throw 'A setup window is still TopMost' }
+    foreach ($file in @((Join-Path $root 'console.ps1'), (Join-Path $root 'windows_launcher.py'))) {
+        foreach ($m in [regex]::Matches([IO.File]::ReadAllText($file), 'MessageBoxW?\((?:[^()]|\([^()]*\))*?(0x[0-9A-Fa-f]{8})\)')) {
+            if (([Convert]::ToUInt32($m.Groups[1].Value, 16) -band 0x00041000) -ne 0) { throw ('MessageBox uses MB_TOPMOST/MB_SYSTEMMODAL: ' + $m.Value) }
+        }
+    }
+    # Starting a user wait and its reminders must not take the front.
+    $wait = (($source -split 'public static void UserWait\(', 2)[1] -split 'sealed class Owner', 2)[0]
+    $timer = (($source -split 'else if \(externalWait\) \{', 2)[1] -split 'view\.Tick', 2)[0]
+    $remind = (($source -split 'static void Remind\(\) \{', 2)[1] -split '\n    \}', 2)[0]
+    if (-not $remind -or -not $timer -or -not $wait) { throw 'User-wait source sections not found' }
+    foreach ($part in @($wait, $timer, $remind)) {
+        if ($part -match 'Activate\(|BringToFront|Attention\(|TopMost|SetForegroundWindow') { throw 'A user wait or reminder still takes the front' }
+    }
+}
+if ($Case -eq 'setup-wait-behind') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    if ($env:OS -eq 'Windows_NT') {
+        Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition $script:ToolkitZOrderFixtureSource
+        try {
+            Start-ToolkitSetup
+            $flags = [Reflection.BindingFlags]'Static,NonPublic'
+            $window = [ToolkitSetupStatus].GetField('window',$flags).GetValue($null)
+            $setup = [ToolkitSetupStatus]::OwnerHandle
+            # Same order as Invoke-ToolkitElevated: UAC wait, installer opens, installer wait.
+            [ToolkitSetupStatus]::UserWait($true, 'Waiting for you: approve the Windows administrator prompt. If you do not see it, look for a flashing shield icon on the taskbar.')
+            [ToolkitZOrderFixture]::Open($setup)
+            [ToolkitZOrderFixture]::Raise()
+            if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'The installer could not come in front of the setup window during the administrator wait' }
+            [ToolkitSetupStatus]::UserWait($true, 'Waiting for you: finish the usbipd-win installer. Look for its installer window or a flashing shield icon on the taskbar. Restart Windows if the installer asks.')
+            Start-Sleep -Milliseconds 300
+            if ($window.TopMost -or [ToolkitZOrderFixture]::TopMostStyle($setup)) { throw 'The setup window is TopMost while waiting for the installer' }
+            if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'Starting the installer wait put the setup window in front of the installer' }
+            # The owner clicks the installer on the taskbar: it must come to the front.
+            [ToolkitZOrderFixture]::Raise()
+            if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'A taskbar click could not bring the installer in front of the setup window' }
+            $foreground = [ToolkitZOrderFixture]::GetForegroundWindow()
+            # Fire the 60-second wait reminder now (real UI timer, back-dated clock).
+            $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
+            [ToolkitSetupStatus].GetField('lastExternalAttention',$flags).SetValue($null, $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
+            Start-Sleep -Milliseconds 500
+            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'user-wait-reminder').Count -lt 1) { throw 'Real UI timer did not send the wait reminder' }
+            if ($window.TopMost -or [ToolkitZOrderFixture]::TopMostStyle($setup)) { throw 'The wait reminder made the setup window TopMost' }
+            if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'The wait reminder put the setup window in front of the installer' }
+            if ($foreground -eq [ToolkitZOrderFixture]::Installer -and [ToolkitZOrderFixture]::GetForegroundWindow() -ne $foreground) { throw 'The wait reminder took the focus from the installer' }
+            # Still findable: visible, not minimized or hidden.
+            if (-not [ToolkitZOrderFixture]::IsWindowVisible($setup) -or [ToolkitZOrderFixture]::IsIconic($setup) -or -not $window.ShowInTaskbar) { throw 'The setup window was hidden or minimized during the wait' }
+            $view = [ToolkitSetupStatus].GetField('view',$flags).GetValue($null)
+            if ($view.Chip.Text -ne 'Waiting for you' -or $view.Steps.AccessibleName -notmatch 'usbipd-win installer') { throw 'Wait status text was not updated' }
+            [ToolkitSetupStatus]::UserWait($false, '')
+            # The toolkit's own question may come forward once, never TopMost, and its
+            # reminder must not take the front again.
+            [ToolkitSetupStatus]::AskQuestion('Set up Linux?')
+            Start-Sleep -Milliseconds 300
+            if ($window.TopMost -or [ToolkitZOrderFixture]::TopMostStyle($setup)) { throw 'A question made the setup window TopMost' }
+            [ToolkitZOrderFixture]::Raise()
+            if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'Another window could not come in front of a question' }
+            $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
+            $model.Begin('Set up Linux?', $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
+            Start-Sleep -Milliseconds 500
+            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'question-reminder').Count -lt 1) { throw 'Real UI timer did not send the question reminder' }
+            if ($window.TopMost -or -not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'The question reminder put the setup window in front' }
+            [ToolkitSetupStatus]::AnswerQuestion('closed')
+        } finally { [ToolkitZOrderFixture]::Close(); Stop-ToolkitSetup }
+    }
+    Assert-ToolkitNoTopMostSource
+    Write-Output "PASS console: $Case"
+    exit 0
+}
+if ($Case -eq 'support-not-topmost') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    if ($env:OS -eq 'Windows_NT') {
+        Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition $script:ToolkitZOrderFixtureSource
+        try {
+            Start-ToolkitSetup
+            [ToolkitZOrderFixture]::Open([ToolkitSetupStatus]::OwnerHandle)
+            $title = 'Jibo DFU Toolkit ' + [char]0x2013 + ' setup needs a decision'
+            $watch = [ToolkitZOrderFixture]::WatchDialog($title)
+            # The real 3-minute "taking a long time" dialog, owned by the setup window.
+            $keep = [ToolkitSetupStatus]::Details('usbipd-win installer did not finish within 180 seconds after Windows approval.', 'Synthetic summary', '', $true)
+            $null = $watch.Join(5000)
+            if ($keep) { throw 'Closing the dialog counted as Keep waiting' }
+            if ([ToolkitZOrderFixture]::DialogState -ne 'topmost=False;installer_above=True') { throw ('Support dialog covers the installer: ' + [ToolkitZOrderFixture]::DialogState) }
+        } finally { [ToolkitZOrderFixture]::Close(); Stop-ToolkitSetup }
+    }
+    Assert-ToolkitNoTopMostSource
+    Write-Output "PASS console: $Case"
     exit 0
 }
 if ($Case -eq 'installer-wait') {
@@ -319,7 +490,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-questions','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
+    foreach ($scenario in @('setup-questions','setup-wait-behind','support-not-topmost','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE

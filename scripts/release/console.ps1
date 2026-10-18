@@ -1577,7 +1577,8 @@ public class ToolkitViewportForm : Form {
         return new Point(Math.Min(0, next.X), Math.Min(0, next.Y));
     }
 }
-// Window for the support view: owned by the setup window, topmost, sized to the view.
+// Window for the support view: owned by the setup window, sized to the view. Never
+// TopMost: an installer the user must finish has to be able to come in front of it.
 public sealed class ToolkitSupportForm : ToolkitViewportForm {
     public readonly ToolkitSupportView View;
     public ToolkitButton KeepWaiting { get { return View.KeepWaiting; } }
@@ -1590,7 +1591,7 @@ public sealed class ToolkitSupportForm : ToolkitViewportForm {
         AccessibleDescription = text.What + " " + text.Try;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false; MinimizeBox = false; TopMost = true;
+        MaximizeBox = false; MinimizeBox = false; TopMost = false;
         AutoScaleMode = AutoScaleMode.None; // Layout is already in device pixels.
         Controls.Add(View);
         AcceptButton = View.Copy; CancelButton = View.CloseButton;
@@ -1695,11 +1696,19 @@ public class ToolkitSetupStatus {
         info.dwFlags = active ? 15u : 0u; info.uCount = active ? UInt32.MaxValue : 0;
         FlashWindowEx(ref info);
     }
-    static void Attention() {
-        if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
-        window.Show(); window.TopMost = true; window.BringToFront(); window.Activate();
+    // The setup window is never TopMost and never takes the front while the user is
+    // busy in another window (UAC, the usbipd-win or WSL installer): a TopMost window
+    // covers them and even a taskbar click cannot raise them above it.
+    // Remind: flash the taskbar button and play a sound; no activation, no z-order change.
+    static void Remind() {
         Flash(!window.ContainsFocus);
         System.Media.SystemSounds.Question.Play();
+    }
+    // Only the toolkit's own question comes forward, once, with normal activation.
+    static void AskAttention() {
+        if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+        window.Show(); window.Activate();
+        Remind();
     }
     static void OnUi(Action action) {
         if (window != null && window.IsHandleCreated && !window.IsDisposed) window.Invoke(action);
@@ -1740,10 +1749,10 @@ public class ToolkitSetupStatus {
             timer.Tick += delegate {
                 double now = clock.Elapsed.TotalSeconds;
                 if (question.Pending) {
-                    if (question.Remind(now)) { reminded = true; events.Enqueue(new ToolkitInteractionEvent("question-reminder", question.Prompt)); Attention(); }
+                    if (question.Remind(now)) { reminded = true; events.Enqueue(new ToolkitInteractionEvent("question-reminder", question.Prompt)); Remind(); }
                 } else if (externalWait) {
                     if (now - lastExternalAttention >= ToolkitQuestionState.ReminderSeconds) {
-                        lastExternalAttention = now; events.Enqueue(new ToolkitInteractionEvent("user-wait-reminder", currentDetail)); Attention();
+                        lastExternalAttention = now; events.Enqueue(new ToolkitInteractionEvent("user-wait-reminder", currentDetail)); Remind();
                     }
                 }
                 view.Tick(State(now));
@@ -1792,13 +1801,13 @@ public class ToolkitSetupStatus {
             questionStart = clock.Elapsed.TotalSeconds; reminded = false; answered = ""; questionStep = currentStep;
             lastPrompt = prompt; lastQuestionId = ToolkitSetupText.QuestionId(prompt);
             window.ControlBox = true; window.AcceptButton = view.No; window.CancelButton = view.No;
-            PaintStatus(); Attention(); view.No.Focus();
+            PaintStatus(); AskAttention(); view.No.Focus();
         });
     }
     static void AnswerOnUi(string answer) {
         if (!question.Respond(answer, clock.Elapsed.TotalSeconds)) return;
         window.AcceptButton = window.CancelButton = null;
-        window.ControlBox = false; window.TopMost = false; Flash(false);
+        window.ControlBox = false; Flash(false);
         answered = answer;
         currentStep = answer == "closed" ? "Question closed - this counts as No" : "Answer received: " + answer;
         currentDetail = answer == "closed" ? "You closed the question. Setup will stop; no approval was given." : "Continuing setup.";
@@ -1812,8 +1821,9 @@ public class ToolkitSetupStatus {
             externalWait = active; window.ControlBox = false;
             if (active) {
                 currentStep = "Waiting for you"; currentDetail = instructions; waitInstructions = instructions; answered = "";
-                lastExternalAttention = clock.Elapsed.TotalSeconds; PaintStatus(); Attention();
-            } else { currentStep = beforeWaitStep; currentDetail = beforeWaitDetail; currentPercent = beforeWaitPercent; window.TopMost = false; Flash(false); PaintStatus(); }
+                // The other window is in front now; stay behind it. Reminders only flash.
+                lastExternalAttention = clock.Elapsed.TotalSeconds; PaintStatus();
+            } else { currentStep = beforeWaitStep; currentDetail = beforeWaitDetail; currentPercent = beforeWaitPercent; Flash(false); PaintStatus(); }
         });
     }
     sealed class Owner : IWin32Window { readonly IntPtr handle; public Owner(IntPtr h) { handle = h; } public IntPtr Handle { get { return handle; } } }
@@ -1921,7 +1931,8 @@ function Show-ToolkitSupportDialog([string]$Message, [switch]$AllowWait) {
             # Even a missing/broken WinForms runtime must leave an owned, visible
             # recovery dialog. It never turns a question into implicit approval.
             $owner = Get-ToolkitDialogOwner
-            $choice = [ToolkitConsoleNative]::MessageBox($owner, (Get-ToolkitFallbackText $safe), (Get-ToolkitFallbackTitle), 0x00050213)
+            # 0x00010213: Yes/No/Cancel, error icon, Cancel default, set foreground. No MB_TOPMOST.
+            $choice = [ToolkitConsoleNative]::MessageBox($owner, (Get-ToolkitFallbackText $safe), (Get-ToolkitFallbackTitle), 0x00010213)
             try {
                 if ($choice -eq 6) { Set-Clipboard -Value $summary }
                 if ($choice -eq 7 -and $folder) { Start-Process -FilePath explorer.exe -ArgumentList ('"' + $folder + '"') | Out-Null }

@@ -275,9 +275,9 @@ public static class ToolkitPreviewWindows {
         }
     }
     public static void Close(IntPtr hwnd) { if (hwnd != IntPtr.Zero) PostMessageW(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero); }
-    // The same box the fallbacks show (flags 0x00050213), captured, then cancelled.
+    // The same box the fallbacks show (flags 0x00010213), captured, then cancelled.
     public static string CaptureMessageBox(string text, string title, string path) {
-        var thread = new System.Threading.Thread(delegate() { MessageBoxW(IntPtr.Zero, text, title, 0x00050213); });
+        var thread = new System.Threading.Thread(delegate() { MessageBoxW(IntPtr.Zero, text, title, 0x00010213); });
         thread.IsBackground = true; thread.Start();
         IntPtr hwnd = IntPtr.Zero;
         var clock = System.Diagnostics.Stopwatch.StartNew();

@@ -156,7 +156,7 @@ def show_error(message):
                 details = support_details(_setup_log_path, safe)
                 while True:
                     choice = ctypes.windll.user32.MessageBoxW(
-                        owner, error_dialog_text(safe, _setup_log_path), ERROR_TITLE, 0x00050213)
+                        owner, error_dialog_text(safe, _setup_log_path), ERROR_TITLE, 0x00010213)  # no MB_TOPMOST
                     try:
                         if choice == 6:
                             copy_details(details)
