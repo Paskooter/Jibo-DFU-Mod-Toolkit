@@ -345,8 +345,8 @@ public static class ToolkitSetupText {
     public const string WaitStatus = "Waiting for you";
     public const string WaitPaused = "Setup is paused until you do this. It has not stalled.";
     public const string ClosesItself = "This window closes by itself when the toolkit opens.";
-    public const string HelpLine = "Copy the details and paste them in the #help channel on the Phoenix Discord. Please look them over before posting.";
-    public const string CopiedLine = "Copied. Paste it in #help with Ctrl+V.";
+    public const string HelpLine = "To get help, copy the details, press Open a support ticket in the #help channel on the Phoenix Discord, and paste them into your ticket. Look them over first.";
+    public const string CopiedLine = "Copied. Paste it into your support ticket with Ctrl+V.";
     public const string CopyFailedLine = "Could not copy. Select the text below, then press Ctrl+C.";
     public const string ManualUsb = "download the file ending in x64.msi from https://github.com/dorssel/usbipd-win/releases, run it, restart Windows if it asks, then open the toolkit again.";
     static ToolkitStepText S(string title, string description, int phase) {
@@ -577,7 +577,7 @@ public static class ToolkitSetupText {
         else {
             f = F(allowWait ? "stall" : "error", allowWait ? "Setup is taking longer than expected" : "Setup stopped",
                 (step == null ? "Setup" : StepTitle(step)) + (allowWait ? " has not finished yet." : " did not work."),
-                allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, ask for help in #help."));
+                allowWait ? keepWaiting : (plainTry ?? "Open the toolkit again. If it happens again, open a support ticket in #help on the Phoenix Discord."));
         }
         f.Step = step == null ? null : StepTitle(step);
         f.StepKey = step;
@@ -1880,7 +1880,7 @@ function Get-ToolkitDialogOwner {
 # Yes/No/Cancel, so the text says what each one does. Display only.
 function Get-ToolkitFallbackText([string]$Safe) {
     $dash = [char]0x2013
-    return "Setup stopped.`r`n`r`n$Safe`r`n`r`nTo get help, copy the details and paste them in the #help channel on the Phoenix Discord.`r`n`r`n    Yes  $dash  Copy details`r`n    No  $dash  Open log folder`r`n    Cancel  $dash  Close"
+    return "Setup stopped.`r`n`r`n$Safe`r`n`r`nTo get help, copy the details, press Open a support ticket in the #help channel on the Phoenix Discord, and paste them into your ticket.`r`n`r`n    Yes  $dash  Copy details`r`n    No  $dash  Open log folder`r`n    Cancel  $dash  Close"
 }
 function Get-ToolkitFallbackTitle { return "Jibo DFU Toolkit $([char]0x2013) setup stopped" }
 # Windows-side half of first-open readiness. Match a random per-invocation title

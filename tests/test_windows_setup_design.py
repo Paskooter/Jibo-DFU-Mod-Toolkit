@@ -153,7 +153,8 @@ def test_early_fallback_box_explains_its_windows_buttons(tmp_path):
     log = tmp_path / 'setup.log'
     text = module.error_dialog_text('Embedded Linux payload checksum mismatch', log)
     # MessageBox buttons stay Yes/No/Cancel, so each one is spelled out.
-    for line in ('Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help', 'Phoenix Discord'):
+    for line in ('Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help', 'Phoenix Discord',
+                 'Open a support ticket', 'into your ticket'):
         assert line in text
     assert text.index('checksum mismatch') < text.index('Yes  ')
     assert str(log.parent) in text and text.rstrip().endswith('File: ' + log.name)
@@ -172,7 +173,8 @@ def test_setup_window_fallback_box_explains_its_windows_buttons(tmp_path):
                             encoding='utf-8', timeout=30, env={**os.environ, 'TMPDIR': str(tmp_path)})
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[0] == 'Jibo DFU Toolkit \u2013 setup stopped'
-    for line in ('Synthetic failure', 'Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help'):
+    for line in ('Synthetic failure', 'Yes  \u2013  Copy details', 'No  \u2013  Open log folder', 'Cancel  \u2013  Close', '#help',
+                 'Open a support ticket', 'into your ticket'):
         assert line in result.stdout
 
 
@@ -230,3 +232,19 @@ def test_preview_renderer_uses_the_shipped_setup_window_source():
     assert all(byte < 128 for byte in (ROOT / 'scripts/release/render-setup-previews.ps1').read_bytes())
     # The release EXE does not carry the preview tool.
     assert 'render-setup-previews' not in (ROOT / 'scripts/release/build.py').read_text()
+
+
+def test_help_text_points_to_a_support_ticket_not_a_post_in_help():
+    # #help is read-only: it only has an "Open a support ticket" button that opens a
+    # private ticket channel. Nothing may tell users to post or paste in #help itself.
+    sources = {name: (ROOT / name).read_text(encoding='utf-8') for name in (
+        'scripts/release/console.ps1', 'scripts/release/windows_launcher.py', 'README.md', 'docs/release.md')}
+    for name, text in sources.items():
+        flat = ' '.join(text.split())
+        assert not re.search(r'(?:paste|post|ask)[^.]{0,40}\bin (?:the )?\*{0,2}#help', flat, re.I), name
+        assert not re.search(r'sharing them in #help', flat), name
+    console = sources['scripts/release/console.ps1']
+    help_line = re.search(r'public const string HelpLine = "([^"]+)"', console).group(1)
+    copied = re.search(r'public const string CopiedLine = "([^"]+)"', console).group(1)
+    assert 'Open a support ticket' in help_line and '#help' in help_line and 'your ticket' in help_line
+    assert 'support ticket' in copied and '#help' not in copied

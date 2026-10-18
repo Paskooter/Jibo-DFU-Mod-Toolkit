@@ -139,7 +139,7 @@ def error_dialog_text(safe, log_path=None):
     if not log_path:
         return 'Setup stopped.\n\n' + safe
     return ('Setup stopped.\n\n' + safe +
-            '\n\nTo get help, copy the details and paste them in the #help channel on the Phoenix Discord.'
+            '\n\nTo get help, copy the details, press Open a support ticket in the #help channel on the Phoenix Discord, and paste them into your ticket.'
             '\n\n    Yes  \u2013  Copy details\n    No  \u2013  Open log folder\n    Cancel  \u2013  Close'
             # Folder and file on separate lines: a long path has no place to wrap.
             '\n\nSetup log folder:\n' + str(Path(log_path).parent) + '\nFile: ' + Path(log_path).name)

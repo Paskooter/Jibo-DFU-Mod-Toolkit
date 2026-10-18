@@ -103,7 +103,7 @@ For the original text menu, run `./run.sh` on Linux/macOS or `.\run.ps1 -Distro 
 
 **Any stock Jibo that has never been modified is supported with 100% certainty.** I have personally tested every stock firmware version and all stock files. Windows, Linux and Intel Macs have also been tested; Apple silicon Macs are experimental.
 
-If your robot was previously changed by another mod system, it will most likely work with no changes, but that cannot be guaranteed: there is no way to foresee changes someone else made. If it doesn't work, ask in the [Phoenix Discord](https://discord.gg/FyDVYQ6FfV). I'm happy to help.
+If your robot was previously changed by another mod system, it will most likely work with no changes, but that cannot be guaranteed: there is no way to foresee changes someone else made. If it doesn't work, press **Open a support ticket** in the **#help** channel on the [Phoenix Discord](https://discord.gg/FyDVYQ6FfV). I'm happy to help.
 
 ## Put Jibo in RCM mode
 
@@ -182,8 +182,8 @@ The launcher selects that WSL 2 distribution, shares and attaches a connected Ji
 
 ### Windows troubleshooting
 
-If setup stops, use **Copy details** and paste that short summary in **#help** in
-[Phoenix Discord](https://discord.gg/FyDVYQ6FfV). It includes the build, Windows/WSL
+If setup stops, use **Copy details**, press **Open a support ticket** in the **#help** channel on the
+[Phoenix Discord](https://discord.gg/FyDVYQ6FfV), and paste that short summary into your ticket. It includes the build, Windows/WSL
 versions, the step that failed, the error and recent log lines. Review it before
 sharing; do not post passwords or Wi-Fi settings. **Open log folder** opens the
 full setup log. You can also paste `%LOCALAPPDATA%\Jibo-DFU-Toolkit\logs` into File
@@ -373,7 +373,7 @@ The Wi-Fi/IP line appears only in **developer** or **int-developer** mode with *
 | `Wi-Fi: connected to <network name> · IP <address>` | Wi-Fi is connected and Jibo has an IP address. This is the IP address the Phoenix console's **Robots → Add a Jibo** command asks for. |
 | `Wi-Fi: connected, waiting for address` | Jibo has joined the network, but the router has not given him an IP address yet. Wait a minute; if it stays here, check the router and its DHCP settings. |
 | `Wi-Fi: not connected` | Jibo is not connected to Wi-Fi. Check the network name and password, and make sure Jibo is within range of the router. Re-run **Set mode and configure Wi-Fi** or **Add or update a Wi-Fi network** with the correct name and password, then restart Jibo. |
-| `Wi-Fi: status unavailable` | The Wi-Fi status could not be read. Restart Jibo once; if it still appears, ask in the [Phoenix Discord](https://discord.gg/FyDVYQ6FfV). |
+| `Wi-Fi: status unavailable` | The Wi-Fi status could not be read. Restart Jibo once; if it still appears, open a support ticket in **#help** on the [Phoenix Discord](https://discord.gg/FyDVYQ6FfV). |
 
 If the line is missing, check the mode and enable the option in **Set mode and configure Wi-Fi**, then restart. To remove it, choose **More tools → Remove boot-screen Wi-Fi/IP status**, then restart Jibo. Unchecking the GUI checkbox leaves the current setting unchanged; it does not remove an installed status line.
 

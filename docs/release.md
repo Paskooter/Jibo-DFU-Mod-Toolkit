@@ -139,7 +139,8 @@ waiting for a person is not a setup stall.
 Stalls and failures open a support dialog explaining what happened and what to
 try. **Copy details** copies the build, Windows/WSL versions, failed step, error
 and recent log lines; **Open log folder** opens the setup logs. Review details
-before sharing them in #help. A stall that allows more time offers **Keep waiting**
+before pasting them into a support ticket (**Open a support ticket** in #help on the
+Phoenix Discord). A stall that allows more time offers **Keep waiting**
 and **Stop setup**; closing that dialog stops setup rather than silently continuing.
 Other failures offer **Close**. If the setup UI cannot start, a native fallback
 explains its Windows buttons for copying details or opening the log folder.
