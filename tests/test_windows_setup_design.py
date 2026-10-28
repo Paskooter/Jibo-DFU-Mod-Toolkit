@@ -61,7 +61,7 @@ def test_every_logged_setup_string_has_plain_window_wording(tmp_path):
     waits = ps_strings(WAIT_CALL, BOOTSTRAP, CONSOLE)
     # Successful usbipd install now re-probes and continues in this process;
     # the old unconditional reopen/PATH-refresh wait is intentionally gone.
-    assert len(steps) >= 12 and len(questions) == 3 and len(waits) == 4
+    assert len(steps) >= 12 and len(questions) == 3 and len(waits) == 3
     assert not any('then reopen the EXE' in wait for wait in waits)
     data = catalogue(tmp_path, sorted(set(steps)), questions, waits, [])
     for step, text in data['steps'].items():
@@ -115,7 +115,7 @@ DISPLAY_TRY = ('Save your other Linux work, run wsl --shutdown in PowerShell (th
 
 
 def test_copy_mode_fix_and_refusal_wording(tmp_path):
-    """Owner-facing strings for the automatic copy-mode fix, pinned on purpose."""
+    """User-facing strings for the automatic copy-mode fix, pinned on purpose."""
     failed = 'Windows display is not ready (WARN:COPY MODE), and the automatic fix didn\'t work. The toolkit window was not opened. ' + DISPLAY_TRY
     unfixed = 'Windows display is not ready (WARN:COPY MODE). The toolkit window was not opened. ' + DISPLAY_TRY
     full = 'Step: Fixing a Windows display problem\r\n' + failed + '\r\nTry: ' + DISPLAY_TRY

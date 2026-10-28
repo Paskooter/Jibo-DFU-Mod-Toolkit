@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-venv python3-tk libusb-1.0-0-dev gcc-arm-none-eabi binutils-arm-none-eabi pkg-config libfuse2 xvfb patchelf busybox nodejs
           /usr/bin/python3 -m venv .build-venv
-          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3
+          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3 certifi==2026.10.19
       - name: Source and release-adapter regression tests
         run: .build-venv/bin/python -m pytest -q
       - name: Build and smoke-test self-contained Linux payload
@@ -72,7 +72,7 @@ jobs:
       - name: Build Windows one-file bootstrapper (no signing)
         if: matrix.platform == 'Windows'
         run: |
-          python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3
+          python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3 certifi==2026.10.19
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/release/build.py --windows-payload linux-stage
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -113,9 +113,15 @@ jobs:
         if: matrix.platform == 'macOS'
         run: |
           test "$(uname -m)" = '${{ matrix.architecture }}'
-          brew install --overwrite python@3.12 python-tk@3.12 pkg-config
+          brew install --overwrite python@3.12 python-tk@3.12 pkg-config openssl@3
           "$(brew --prefix python@3.12)/bin/python3.12" -m venv .build-venv
-          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3
+          .build-venv/bin/python -m pip install pyinstaller==6.16.0 pytest pillow cryptography==46.0.3 certifi==2026.10.19
+      - name: Test native Mac hosted transport and Copy details offline
+        if: matrix.platform == 'macOS'
+        run: |
+          openssl_prefix=$(brew --prefix openssl@3)
+          export PATH="$openssl_prefix/bin:$PATH"
+          JIBO_GUI_TEST_DISPLAY=1 .build-venv/bin/python -m pytest -q tests/test_hosted_macos_transport.py tests/test_hosted_macos_window.py
       - name: Build native Mac app and DMG (no signing identity)
         if: matrix.platform == 'macOS'
         run: .build-venv/bin/python scripts/release/build.py --architecture '${{ matrix.architecture }}'

@@ -89,7 +89,7 @@ def display_label(label):
 
 
 def rcm_help_photo(root, flows):
-    """Load the owner's RCM photo only if its bytes match the pinned hash.
+    """Load the RCM photo only if its bytes match the pinned hash.
 
     Source checkouts, the .pyz and the frozen bundles all keep it next to the
     modules at assets/help/. A missing or altered file shows a text pointer.
@@ -741,7 +741,7 @@ class ToolkitWindow:
         back.focus_set()
 
     def show_rcm_help(self):
-        """Local how-to with the owner's photo; never interrupts a running robot flow."""
+        """Local RCM help with the pinned photo; never interrupts a running robot flow."""
         if self.controller.busy:
             return
         flows = self.controller.flows
@@ -1036,7 +1036,7 @@ class ToolkitWindow:
                          "primary": go, "cancel": cancel}
 
     def _build_calibration_consent(self, page, prompt):
-        """Owner-approved Share default; showing this page never authorizes upload."""
+        """Default Share choice; showing this page never authorizes upload."""
         self._header(page, prompt.title, kicker=self._kicker())
         buttons = self._button_bar(page)
         disclosure = TextBox(page, self.theme, height=14)
@@ -1352,6 +1352,33 @@ class ToolkitWindow:
             toggle.configure(command=flip)
             toggle.pack(anchor="w", pady=(14, 0))
             self.controls["log_toggle"] = toggle
+        if outcome.action == "flash-update":
+            # Keep support data to this outcome and the hosted diagnostic, not
+            # unrelated device/Wi-Fi logs or the process environment.
+            import platform
+            system = platform.system() + " " + (platform.mac_ver()[0] if sys.platform == "darwin" else platform.release())
+            details = "\n".join((self.root.title(), "System: " + system,
+                                  "Architecture: " + platform.machine(),
+                                  "Python: " + platform.python_version(), outcome.title,
+                                  *outcome.lines,
+                                  *(line for line in log_lines if line.startswith("Phoenix image list check failed:"))))
+            support = TextBox(area.inner, self.theme, font=self.theme.mono, height=8)
+            support.set(details)
+            copy = ttk.Button(buttons, text="Copy details", style="Quiet.TButton")
+
+            def copy_details():
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(details)
+                except tk.TclError:
+                    support.pack(fill="both", expand=True, pady=(8, 0))
+                    copy.configure(text="Copy failed — select details above")
+                else:
+                    copy.configure(text="Copied — review before sharing")
+
+            copy.configure(command=copy_details)
+            copy.pack(side="left")
+            self.controls.update(copy_details=copy, support_details=support)
         back = ttk.Button(buttons, text="Back to actions", style="Accent.TButton",
                           command=self.show_home)
         back.pack(side="right")

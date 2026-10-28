@@ -33,7 +33,7 @@ def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
 
 
 @pytest.mark.parametrize('case', [
-    'setup-questions', 'setup-wait-behind', 'support-not-topmost', 'setup-feedback', 'setup-stalls', 'installer-wait', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
+    'setup-questions', 'setup-wait-behind', 'support-not-topmost', 'setup-feedback', 'setup-stalls', 'wsl-prerequisite', 'installer-wait', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',
     'gui-start-failed', 'cleanup-failed', 'monitor-prompt', 'terminal-failed', 'hide-fallback',
     'watcher-exit-race', 'monitor-exit-race', 'gui-handle', 'watcher-handle', 'gui-code-unavailable', 'window-copy', 'window-missing', 'display-copy-preflight', 'display-copy-repaired',
@@ -87,6 +87,68 @@ def test_console_controller_is_embedded_in_windows_release(tmp_path, monkeypatch
 def test_windows_ci_runs_the_console_lifecycle_regressions():
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
     assert 'powershell -NoProfile -File scripts/release/test-console.ps1 -Case all' in workflow
+
+
+def test_wsl_probe_closes_stdin_without_framework_autoflush_input(tmp_path):
+    import shutil
+    pwsh = os.environ.get('PWSH') or shutil.which('pwsh') or shutil.which('powershell.exe')
+    if not pwsh:
+        pytest.skip('requires PowerShell')
+    assert pwsh is not None
+    # .NET Framework Process.Start constructs StandardInput with Console.InputEncoding
+    # and enables AutoFlush. Encoding.UTF8 emits EF BB BF even without a Write call.
+    # Model that exact transport on Core, then run the unchanged strict-stdin fixture.
+    script = tmp_path / 'framework-input.ps1'
+    script.write_text(r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+public class ToolkitFrameworkInputProcess : Process {
+    public static int Starts;
+    public static int PreambleBytes;
+    public new bool Start() {
+        var encoding = Console.InputEncoding;
+        bool started = base.Start();
+        Starts++;
+        using (var input = new StreamWriter(StandardInput.BaseStream, encoding, 4096, true)) {
+            input.AutoFlush = true;
+        }
+        PreambleBytes += encoding.GetPreamble().Length;
+        return started;
+    }
+}
+'@
+function New-Object {
+    param([string]$TypeName, [object[]]$ArgumentList)
+    if ($TypeName -eq 'Diagnostics.Process') {
+        return Microsoft.PowerShell.Utility\New-Object ToolkitFrameworkInputProcess
+    }
+    Microsoft.PowerShell.Utility\New-Object @PSBoundParameters
+}
+$previous = [Console]::InputEncoding
+try {
+    [Console]::InputEncoding = [Text.Encoding]::UTF8
+    & '""" + str(ROOT / 'scripts/release/test-console.ps1').replace("'", "''") + r"""' -Case wsl-prerequisite
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { exit $code }
+    if ([ToolkitFrameworkInputProcess]::Starts -ne 10) { throw 'Framework transport was not exercised for every probe' }
+    if ([ToolkitFrameworkInputProcess]::PreambleBytes -ne 0) { throw 'Probe sent input before closing stdin' }
+    if ([BitConverter]::ToString([Console]::InputEncoding.GetPreamble()) -cne 'EF-BB-BF') { throw 'Probe did not restore the caller input encoding' }
+    . '""" + str(ROOT / 'scripts/release/console.ps1').replace("'", "''") + r"""'
+    $failed = Invoke-ToolkitNative -File (Join-Path $PSScriptRoot 'missing/wsl.exe') -Arguments @('--version') -WatchWslSetup
+    if ($failed.ExitCode -ne 1 -or -not $failed.StartError -or $failed.WslSetupRequired -or $failed.TimedOut) { throw 'Failed probe start was misclassified' }
+    if ([BitConverter]::ToString([Console]::InputEncoding.GetPreamble()) -cne 'EF-BB-BF') { throw 'Failed start did not restore the caller input encoding' }
+    'PASS framework stdin: 10 probes, zero input bytes, encoding restored'
+} finally { [Console]::InputEncoding = $previous }
+exit $code
+""")
+    result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(script)],
+                            capture_output=True, text=True,
+                            env={**os.environ, 'TMPDIR': str(tmp_path)}, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS framework stdin: 10 probes, zero input bytes, encoding restored' in result.stdout
 
 
 @pytest.mark.parametrize('failure', ['checksum', 'arguments'])

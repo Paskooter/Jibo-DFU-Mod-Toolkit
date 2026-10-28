@@ -52,10 +52,24 @@ def rcm_help_check(runtime):
     return {'path': jibo_tui.RCM_HELP_IMAGE, 'sha256': digest, 'bytes': len(data)}
 
 
+def hosted_transport_check():
+    # Offline, with the exact context used by index/manifest/image requests.
+    # This checks trust installation, not internet reachability or USB.
+    import ssl
+    import jibo_hosted_updates as hosted
+    context = hosted._tls_context()
+    count = context.cert_store_stats()['x509_ca']
+    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname or not count:
+        raise RuntimeError('Hosted TLS trust self-check failed')
+    return {'certificate_verification': True, 'hostname_verification': True,
+            'ca_certificates': count}
+
+
 def self_check(runtime):
     from manifest import verify_manifest
     receipt = verify_manifest(runtime)
     receipt['hosted_flash'] = flash_trust_check()
+    receipt['hosted_transport'] = hosted_transport_check()
     import ctypes
     ctypes.CDLL(os.environ['JIBO_LIBUSB'])
     import tkinter

@@ -264,9 +264,12 @@ try {
 
 function Start-ToolkitProcess { param($FilePath, $ArgumentList); return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru) }
 function Invoke-ToolkitNative {
-    param($File, [string[]]$Arguments, $TimeoutSeconds)
+    param($File, [string[]]$Arguments, $TimeoutSeconds, [switch]$WatchWslSetup)
     if ($Arguments -contains '--system') { Record 'system-timeout' @($TimeoutSeconds) }
     $output = if ($File -eq 'powershell.exe') { @(& powershell.exe @Arguments) } else { @(& wsl.exe @Arguments) }
+    if ($Arguments[0] -eq '--version' -and ($global:UacCase -like 'wsl-missing-*' -or $global:UacCase -eq 'wsl-update-prompt')) {
+        return [pscustomobject]@{Output=$output; ExitCode=$(if ($WatchWslSetup) {$null} else {124}); StartError=$null; TimedOut=(-not $WatchWslSetup); WslSetupRequired=[bool]$WatchWslSetup}
+    }
     return [pscustomobject]@{Output=$output; ExitCode=$LASTEXITCODE; StartError=$null; TimedOut=($LASTEXITCODE -eq 124)}
 }
 function Show-ToolkitQuestion { param($Question); return ((Read-Host $Question) -match '^(?i:y|yes)$') }
@@ -320,7 +323,13 @@ $global:WestonMode = 'copy'
 function wsl.exe {
     Record 'wsl' $args
     $global:LASTEXITCODE = 0
-    if ($args[0] -eq '--version') { return 'WSLg 1.0' }
+    if ($args[0] -eq '--version') {
+        if ($global:UacCase -like 'wsl-missing-*') { return "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'." }
+        if ($global:UacCase -eq 'wsl-probe-hang') { $global:LASTEXITCODE=124; return 'Unrecognized service wait' }
+        if ($global:UacCase -eq 'wsl-update-prompt') { return "Windows Subsystem for Linux must be updated to the latest version to proceed. You can update by running 'wsl.exe --update'." }
+        if ($global:UacCase -eq 'wsl-update') { return 'WSL version: 0.50.0' }
+        return 'WSLg 1.0'
+    }
     if ($args[0] -eq '--list') {
         $header = 'NAME STATE VERSION'
         switch ($global:UacCase) {
@@ -329,7 +338,7 @@ function wsl.exe {
             'old-ubuntu-decline' { return "$header`n* Ubuntu-20.04 Stopped 2" }
             'nonstandard-decline' { return "$header`n* My-Ubuntu Stopped 2`n Debian Stopped 2`n Kali Stopped 2" }
             'ubuntu24' { return "$header`n* docker-desktop Stopped 2`n Ubuntu-24.04 Stopped 2" }
-            'private' { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
+            { $_ -in @('private','wsl-resumed') } { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
             { $_ -like 'display-*' -and $_ -ne 'display-copy-user-distro' } { return "$header`n* Jibo-DFU-Toolkit Stopped 2" }
             'display-copy-user-distro' { return "$header`n* Ubuntu-22.04 Stopped 2" }
             'private-priority' { return "$header`n* Ubuntu-24.04 Stopped 2`n Jibo-DFU-Toolkit Stopped 2" }
@@ -388,13 +397,21 @@ function Get-Command {
     if ($Name -eq 'winget.exe') { if ($global:UacCase -eq 'usb-winget-missing') { return $null }; return [pscustomobject]@{Source='winget-fixture'; CommandType='Application'} }
     return [pscustomobject]@{Source=$global:FixtureUsb; CommandType='Application'}
 }
-function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Install usbipd-win' -and $global:UsbInstallCase -and $global:UacCase -ne 'usb-install-refused') { return 'yes' }; if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
+function Read-Host { param($Prompt); Record 'prompt' @($Prompt); if ($Prompt -match 'Install/update WSL' -and ($global:UacCase -in @('wsl-update','wsl-update-prompt') -or ($global:UacCase -like 'wsl-missing-*' -and $global:UacCase -ne 'wsl-missing-decline'))) { return 'yes' }; if ($Prompt -match 'Install usbipd-win' -and $global:UsbInstallCase -and $global:UacCase -ne 'usb-install-refused') { return 'yes' }; if ($Prompt -match 'Set up a private Linux' -and $global:UacCase -in @('create-success','hash-mismatch','size-mismatch','import-failed','provision-failed','user-verify-failed')) { return 'yes' }; return 'n' }
 function Receive-ToolkitDownload { param($Uri, $OutFile, $ExpectedBytes); Record 'download' @($Uri, $OutFile); [IO.File]::WriteAllText($OutFile, 'fixture') }
 function Get-Item { param($LiteralPath); return [pscustomobject]@{Length=$(if ($global:UacCase -eq 'size-mismatch') { 12 } else { 360684292 })} }
 function Get-FileHash { param($LiteralPath, $Algorithm); Record 'hash' @($Algorithm); return [pscustomobject]@{Hash=$(if ($global:UacCase -eq 'hash-mismatch') { '0' * 64 } else { '4499c4fe257f2fc83145b429ce211a0a43fd590e70d6261ede616210947d9f8f' })} }
 function Start-Process {
     param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $WindowStyle)
     Record 'start' @($FilePath, $ArgumentList, $Verb)
+    if ($FilePath -match 'wsl.exe$' -and $Verb -eq 'RunAs') {
+        if ($ArgumentList -cnotin @('--install --no-distribution','--update')) { throw 'Unexpected WSL setup command' }
+        if ($global:UacCase -eq 'wsl-missing-uac-cancelled') { throw 'The operation was canceled by the user.' }
+        $status = switch ($global:UacCase) { 'wsl-missing-reboot' {3010}; 'wsl-missing-failed' {1603}; default {0} }
+        $process = [pscustomobject]@{ExitCode=$status; Handle=1; HasExited=$true}
+        $process | Add-Member ScriptMethod WaitForExit { param($Timeout); return $true }
+        return $process
+    }
     if ($FilePath -eq 'winget-fixture') {
         if ($Verb -ne 'RunAs') { throw 'Installer consent changed' }
         $blocked = $null
@@ -440,7 +457,7 @@ if ($Case -like 'explicit-*') { $parameters['Distro'] = if ($Case -eq 'explicit-
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText($child, $childText)
-    foreach ($case in @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-winget-hidden-prompt','usb-installer-never-finishes','display-repair-ok','display-repair-still-copy','display-repair-command-failed','display-repair-hang','display-repair-never-back','display-detail-broken','display-copy-user-distro') | Where-Object { $_ -like $Scenario }) {
+    foreach ($case in @('wsl-missing-decline','wsl-missing-install','wsl-missing-reboot','wsl-missing-failed','wsl-missing-uac-cancelled','wsl-probe-hang','wsl-update','wsl-update-prompt','wsl-resumed','nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','ubuntu24','private','private-priority','default-preferred','newest','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline','explicit-good','explicit-incompatible','explicit-missing','hash-mismatch','size-mismatch','create-success','import-failed','provision-failed','user-verify-failed','unhealthy-private','success','grant-failed','usb-declined','watcher-failed','usb-installed-stale-path','usb-installed-current-path','usb-noop-ready','usb-noop-missing','usb-noop-broken','usb-fresh-ready','usb-fresh-missing','usb-reboot-ready','usb-winget-reboot','usb-failure-ready','usb-uac-cancelled','usb-install-refused','usb-winget-missing','usb-winget-hidden-prompt','usb-installer-never-finishes','display-repair-ok','display-repair-still-copy','display-repair-command-failed','display-repair-hang','display-repair-never-back','display-detail-broken','display-copy-user-distro') | Where-Object { $_ -like $Scenario }) {
         try {
             if ($case -in @('usb-winget-hidden-prompt','usb-installer-never-finishes')) {
                 # These model a winget/installer that never exits. Bound the whole
@@ -467,7 +484,7 @@ exit $LASTEXITCODE
             $imports = @($events | Where-Object { $_.Kind -eq 'wsl' -and $_.Values -contains '--import' })
             $admin = @($events | Where-Object { $_.Kind -eq 'start' -and $_.Values[-1] -eq 'RunAs' })
             $usbInstallCase = $case -like 'usb-*' -and $case -notin @('usb-declined','usb-installed-stale-path','usb-installed-current-path')
-            if ($admin.Count -and -not $usbInstallCase) { throw 'distro setup requested UAC' }
+            if ($admin.Count -and -not $usbInstallCase -and $case -notlike 'wsl-*') { throw 'distro setup requested UAC' }
             if ($usbInstallCase) {
                 $expectedAdmin = if ($case -in @('usb-install-refused','usb-winget-missing')) {0} else {1}
                 if ($admin.Count -ne $expectedAdmin -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Install usbipd-win') { throw 'USB install did not ask/install exactly once' }
@@ -494,11 +511,32 @@ exit $LASTEXITCODE
             $chosen = switch ($case) {
                 'ubuntu24' { 'Ubuntu-24.04' }; 'private' { 'Jibo-DFU-Toolkit' }; 'private-priority' { 'Jibo-DFU-Toolkit' }
                 'default-preferred' { 'Ubuntu-22.04' }; 'newest' { 'Ubuntu-24.04' }; 'explicit-good' { 'NVIDIA-Workbench' }
-                'create-success' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }; 'usb-installed-stale-path' { 'Ubuntu-22.04' }
+                'create-success' { 'Jibo-DFU-Toolkit' }; 'wsl-resumed' { 'Jibo-DFU-Toolkit' }; 'success' { 'Ubuntu-22.04' }; 'usb-installed-stale-path' { 'Ubuntu-22.04' }
                 'usb-installed-current-path' { 'Ubuntu-22.04' }; 'display-repair-ok' { 'Jibo-DFU-Toolkit' }
                 { $_ -in @('usb-noop-ready','usb-fresh-ready','usb-winget-hidden-prompt') } { 'Ubuntu-22.04' }
             }
-            if ($case -in $declines) {
+            if ($case -eq 'wsl-missing-decline') {
+                if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Install/update WSL') { throw 'Missing WSL did not offer installation inside setup' }
+                if ($downloads.Count -or $imports.Count -or $gui.Count -or $admin.Count) { throw 'Declining WSL setup caused side effects' }
+                if ($text -notmatch 'WSL setup declined' -or $text -match 'stalled') { throw 'Missing WSL was reported as a stall instead of a declined installation' }
+            } elseif (($case -like 'wsl-missing-*' -and $case -ne 'wsl-missing-decline') -or $case -in @('wsl-update','wsl-update-prompt')) {
+                $expectedAdmin = if ($case -eq 'wsl-update') {2} else {1}
+                if ($admin.Count -ne $expectedAdmin -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Install/update WSL') { throw 'WSL install/update did not keep the consent and restart boundary' }
+                $firstCommand = if ($case -eq 'wsl-update-prompt') {'--update'} else {'--install --no-distribution'}
+                if ($admin[0].Values[1] -cne $firstCommand -or ($case -eq 'wsl-update' -and $admin[1].Values[1] -cne '--update')) { throw 'WSL setup command changed' }
+                if ([Array]::IndexOf([object[]]$events, $admin[0]) -lt [Array]::IndexOf([object[]]$events, $prompts[0])) { throw 'WSL installation preceded consent' }
+                if ($downloads.Count -or $imports.Count -or $gui.Count -or @($events | Where-Object Kind -eq 'usb').Count) { throw 'WSL setup continued into Linux/USB before reopening' }
+                $support = @($events | Where-Object Kind -eq 'support')
+                if ($support.Count -ne 1) { throw 'WSL setup did not end visibly with support details' }
+                if ($case -in @('wsl-missing-install','wsl-missing-reboot','wsl-update-prompt')) {
+                    if ($code -ne 0 -or $support[0].Values[0] -notmatch 'Restart Windows, then reopen' -or $support[0].Values[0] -match 'if|stalled') { throw ('WSL install did not clearly request restart/resume: ' + $text) }
+                } elseif ($case -eq 'wsl-update') {
+                    if ($code -ne 0 -or $support[0].Values[0] -notmatch 'reopen') { throw 'WSL update did not ask to reopen setup' }
+                } elseif ($code -ne 1 -or $support[0].Values[0] -match 'WSL setup requested') { throw 'WSL installation failure was reported as success' }
+                if ($case -eq 'wsl-missing-failed' -and $support[0].Values[0] -notmatch '1603') { throw 'WSL install failure lost its actual status' }
+            } elseif ($case -eq 'wsl-probe-hang') {
+                if ($code -ne 1 -or $prompts.Count -or $admin.Count -or $gui.Count) { throw 'Unknown WSL stall was treated as missing WSL' }
+            } elseif ($case -in $declines) {
                 if ($code -ne 1 -or $prompts.Count -ne 1 -or $prompts[0].Values[0] -notmatch 'Set up a private Linux') { throw 'private creation was not offered' }
                 if ($downloads.Count -or $imports.Count -or $gui.Count -or @($events | Where-Object { $_.Kind -eq 'start' }).Count) { throw 'decline caused setup side effects' }
             } elseif ($chosen) {

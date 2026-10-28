@@ -24,9 +24,9 @@ MB, total MB and a percentage; other steps show activity, not a made-up percenta
 Questions appear inside that same window. **Set up the toolkit’s Linux?** offers
 **Set it up** / **Not now**; the Windows Linux-support and USB-support questions
 offer **Install** / **Not now**. The safe default is **Not now**. Closing a question
-also counts as **Not now**: no approval is given and setup stops there. While waiting
-for you the window stays on top, restores itself, flashes its taskbar button when
-unfocused and sounds a reminder about once a minute.
+also counts as **Not now**: no approval is given and setup stops there. A new
+question can restore the window once; reminders flash its taskbar button. The
+window is never kept above other windows and never takes focus from an installer.
 Windows may still request UAC approval; **Waiting for you** explains how to find
 the flashing shield icon or installer. Waiting for your answer or a Windows prompt
 is not a setup stall. A stall or failure explains what happened and what to try,
@@ -34,6 +34,14 @@ with **Copy details** and **Open log folder** for support. Where more time is sa
 choose **Keep waiting** or **Stop setup**; closing that decision stops setup. Run
 `Jibo-DFU-Windows-x64.exe -ShowConsole` only when troubleshooting; this can be
 combined with `-Distro NAME`. Source launchers keep their terminal.
+
+On a PC without WSL, setup offers **Install** instead of waiting on WSL's hidden
+keyboard prompt. Approve the Windows administrator prompt to install Linux support
+from Microsoft, without a Linux username/password wizard. When setup says
+**Restart Windows to finish setup**, save your work, restart Windows yourself,
+then open the same EXE again. It checks WSL again and continues setup; it does not
+restart the PC or register a Linux distribution before you reopen it. **Not now**
+installs nothing. If installation fails, use **Copy details** in the setup window.
 
 The Windows download also checks the Linux display's current mode before opening
 the GUI. If Windows reports **WARN:COPY MODE** (a known WSL bug when the toolkit's

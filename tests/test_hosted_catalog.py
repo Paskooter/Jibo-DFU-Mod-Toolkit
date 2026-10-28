@@ -270,7 +270,8 @@ class TlsDeadlineTests(DeadlineTests):
         with patch('ssl._create_default_https_context', ssl.create_default_context):
             with self.assertRaises(h.HostedError) as caught:
                 h._fetch(self.server.origin + '/flash/index.json', 4096, 1, None)
-        self.assertEqual(caught.exception.code, 'offline')
+        self.assertEqual(caught.exception.code, 'tls')
+        self.assertIn('certificate verification failed', str(caught.exception))
         self.assertEqual(self.server.requests, [])
 
 

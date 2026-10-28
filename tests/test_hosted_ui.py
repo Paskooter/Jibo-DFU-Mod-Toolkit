@@ -67,7 +67,15 @@ def test_saved_list_error_uses_code_and_says_list_is_old():
     status = next(item for item in items if item.key == "status:catalog")
     assert jibo_tui.hosted_error_text("offline") in status.label
     assert "Showing the last checked list." in status.label
-    assert "connection refused" not in status.label
+    assert "connection refused" in status.label  # Retain the transport cause, including saved-list fallback.
+
+
+def test_saved_list_transport_cause_is_logged_for_copy_details(capsys):
+    saved = sample_catalog(from_cache=True, error="offline: DNS lookup failed for jibo.io")
+    api = FakeHostedApi(FakeHosted(catalog=saved))
+    result, _ = run_tui(api, "flash-update")
+    assert result["status"] == "cancelled" and not api.writes
+    assert "Phoenix image list check failed: offline: DNS lookup failed for jibo.io" in capsys.readouterr().out
 
 
 def test_previously_downloaded_images_are_hidden_not_promoted_to_saved_choices():
