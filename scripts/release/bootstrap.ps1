@@ -22,17 +22,29 @@ function Confirm-Setup([string]$Question) {
         if ($script:ToolkitQuestionAnswer -ne 'closed') { Update-ToolkitSetup $script:ToolkitStep 'Continuing setup. You will be warned if this step stalls.' }
     }
 }
-function Invoke-ApprovedAdmin([string]$File, [string]$Arguments) {
+function Invoke-ApprovedAdmin([string]$File, [string]$Arguments, [switch]$AllowRestart) {
     $p = Invoke-ToolkitElevated -File $File -Arguments $Arguments -TimeoutSeconds 900 -AllowWait
-    if ($p.ExitCode -ne 0) { throw "Setup exited with code $($p.ExitCode). Restart this app after any requested reboot." }
+    if ($null -eq $p.ExitCode) { throw 'Windows setup did not report an exit code. Reopen the toolkit after checking Windows setup.' }
+    if ($p.ExitCode -ne 0 -and -not ($AllowRestart -and $p.ExitCode -eq 3010)) {
+        $error = New-Object Exception "Setup exited with code $($p.ExitCode). Restart this app after any requested reboot."
+        $error.Data['ToolkitExitCode'] = $p.ExitCode
+        throw $error
+    }
+    if ($AllowRestart) { return [int]$p.ExitCode }
 }
-function Native([string[]]$Arguments, [double]$TimeoutSeconds = 0) {
+function Native([string[]]$Arguments, [double]$TimeoutSeconds = 0, [switch]$WatchWslSetup) {
     $policy = if ($script:ToolkitPolicy) { $script:ToolkitPolicy } else { Get-ToolkitStepPolicy 'Starting Linux' }
     if ($TimeoutSeconds -le 0) { $TimeoutSeconds = $policy.Seconds }
-    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowWait:$policy.AllowWait
-    if ($result.ExitCode -ne 0) {
+    $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowWait:$policy.AllowWait -WatchWslSetup:$WatchWslSetup
+    if ($result.WslSetupRequired -or $result.ExitCode -ne 0) {
         $error = New-Object Exception "WSL failed: $($result.StartError) $($result.Output -join ' ')"
         $error.Data['ToolkitExitCode'] = $result.ExitCode
+        if ($result.WslSetupRequired) {
+            $error.Data['ToolkitWslSetupRequired'] = $true
+            $advice = ($result.Output -join ' ') -replace "`0", ''
+            # A runtime explicitly requesting --update is not a fresh install.
+            $error.Data['ToolkitWslUpdateRequired'] = ($advice -match '(?i)\bwsl\.exe[ \t]+--update\b' -and $advice -notmatch '(?i)\bwsl\.exe[ \t]+--install\b')
+        }
         if ($result.TimedOut) { $error.Data['ToolkitStall'] = $true }
         throw $error
     }
@@ -343,23 +355,44 @@ try {
     Set-ToolkitStep 'Checking Windows and WSL'
     Write-Host 'Jibo DFU Toolkit: Windows uses WSL 2 + WSLg and usbipd-win. Setup requires internet only if these are missing.'
     $ready = $false
+    $wslSetupRequired = $false
+    $wslUpdateRequired = $false
     try {
-        $version = Native -Arguments @('--version')
+        $version = Native -Arguments @('--version') -WatchWslSetup
         $script:ToolkitWslVersion = Protect-ToolkitText $version
         Write-ToolkitLog 'wsl-version' @{ version=$script:ToolkitWslVersion }
         $ready = ($version -match 'WSLg')
     } catch {
-        $script:ToolkitWslVersion = 'unavailable (see command failure in log)'
+        $wslSetupRequired = [bool]$_.Exception.Data['ToolkitWslSetupRequired']
+        $wslUpdateRequired = [bool]$_.Exception.Data['ToolkitWslUpdateRequired']
+        $script:ToolkitWslVersion = if ($wslSetupRequired) { 'installation or update required (see command output in log)' } else { 'unavailable (see command failure in log)' }
         if ($_.Exception.Data['ToolkitStall']) { throw }
         $ready = $false
     }
     if (-not $ready) {
         if (-not (Confirm-Setup 'Install/update WSL 2 and WSLg? Windows will ask for administrator approval.')) { throw 'WSL setup declined. No setup changes were made.' }
         Set-ToolkitStep 'Installing Windows components'
-        Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --no-distribution'
-        Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--update'
-        Set-ToolkitUserWait $true 'Waiting for you: restart Windows if the WSL installer requested it, then reopen Jibo-DFU-Windows-x64.exe. Check the installer window or flashing shield icon on the taskbar.'
-        throw 'WSL setup requested. Reboot if Windows requests it, then run this download again.'
+        if ($wslUpdateRequired) {
+            # Honor the stub's update advice; --install can be a no-op for an
+            # existing runtime. Finish this mandatory update before asking to restart.
+            $updateCode = Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--update' -AllowRestart
+            $restart = $true
+        } else {
+            $installCode = Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--install --no-distribution' -AllowRestart
+            # WslClient.cpp prints ERROR_SUCCESS_REBOOT_REQUIRED yet returns 0 after
+            # enabling features. A fresh install must stop here even with exit 0:
+            # updating/starting WSL before the reboot can fail misleadingly.
+            $restart = $wslSetupRequired -or $installCode -eq 3010
+            if (-not $restart) {
+                $updateCode = Invoke-ApprovedAdmin "$env:SystemRoot\System32\wsl.exe" '--update' -AllowRestart
+                $restart = $updateCode -eq 3010
+            }
+        }
+        $message = if ($restart) { 'WSL setup requested. Restart Windows, then reopen Jibo-DFU-Windows-x64.exe to continue setup.' } else { 'WSL setup requested. Reopen Jibo-DFU-Windows-x64.exe to continue setup. Restart Windows first if it requested a restart.' }
+        Complete-ToolkitStep
+        Write-ToolkitLog 'setup-end' @{ result=$(if ($restart) {'restart-required'} else {'reopen-required'}); exit_code=0; step=$script:ToolkitStep; message=$message }
+        Show-ToolkitSupportDialog $message | Out-Null
+        exit 0
     }
     $rows = @()
     Set-ToolkitStep 'Finding Linux'

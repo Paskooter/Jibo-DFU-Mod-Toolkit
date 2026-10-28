@@ -36,7 +36,7 @@ START = 'Command line: /usr/bin/weston --backend=rdp-backend.so --xwayland --log
 
 
 @pytest.mark.parametrize('log,expected', [
-    # The owner's failure: the current session's probe hit EIO (openvmm#4274).
+    # The current session's shared-memory probe hit EIO (openvmm#4274).
     (START + EIO + 'RDP backend: use_gfxredir = 0\n', 'mode=copy sessions=1 eio=1'),
     # Copy mode for another reason (no EIO line): reported, but not as EIO.
     (START + 'RDP backend: use_gfxredir = 0\n', 'mode=copy sessions=1 eio=0'),
@@ -71,7 +71,7 @@ def test_display_scenarios_are_all_in_the_bootstrap_inventory():
     inventory = re.search(r"foreach \(\$case in @\(([^)]*)\) \| Where-Object", harness).group(1)
     names = re.findall(r"'([^']+)'", inventory)
     assert [n for n in names if n.startswith('display-')] == DISPLAY_SCENARIOS
-    assert len(names) == len(set(names)) == 53
+    assert len(names) == len(set(names)) == 62
 
 
 @pytest.mark.parametrize('scenario', DISPLAY_SCENARIOS)

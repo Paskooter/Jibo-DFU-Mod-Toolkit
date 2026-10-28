@@ -506,6 +506,8 @@ public static class ToolkitSetupText {
             f = F("info", "Setup stopped", declined + " Nothing was downloaded or installed.", "Open the toolkit again whenever you are ready to set up the toolkit\u2019s Linux.");
         else if (text.StartsWith("USB setup declined."))
             f = F("info", "Setup stopped", declined + " USB support was not installed.", "The toolkit needs USB support to talk to Jibo. Open the toolkit again when you are ready to install it.");
+        else if (text.StartsWith("WSL setup requested. Restart Windows,"))
+            f = F("info", "Restart Windows to finish setup", "Windows finished this part of its Linux setup. The toolkit will continue after a restart.", "Save your work, restart Windows, then open " + Exe + " again. The toolkit will check WSL and continue setup; it will not restart this PC for you.");
         else if (text.StartsWith("WSL setup requested."))
             f = F("info", "Open the toolkit again to finish setup", "Windows finished installing its Linux support.", "If Windows asked you to restart, restart first. Then open " + Exe + " again to continue setup.");
         else if (text.StartsWith("usbipd-win setup finished."))
@@ -2125,7 +2127,47 @@ function Stop-ToolkitProcess($Process) {
         if (-not $Process.HasExited) { throw }
     }
 }
-function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$TimeoutSeconds = 120, [switch]$AllowWait) {
+# Read the WSL version probe while it runs: the inbox stub can print installation
+# advice and then wait for a key. Never send a key (that can approve an install).
+# Microsoft WSL's install.cpp also has a one-minute keypress wait; generic nonzero
+# exits, including -1, are not a unique "not installed" signal. See docs/release.md.
+$script:ToolkitWslProbeSource = @'
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+public sealed class ToolkitWslProbeOutput {
+    readonly StringBuilder text = new StringBuilder();
+    readonly object gate = new object();
+    public Task Completion { get; private set; }
+    public string Text { get { lock (gate) { return text.ToString(); } } }
+    public ToolkitWslProbeOutput(StreamReader reader) { Completion = Read(reader); }
+    async Task Read(StreamReader reader) {
+        var buffer = new char[512];
+        int count;
+        while ((count = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0) {
+            lock (gate) {
+                // Keep the first 16 KiB, where WSL emits its diagnostic. Continue
+                // draining both pipes even if an unexpected program is noisy.
+                int keep = System.Math.Min(count, 16384 - text.Length);
+                if (keep > 0) text.Append(buffer, 0, keep);
+            }
+        }
+    }
+}
+'@
+function Test-ToolkitWslSetupOutput([string]$Text) {
+    # The command spelling is invariant across localized WSL messages. Do not
+    # match "not installed" alone: a missing distro is not a missing WSL runtime.
+    $clean = $Text -replace "`0", ''
+    return ($clean -match '(?i)\bwsl\.exe[ \t]+--(?:install|update)\b' -or
+        $clean -match '(?i)The Windows Subsystem for Linux is not installed\.' -or
+        $clean -match '\bWSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED\b')
+}
+function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$TimeoutSeconds = 120, [switch]$AllowWait, [switch]$WatchWslSetup) {
+    # Early termination is allowed only for this read-only probe, never an
+    # install, distro command, or the USB helpers using this same capture helper.
+    if ($WatchWslSetup -and ([IO.Path]::GetFileName($File) -ine 'wsl.exe' -or $Arguments.Count -ne 1 -or $Arguments[0] -cne '--version')) { throw 'WSL setup detection is only allowed for wsl.exe --version.' }
+    if ($WatchWslSetup -and -not ('ToolkitWslProbeOutput' -as [type])) { Add-Type -TypeDefinition $script:ToolkitWslProbeSource }
     $started = [DateTime]::UtcNow
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $commandStep = $script:ToolkitStep
@@ -2152,24 +2194,55 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$Time
     $info.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    $info.RedirectStandardInput = [bool]$WatchWslSetup
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $info
     try {
         $null = $process.Start()
-        # wsl --list uses UTF-16LE when redirected. StreamReader defaults to UTF-8;
-        # the existing Native NUL removal handles its ASCII distribution metadata.
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
-        $completed = Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait
-        # Pipe readers must also be bounded: descendants can inherit open handles.
-        $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 2000)
-        $lines = @()
-        if ($stdout.IsCompleted -and -not $stdout.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stdout.GetAwaiter().GetResult()) }
-        if ($stderr.IsCompleted -and -not $stderr.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stderr.GetAwaiter().GetResult()) }
-        if (-not $completed -or -not $pipesComplete) {
-            $result = [pscustomobject]@{Output=$lines; ExitCode=124; TimedOut=$true; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
+        if ($WatchWslSetup) {
+            $process.StandardInput.Close()
+            $probeOut = New-Object ToolkitWslProbeOutput($process.StandardOutput)
+            $probeErr = New-Object ToolkitWslProbeOutput($process.StandardError)
+            $setupRequired = $false; $completed = $true; $stoppedProbe = $false
+            while (-not $process.WaitForExit(100)) {
+                if ((Test-ToolkitWslSetupOutput $probeOut.Text) -or (Test-ToolkitWslSetupOutput $probeErr.Text)) {
+                    # Stop only the read-only probe that emitted the advice. No
+                    # installer has started, and no permission has been granted.
+                    Stop-ToolkitProcess $process
+                    $setupRequired = $true; $stoppedProbe = $true
+                    break
+                }
+                if (Test-ToolkitStall -ElapsedSeconds $timer.Elapsed.TotalSeconds -LimitSeconds $TimeoutSeconds) {
+                    Stop-ToolkitProcess $process
+                    $completed = $false
+                    break
+                }
+            }
+            $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($probeOut.Completion, $probeErr.Completion), 2000)
+            $lines = @((ConvertTo-ToolkitNativeLines $probeOut.Text)) + @((ConvertTo-ToolkitNativeLines $probeErr.Text))
+            # A normally exiting stub can emit the same message between polls.
+            $setupRequired = $setupRequired -or (Test-ToolkitWslSetupOutput $probeOut.Text) -or (Test-ToolkitWslSetupOutput $probeErr.Text)
+            if (-not $pipesComplete -or (-not $completed -and -not $setupRequired)) {
+                $result = [pscustomobject]@{Output=$lines; ExitCode=124; TimedOut=$true; WslSetupRequired=$false; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
+            } else {
+                $result = [pscustomobject]@{Output=$lines; ExitCode=$(if ($stoppedProbe) {$null} else {$process.ExitCode}); TimedOut=$false; WslSetupRequired=$setupRequired; StartError=$null}
+            }
         } else {
-            $result = [pscustomobject]@{Output=$lines; ExitCode=$process.ExitCode; TimedOut=$false; StartError=$null}
+            # wsl --list uses UTF-16LE when redirected. StreamReader defaults to UTF-8;
+            # the existing Native NUL removal handles its ASCII distribution metadata.
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $completed = Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait
+            # Pipe readers must also be bounded: descendants can inherit open handles.
+            $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 2000)
+            $lines = @()
+            if ($stdout.IsCompleted -and -not $stdout.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stdout.GetAwaiter().GetResult()) }
+            if ($stderr.IsCompleted -and -not $stderr.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stderr.GetAwaiter().GetResult()) }
+            if (-not $completed -or -not $pipesComplete) {
+                $result = [pscustomobject]@{Output=$lines; ExitCode=124; TimedOut=$true; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
+            } else {
+                $result = [pscustomobject]@{Output=$lines; ExitCode=$process.ExitCode; TimedOut=$false; StartError=$null}
+            }
         }
     } catch {
         $stalled = [bool]$_.Exception.Data['ToolkitStall']
@@ -2177,12 +2250,12 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$Time
     } finally {
         $process.Dispose()
         if ($result) {
-            $output = if ($result.ExitCode -ne 0) { ($result.Output -join "`n") } else { '' }
+            $output = if ($result.WslSetupRequired -or $result.ExitCode -ne 0) { ($result.Output -join "`n") } else { '' }
             # Redact BEFORE truncating: otherwise a long secret could lose its key.
             $output = Protect-ToolkitText $output
             # Keep useful diagnostics bounded; never persist argument lists.
             if ($output.Length -gt 8000) { $output = $output.Substring($output.Length - 8000) }
-            Write-ToolkitLog 'command-end' @{ step=$commandStep; command=[IO.Path]::GetFileName($File); start_utc=$started.ToString('o'); end_utc=[DateTime]::UtcNow.ToString('o'); duration_seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3); result=$(if ($result.TimedOut) { 'stalled' } elseif ($result.ExitCode -eq 0) { 'ok' } else { 'failed' }); exit_code=$result.ExitCode; error=[string]$result.StartError; output=$output }
+            Write-ToolkitLog 'command-end' @{ step=$commandStep; command=[IO.Path]::GetFileName($File); start_utc=$started.ToString('o'); end_utc=[DateTime]::UtcNow.ToString('o'); duration_seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3); result=$(if ($result.TimedOut) { 'stalled' } elseif ($result.WslSetupRequired) { 'setup-required' } elseif ($result.ExitCode -eq 0) { 'ok' } else { 'failed' }); exit_code=$result.ExitCode; error=[string]$result.StartError; output=$output }
         }
     }
     return $result

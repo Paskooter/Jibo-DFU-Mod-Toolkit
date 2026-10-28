@@ -65,6 +65,95 @@ if ($Case -eq 'setup-feedback') {
     } finally { Stop-ToolkitSetup; if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp } }
     exit 0
 }
+if ($Case -eq 'wsl-prerequisite') {
+    . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-wsl-probe-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory $tmp | Out-Null
+    try {
+        Initialize-ToolkitLog -Root $tmp -Build ('d' * 40)
+        Set-ToolkitStep 'Checking Windows and WSL'
+        $fake = Join-Path $tmp 'wsl.exe'
+        if ($env:OS -eq 'Windows_NT') {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Threading;
+public class WslMissingFixture {
+    public static void Main(string[] args) {
+        if (args.Length != 1 || args[0] != "--version") Environment.Exit(91);
+        string mode = Environment.GetEnvironmentVariable("TOOLKIT_WSL_FIXTURE");
+        // A noninteractive probe must close stdin, never approve the stub by key.
+        if (Console.In.ReadToEnd().Length != 0) Environment.Exit(93);
+        string text = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\n";
+        if (mode == "localized") text = "Installez avec 'wsl.exe --install'.\r\n";
+        if (mode == "update") text = "Windows Subsystem for Linux must be updated. Run 'wsl.exe --update'.\r\n";
+        if (mode == "ready") text = "WSL version: 2.6.1\r\nWSLg version: 1.0.73\r\n";
+        if (mode == "error") text = "Access is denied.\r\n";
+        if (mode == "hang") text = "Waiting for an unrecognized service\r\n";
+        if (mode == "split") text = new string(' ', 500) + text;
+        byte[] data = (mode == "utf8" ? Encoding.UTF8 : Encoding.Unicode).GetBytes(text);
+        var output = mode == "stderr" ? Console.OpenStandardError() : Console.OpenStandardOutput();
+        output.Write(data, 0, data.Length); output.Flush();
+        if (mode == "ready") Environment.Exit(0);
+        if (mode == "error") Environment.Exit(17);
+        if (mode == "missing-exit") Environment.Exit(7);
+        Thread.Sleep(60000); Environment.Exit(92);
+    }
+}
+'@ -OutputAssembly $fake -OutputType ConsoleApplication
+        } else {
+            [IO.File]::WriteAllText($fake, @'
+#!/usr/bin/python3
+import os, sys, time
+assert sys.argv[1:] == ['--version']
+assert sys.stdin.read() == ''
+mode = os.environ['TOOLKIT_WSL_FIXTURE']
+text = "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\r\n"
+text = {'localized': "Installez avec 'wsl.exe --install'.\r\n",
+        'update': "Windows Subsystem for Linux must be updated. Run 'wsl.exe --update'.\r\n",
+        'ready': 'WSL version: 2.6.1\r\nWSLg version: 1.0.73\r\n',
+        'error': 'Access is denied.\r\n',
+        'hang': 'Waiting for an unrecognized service\r\n'}.get(mode, text)
+if mode == 'split': text = ' ' * 500 + text
+os.write(2 if mode == 'stderr' else 1, text.encode('utf-8' if mode == 'utf8' else 'utf-16-le'))
+if mode in ('ready', 'error', 'missing-exit'): sys.exit({'ready': 0, 'error': 17, 'missing-exit': 7}[mode])
+time.sleep(60)
+sys.exit(92)
+'@)
+            & chmod +x $fake
+        }
+        foreach ($mode in @('stdout','stderr','utf8','localized','update','split','missing-exit','ready','error','hang')) {
+            $env:TOOLKIT_WSL_FIXTURE = $mode
+            $result = Invoke-ToolkitNative -File $fake -Arguments @('--version') -TimeoutSeconds 4 -WatchWslSetup
+            if ($mode -eq 'hang') {
+                if (-not $result.TimedOut -or $result.ExitCode -ne 124 -or $result.WslSetupRequired) { throw 'Unrecognized WSL hang was misclassified as an install prompt' }
+            } elseif ($mode -in @('ready','error')) {
+                $expected = if ($mode -eq 'ready') {0} else {17}
+                if ($result.TimedOut -or $result.WslSetupRequired -or $result.ExitCode -ne $expected) { throw 'Ordinary WSL output/exit changed' }
+            } else {
+                if (-not $result.WslSetupRequired -or $result.TimedOut) { throw "Missing WSL waited for the stub prompt instead of offering installation ($mode)" }
+                if (($result.Output -join ' ') -notmatch 'wsl.exe --(install|update)') { throw 'Probe lost its diagnostic' }
+                if ($mode -eq 'missing-exit') {
+                    if ($null -ne $result.ExitCode -and $result.ExitCode -ne 7) { throw 'Normally exiting probe lost its real status' }
+                } elseif ($null -ne $result.ExitCode) { throw 'Early probe invented a native exit code' }
+            }
+            Write-Output "PASS WSL probe: $mode"
+        }
+        foreach ($wrongArgs in @(@('--install','--no-distribution'), @('--distribution','Ubuntu','--exec','true'))) {
+            $refused = $false
+            try { Invoke-ToolkitNative -File $fake -Arguments $wrongArgs -WatchWslSetup | Out-Null } catch { $refused = $true }
+            if (-not $refused) { throw 'Streaming WSL setup detection reached a non-probe command' }
+        }
+        if (Test-ToolkitWslSetupOutput 'A Linux distribution is not installed.') { throw 'A missing distro was confused with missing WSL' }
+        $events = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json })
+        if (@($events | Where-Object event -eq 'stall').Count) { throw 'Missing WSL was logged as a stall' }
+        Add-Type -TypeDefinition $script:ToolkitQuestionModelSource
+        $restart = [ToolkitSetupText]::Failure('WSL setup requested. Restart Windows, then reopen Jibo-DFU-Windows-x64.exe to continue setup.', $false)
+        if ($restart.Tone -ne 'info' -or $restart.Headline -notmatch '^Restart Windows' -or $restart.Try -match '^If' -or $restart.Try -notmatch 'Save your work') { throw 'Successful WSL install did not show a clear save/restart/reopen message' }
+        Write-Output "PASS console: $Case"
+    } finally { Remove-Item Env:TOOLKIT_WSL_FIXTURE -ErrorAction SilentlyContinue; if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp } }
+    exit 0
+}
 if ($Case -eq 'setup-stalls') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-stalls-' + [guid]::NewGuid().ToString('N'))
@@ -94,10 +183,9 @@ if ($Case -eq 'setup-stalls') {
     } finally { Remove-Item -Recurse -Force $tmp }
     exit 0
 }
-# The setup window must never cover a window the user has to work in (the usbipd-win
-# or WSL installer, a UAC prompt). Owner report on build d04ed3c: the installer
-# opened underneath the TopMost setup window and even a taskbar click could not
-# raise it. Portable source checks everywhere; real windows and z-order on Windows.
+# The setup window must not cover the usbipd-win or WSL installer or a UAC prompt.
+# A TopMost setup window can prevent a taskbar click from raising the installer.
+# Check source on all platforms and real window stacking on Windows.
 $script:ToolkitZOrderFixtureSource = @'
 using System;
 using System.Drawing;
@@ -208,7 +296,7 @@ if ($Case -eq 'setup-wait-behind') {
             Start-Sleep -Milliseconds 300
             if ($window.TopMost -or [ToolkitZOrderFixture]::TopMostStyle($setup)) { throw 'The setup window is TopMost while waiting for the installer' }
             if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'Starting the installer wait put the setup window in front of the installer' }
-            # The owner clicks the installer on the taskbar: it must come to the front.
+            # Clicking the installer on the taskbar must bring it to the front.
             [ToolkitZOrderFixture]::Raise()
             if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'A taskbar click could not bring the installer in front of the setup window' }
             $foreground = [ToolkitZOrderFixture]::GetForegroundWindow()
@@ -403,17 +491,11 @@ exit 7
     exit 0
 }
 if ($Case -eq 'native-distro-select') {
-    # Root cause (TOOLKIT-FIX2 bug 1): run.ps1's Get-Wsl2Distributions regex
-    # matches its row pattern per ITEM. The real windowless Invoke-ToolkitNative
-    # must still hand it one array entry per output line -- not the whole
-    # multi-line stdout blob as a single string -- or Select-Distribution finds
-    # 0 distros and throws, which bootstrap.ps1 reports as "USB handoff failed
-    # or administrator approval was declined." Exercise run.ps1's REAL
-    # Get-Wsl2Distributions/Select-Distribution through the REAL
-    # Invoke-ToolkitNative against a fake wsl.exe that writes a realistic
-    # multi-line `wsl --list --verbose` table UTF-16LE-encoded (what wsl.exe
-    # does when its output is redirected). Also prove multi-line usbipd `state`
-    # JSON still parses through the same capture.
+    # Get-Wsl2Distributions matches one row per output item. Preserve that shape
+    # through Invoke-ToolkitNative so Select-Distribution can find each distro.
+    # Exercise both functions with a fixture that emits the same UTF-16LE table
+    # as redirected `wsl --list --verbose`. Also parse multi-line usbipd `state`
+    # JSON through the same capture.
     $root = Split-Path (Split-Path (Split-Path $BootstrapPath))
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-native-distro-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -490,7 +572,7 @@ if ($Case -eq 'all') {
     $hostBinary = (Get-Process -Id $PID).Path
     $passed = 0
     $failed = 0
-    foreach ($scenario in @('setup-questions','setup-wait-behind','support-not-topmost','setup-feedback','setup-stalls','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight','display-copy-repaired')) {
+    foreach ($scenario in @('setup-questions','setup-wait-behind','support-not-topmost','setup-feedback','setup-stalls','wsl-prerequisite','installer-wait','setup-download','native-status','native-command','native-distro-select','classic','terminal','gui-success','gui-failed','never-ready','watcher-failed','monitor-failed','show-console','setup-decline','gui-start-failed','cleanup-failed','monitor-prompt','terminal-failed','hide-fallback','watcher-exit-race','monitor-exit-race','gui-handle','watcher-handle','gui-code-unavailable','window-copy','window-missing','display-copy-preflight','display-copy-repaired')) {
         $ErrorActionPreference = 'Continue'
         & $hostBinary -NoProfile -File $PSCommandPath -BootstrapPath $BootstrapPath -Case $scenario
         $code = $LASTEXITCODE

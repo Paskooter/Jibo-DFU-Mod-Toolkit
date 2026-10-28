@@ -54,6 +54,10 @@ class ShofelTransportTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.backups = self.root / "Jibo-Backups"
         self.var = b"V" * 4096
+        # Entry diagnostics must stay on the synthetic bus too, never real sysfs.
+        usb = patch.object(toolkit, "_entry_usb_snapshot", return_value=[])
+        usb.start()
+        self.addCleanup(usb.stop)
 
     def test_shofel_entry_requires_profile_confirmation_before_usb_access(self):
         with patch.object(toolkit, "_shofel_dfu_tool") as locate, \

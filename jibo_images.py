@@ -277,6 +277,33 @@ def _remove_distortion_caches(candidate):
     return paths
 
 
+def _rearm_first_boot_resize(candidate):
+    """Clear only a completed-boot marker on a disposable calibrated var copy.
+
+    Calibration is copied onto package var, not onto the robot's old var. A
+    package captured after boot can itself carry this marker and suppress the
+    stock resize of every newly flashed compact filesystem.
+    """
+    marker = "/etc/first_boot_resize.done"
+    try:
+        parent = _run_debugfs(candidate, "stat /etc")
+        if not re.search(r"\bType:\s+directory\b", parent):
+            raise ImageError("The var image /etc is not a directory.")
+        state = _run_debugfs(candidate, "stat " + marker, allow_missing=True)
+        if re.search(r"File not found|ext2_lookup", state, re.IGNORECASE):
+            return
+        if not re.search(r"\bType:\s+regular\b", state):
+            raise ImageError("The completed-boot marker is not a regular file.")
+        _run_debugfs(candidate, "rm " + marker, writable=True)
+        state = _run_debugfs(candidate, "stat " + marker, allow_missing=True)
+        if not re.search(r"File not found|ext2_lookup", state, re.IGNORECASE):
+            raise ImageError("The completed-boot marker survived removal.")
+    except ImageError as exc:
+        raise ImageError("Could not arm first-boot partition growth at " + marker +
+                         ". No partition write was attempted. Keep the rollback backup "
+                         "and copy these details: " + str(exc)) from exc
+
+
 def build_factory_fresh_var(stock, backup, destination):
     """Make stock var fresh for OOBE while retaining this robot's factory files."""
     stock, backup, destination = Path(stock), Path(backup), Path(destination)
@@ -309,6 +336,7 @@ def build_factory_fresh_var(stock, backup, destination):
                               temporary, 0o644)
             hosts = ("127.0.0.1\tlocalhost\n127.0.1.1\t" + name + "\n").encode("ascii")
             _put_factory_file(destination, "/etc/hosts", hosts, temporary, 0o644)
+        _rearm_first_boot_resize(destination)
         _check_ext4(destination)
         if destination.stat().st_size != stock.stat().st_size:
             raise ImageError("The calibrated var image changed length.")

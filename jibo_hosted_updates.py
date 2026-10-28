@@ -67,11 +67,8 @@ class HostedError(Exception):
 
     def __init__(self, code, message):
         self.code = code
-        # Every hosted error shown to a user must carry a non-empty, specific
-        # detail. A blank message (``str(exc)`` empty, a raise with a blank
-        # detail, a wrapper that drops it) collapses the chooser's generic
-        # sentence ("jibo.io answered with an error.") down to that sentence
-        # alone with no trailing detail -- exactly what the owner reported.
+        # Keep a non-empty detail so the chooser can explain the failure instead
+        # of showing only its generic "jibo.io answered with an error" sentence.
         super().__init__(message or 'Hosted operation failed with code {!r} and no further detail'.format(code))
 
 
@@ -181,11 +178,14 @@ ORIGIN = 'https://jibo.io'
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import json
 import os
+import socket
 from pathlib import Path
 import re
 import stat
+import ssl
 import sys
 import time
 import urllib.error
@@ -344,6 +344,52 @@ def _retry_wait(delay, cancel):
         time.sleep(min(0.1, remaining))
 
 
+_CA_BUNDLE = Path(__file__).resolve().parent / 'assets' / 'ca' / 'cacert.pem'
+
+
+def _exception_id(error):
+    # Raw urllib/proxy/OS exception text can contain credentials, URLs or server
+    # response bytes. Keep the type and numeric errno, not that untrusted text.
+    number = getattr(error, 'errno', None)
+    return type(error).__name__ + (f' (errno {number})' if isinstance(number, int) else '')
+
+
+def _load_ca_file(context, path):
+    try:
+        context.load_verify_locations(cafile=str(path))
+    except (OSError, ValueError) as exc:
+        reason = ('missing' if isinstance(exc, FileNotFoundError) else
+                  'not readable' if isinstance(exc, PermissionError) else 'invalid or unreadable')
+        raise HostedError('dependency', f'CA certificate file is {reason}: {path}. '
+                          'Reinstall this toolkit copy (source installs: check certifi). ' +
+                          _exception_id(exc)) from exc
+
+
+def _tls_context():
+    """Use bundled public roots, not the build Mac's Homebrew certificate path.
+
+    System/explicit OpenSSL roots remain available for managed networks. No
+    verification bypass, network bootstrap or external transport is used.
+    """
+    try:
+        context = ssl._create_default_https_context()
+    except (OSError, ValueError) as exc:
+        raise HostedError('dependency', 'Could not load the system TLS certificates. '
+                          'Check SSL_CERT_FILE / SSL_CERT_DIR. ' + _exception_id(exc)) from exc
+    if getattr(sys, 'frozen', False) or _CA_BUNDLE.is_file():
+        _load_ca_file(context, _CA_BUNDLE)
+    else:
+        # Source installs can use certifi too; normal system trust still works
+        # when that optional package is absent. Frozen apps never use its path.
+        try:
+            import certifi
+        except ImportError:
+            pass
+        else:
+            _load_ca_file(context, certifi.where())
+    return context
+
+
 def _deadline_opener(deadline):
     """Apply the same receive budget before status/headers are parsed."""
     class Response(http.client.HTTPResponse):
@@ -374,7 +420,7 @@ def _deadline_opener(deadline):
             remaining(req)
             return self.do_open(HTTPSConnection, req, context=getattr(self, '_context'))
 
-    return urllib.request.build_opener(_Redirect(), HTTPHandler(), HTTPSHandler())
+    return urllib.request.build_opener(_Redirect(), HTTPHandler(), HTTPSHandler(context=_tls_context()))
 
 
 def _cloudflare_page(body):
@@ -392,6 +438,56 @@ def _http_detail(response, deadline):
         except (HostedError, OSError, http.client.HTTPException):
             pass  # Diagnostic inspection must never replace the known HTTP status.
     return f'HTTP {status}.' + (' Cloudflare blocked this request.' if blocked else '')
+
+
+def _transport_error(error, stage, url=None):
+    """Classify the actual failure, without exposing proxy credentials."""
+    seen = set()
+    while isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException) and id(error) not in seen:
+        seen.add(id(error))
+        error = error.reason
+    target = urllib.parse.urlsplit(url or INDEX_URL).hostname or 'the image host'
+    code = 'offline'
+    if isinstance(error, ssl.SSLCertVerificationError):
+        code = 'tls'
+        verify_code = getattr(error, 'verify_code', None)
+        # OpenSSL verification codes are stable and safer than raw server text.
+        reasons = {9: 'certificate not yet valid', 10: 'certificate expired',
+                   18: 'self-signed certificate', 19: 'self-signed certificate chain',
+                   20: 'issuer certificate missing', 21: 'issuer chain incomplete',
+                   62: 'hostname mismatch', 64: 'IP address mismatch'}
+        reason = reasons.get(verify_code, 'certificate not trusted') if isinstance(verify_code, int) else 'certificate not trusted'
+        detail = (f'TLS certificate verification failed for {target}: {reason}' +
+                  (f' (verify code {verify_code})' if isinstance(verify_code, int) else '') +
+                  '. Check the computer clock and any HTTPS-inspecting VPN/proxy. '
+                  'Do not disable certificate verification.')
+    elif isinstance(error, ssl.SSLError):
+        code, detail = 'tls', f'TLS handshake failed for {target}. Check the VPN/proxy and TLS configuration.'
+    elif isinstance(error, socket.gaierror):
+        detail = f'DNS lookup failed for {target} or its configured proxy. Check DNS and the network connection.'
+    elif isinstance(error, TimeoutError):
+        detail = f'Timed out while {stage} {target}. Check the connection/VPN/proxy and try again.'
+    elif isinstance(error, PermissionError):
+        detail = 'Network access was denied on this computer. Check firewall or sandbox permissions.'
+    elif isinstance(error, http.client.RemoteDisconnected):
+        detail = f'The server or proxy closed the connection to {target} before replying.'
+    elif isinstance(error, ConnectionResetError):
+        detail = f'Connection reset while {stage} {target}.'
+    elif isinstance(error, ConnectionRefusedError):
+        detail = f'Connection refused by {target} or its configured proxy.'
+    elif getattr(error, 'errno', None) in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL):
+        detail = f'Network route unavailable for {target} or its proxy. Check the network, including IPv4/IPv6 routing.'
+    elif isinstance(error, http.client.HTTPException):
+        detail = f'Invalid HTTP response while {stage} {target}.'
+    elif isinstance(error, ValueError):
+        code, detail = 'proxy', 'Invalid proxy or URL configuration on this computer. Check the proxy address and port.'
+    elif isinstance(error, urllib.error.URLError) and str(error.reason).startswith('unknown url type:'):
+        code, detail = 'proxy', 'Unsupported proxy protocol. This transport requires an HTTP/HTTPS proxy, not SOCKS.'
+    elif isinstance(error, OSError) and (match := re.match(r'Tunnel connection failed: (\d{3})\b', str(error))):
+        code, detail = 'proxy', f'The configured proxy refused the HTTPS tunnel (HTTP {match[1]}). Check proxy access/authentication.'
+    else:
+        detail = f'Network request failed while {stage} {target}. Check the connection and proxy configuration.'
+    return HostedError(code, detail + ' ' + _exception_id(error))
 
 
 def _open(url, timeout, headers=None, cancel=None):
@@ -432,8 +528,8 @@ def _open(url, timeout, headers=None, cancel=None):
                     delay > _RETRY_WAIT_MAX or delay >= deadline - time.monotonic():
                 raise HostedError(code, detail) from exc
             _retry_wait(delay, cancel)
-        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError) as exc:
-            raise HostedError('offline', 'Hosted transport unavailable or stalled') from exc
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError, ValueError) as exc:
+            raise _transport_error(exc, 'connecting to', url) from exc
     raise HostedError('http', 'Hosted HTTP retry limit exceeded')
 
 
@@ -469,7 +565,7 @@ def _metadata_read(response, amount, deadline):
             raw._sock = _DeadlineSocket(raw._sock, deadline)
         chunk = response.read1(amount)
     except (TimeoutError, http.client.HTTPException, OSError) as exc:
-        raise HostedError('offline', 'Hosted metadata transport unavailable or stalled') from exc
+        raise _transport_error(exc, 'reading metadata from') from exc
     if time.monotonic() >= deadline:
         raise HostedError('offline', 'Hosted metadata overall deadline exceeded')
     return chunk
@@ -716,7 +812,7 @@ def _download(image_id, dest, progress, cancel):
                             try:
                                 chunk = response.read(min(65536, row['size'] + 1 - offset))
                             except (TimeoutError, http.client.HTTPException, OSError) as exc:
-                                raise HostedError('offline', 'Archive transport interrupted; verified partial retained') from exc
+                                raise _transport_error(exc, 'reading the image from', row['url']) from exc
                             if not chunk:
                                 break
                             if offset + len(chunk) > row['size']:

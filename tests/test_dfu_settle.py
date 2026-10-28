@@ -18,6 +18,7 @@ class DfuSettleTests(unittest.TestCase):
             states = iter([[{'port': '1-1', 'state': 'rcm'}]])
             with patch.object(d, '_shofel_dfu_tool', return_value='/tools/shofel2_t124'), \
                     patch.object(d, 'tool', return_value='dfu-util'), \
+                    patch.object(d, '_entry_usb_snapshot', return_value=[]), \
                     patch.object(d, 'devices', side_effect=lambda: next(states, [{'port': '1-1', 'state': 'dfu'}])), \
                     patch.object(d, 'run_with_progress', return_value='Starting verified ARM-state SPL at 0x80108000.'), \
                     patch.object(d, 'dfu_alternatives', side_effect=listings) as listing, \

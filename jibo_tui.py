@@ -217,7 +217,7 @@ def build_menu_items(readiness, update_packages=(), hosted_available=False):
     else:
         update_reason = ""
     quick = " (quick edit)" if _can_edit_var_files(readiness) else ""
-    # Owner order: enter DFU, then the combined setup, then installing an image.
+    # Main action order: enter DFU, then combined setup, then image installation.
     # The separate mode and Wi-Fi edits live in More tools; var backups in Backups.
     items = [
         MenuItem("enter-dfu-shofel", "Enter DFU with ShofEL (RAM loader)",
@@ -275,6 +275,8 @@ RECOMMENDED_DETAIL = "Gets the image from jibo.io, checks it, then asks before w
 KEEP_DATA_LABEL = flash_policy.KEEP_LABEL
 _HOSTED_ERROR_TEXT = {
     "offline": "Can't reach jibo.io right now.",
+    "tls": "The secure connection could not be verified.",
+    "proxy": "The configured proxy could not connect to the image host.",
     "signature": "The Phoenix image list could not be checked, so it is not shown.",
     "hash": "The download did not match its published checksum and was not used.",
     "expired": "The Phoenix image list is out of date, so it is not shown.",
@@ -322,7 +324,7 @@ def hosted_folders():
 def hosted_error_text(code, fallback=""):
     code, _, detail = str(code or "").partition(": ")
     text = _HOSTED_ERROR_TEXT.get(code) or "Phoenix images are unavailable right now."
-    if code in ("http", "rate_limited", "disk") and (detail or fallback):
+    if code in ("http", "rate_limited", "disk", "offline", "tls", "proxy", "dependency", "local") and (detail or fallback):
         text += " " + (detail or fallback)
     return text
 
@@ -538,11 +540,10 @@ def _load_chooser(hosted):
     if error is not None:
         catalog = None
         code = "check-canceled" if _error_code(error) == "canceled" else _error_code(error)
-        if code in ("http", "rate_limited", "disk"):
+        if code in ("http", "rate_limited", "disk", "offline", "tls", "proxy", "dependency", "local"):
             code += ": " + str(error)
-        # The user-facing sentence stays generic; the full diagnostic (exception
-        # class, message, code, URL/status when present) always goes to the
-        # operation log so "Show operation log" has more than the bare text.
+        # Preserve the same diagnostic in the visible summary and operation log.
+        # Transport messages contain categories/codes, never raw proxy credentials.
         print("Phoenix image list check failed: {}: {}".format(
             type(error).__name__, error), flush=True)
         if code == "check-canceled":
@@ -551,6 +552,10 @@ def _load_chooser(hosted):
                 catalog = hosted.cached_catalog(cache_dir=cache_dir, error=code)
             except Exception:
                 catalog = None
+    elif saved_error := getattr(catalog, "error", None):
+        # A valid saved list may accompany a failed network request. Keep that
+        # cause in Copy details even if the user cancels the image chooser.
+        print("Phoenix image list check failed: " + str(saved_error), flush=True)
     try:
         local = tuple(hosted.local_hosted_images(updates_dir))
         legacy = Path.cwd() / "updates"

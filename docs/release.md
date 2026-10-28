@@ -32,6 +32,18 @@ its embedded interpreter rather than silently falling back to dfu-util.
 `run.ps1` keeps its USB algorithm; one manual-help string now parses on both
 Windows PowerShell 5.1 and PowerShell 7.
 
+## HTTPS trust in frozen apps
+
+The generated PyInstaller spec includes `runtime/assets/ca/cacert.pem`, copied
+from pinned certifi 2026.10.19 **before** manifest creation and freezing, plus its
+license and hash-checked source archive. It does not rely on the build Mac's
+Homebrew CA directory or a system `curl`. The actual hosted urllib transport
+loads those roots with certificate and hostname verification enabled; default
+OpenSSL roots remain available for explicitly configured managed networks.
+`--self-check` now loads that same context offline and requires CA certificates.
+The mounted-DMG check therefore detects a missing/broken CA file without internet
+or USB. It does not prove internet reachability, proxy compatibility or a flash.
+
 ## Windows authorization (release EXE only)
 
 The Windows EXE does **not** run source `run.sh`. Its former route was
@@ -142,8 +154,9 @@ Consent questions are embedded in that same window, with **What happens** and
 **How long** explanations. Private Linux uses **Set it up** / **Not now**; Windows
 Linux-support and USB-support installation use **Install** / **Not now**. The safe
 default is **Not now**, and closing a question is a refusal, never approval. A
-pending question restores the window, keeps it on top, flashes the taskbar button
-when unfocused and sounds a reminder about once a minute. **Waiting for you**
+pending question can restore the window once and flashes its taskbar button for
+reminders. The window is never TopMost and never takes focus from the Windows
+prompt or installer it is waiting on. **Waiting for you**
 instead explains a Windows permission prompt, installer or requested restart;
 waiting for a person is not a setup stall.
 
@@ -177,13 +190,71 @@ and the built EXE's PE subsystem. A stopped USB watcher still shows a failure di
 and lets you close the GUI when safe, rather than terminating a possible transfer.
 Normal close removes session/readiness markers and stops both USB helpers; GUI exit
 codes are retained. Native Windows status-window and console-free process probes run
-in CI; real WSL/UAC/desktop integration still needs the owner retest.
+in CI; check WSL, UAC and desktop integration on a Windows PC.
 
 To remove the private Linux, run `wsl --unregister Jibo-DFU-Toolkit` in PowerShell.
 **This deletes its entire Linux filesystem**, including backups saved inside it.
 Copy anything you need to Windows first. Other distributions are not removed.
 
 Windows helpers are embedded only in the Windows EXE. Source Linux and macOS launchers retain their existing behavior.
+
+## WSL prerequisite detection
+
+The release launcher watches the output of its read-only `wsl.exe --version`
+probe while it runs. On PCs without WSL, the Windows stub can print that WSL is
+not installed and then wait for keyboard input; waiting for process exit first
+turned that message into a 30-second stall. Setup now stops only that probe when
+it emits installation/update advice and presents the existing **Install** /
+**Not now** question. It sends no keystroke, starts no installer before consent,
+and never treats a silent/unrecognized timeout as proof that WSL is absent.
+Both stdout and stderr are drained; UTF-16LE's NULs are removed before matching
+WSL's invariant `wsl.exe --install` / `wsl.exe --update` command spelling. The
+probe stores at most 16 KiB per stream. A stopped probe has a null exit code,
+not an invented Windows error code, and the log records `setup-required`.
+Healthy WSL continues through the existing version, distribution and GUI checks.
+
+After consent, setup runs elevated `wsl.exe --install --no-distribution` (no
+Ubuntu/account wizard). A detected missing/incomplete runtime stops after that
+installation and asks the user to **save work, restart Windows, then reopen the
+same EXE**. The toolkit does not restart the PC or add an automatic startup task.
+It rechecks WSL on reopening and continues normal Linux selection/setup. No USB
+handoff, distro import or WSL update is attempted before that restart. Exit 3010
+is also a restart request, not an installation failure. This matters even with
+exit 0: `WslClient.cpp::Install` prints the reboot-required message but returns 0.
+An explicit `wsl.exe --update` diagnostic runs **only** elevated `--update`,
+then uses the same restart/reopen boundary; it never substitutes a potentially
+no-op install for a required update. The existing installed-runtime upgrade path
+without a stub diagnostic still runs `--update` unless the preceding install
+requests a restart. A failed install retains its actual status
+and the setup window's **Copy details** / **Open log folder** actions.
+
+Evidence and limits:
+
+- [Microsoft's commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
+  document `--version`, `--status` and `--install --no-distribution`. `--status`
+  is not an absence-only test; failures can also mean a broken installed runtime.
+- [Microsoft's interop guidance](https://learn.microsoft.com/en-us/windows/dev-environment/wsl-interop)
+  documents a nonzero exit and diagnostic when WSL is absent, not one unique
+  numeric exit code. Do not equate every nonzero result with missing WSL.
+- The open-source WSL revision
+  [`aa3fe884134b9c2d14232214c3ad47ee6fcb0214`](https://github.com/microsoft/WSL/tree/aa3fe884134b9c2d14232214c3ad47ee6fcb0214)
+  has a one-minute keypress wait in `src/windows/common/install.cpp`
+  (`PromptForKeyPressWithTimeout`, used for MSI repair). `WslClient.cpp::Main`
+  returns -1 for many exceptions, not just missing components. That repository
+  does not establish the exact inbox stub's exit code on every Windows build.
+  [WSL issue 11327](https://github.com/microsoft/WSL/issues/11327) records the
+  Windows install prompt and its 60-second timeout. The implementation does not
+  depend on that timeout or a particular missing-WSL numeric code.
+
+Portable regression controls (no WSL, install, UAC or USB access):
+
+```powershell
+powershell -NoProfile -File scripts/release/test-console.ps1 -Case wsl-prerequisite
+powershell -NoProfile -File scripts/release/test-bootstrap.ps1 -Scenario 'wsl-*'
+```
+
+PowerShell Core on Linux exercises fixtures only. Use Windows PowerShell 5.1 on
+a fresh Windows PC to check UAC, installation, restart/resume and the final EXE.
 
 ## Run a build without a release
 
@@ -205,10 +276,10 @@ Windows-build input, not a user download.
    hosts and a Jibo. CI is not a USB acceptance test. Do not ship a known-broken platform.
 2. Pick the version, then from your reviewed clean checkout:
    ```sh
-   git tag -a v1.0.3 -m 'Jibo DFU Toolkit v1.0.3'
-   git push origin v1.0.3
+   git tag -a v1.0.4 -m 'Jibo DFU Toolkit v1.0.4'
+   git push origin v1.0.4
    ```
-   Only maintainers perform these commands; the build agent must not create tags.
+   Only maintainers create release tags.
 3. Wait for every build and the aggregate job to pass. The tag job creates a
    **DRAFT** release and uploads all files. It never publishes it. A rerun refuses
    to touch an already published release.
@@ -279,4 +350,4 @@ steps are configured. Builds are unsigned for distribution. PyInstaller performs
 its standard local Mach-O preparation, including the ad-hoc metadata required by
 Apple silicon; this is not Developer ID signing or notarization. Future signing
 would plug in after freezing the Windows executable/Mac app and before DMG packing,
-artifact hashing and smoke testing. Add it only after a separate owner decision.
+artifact hashing and smoke testing. Add it only after a separate maintainer decision.

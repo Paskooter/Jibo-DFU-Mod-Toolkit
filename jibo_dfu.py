@@ -439,9 +439,126 @@ def shofel_dfu_available():
         return False
 
 
+_SHOFEL_LAUNCH_LINE = "Starting verified ARM-state SPL at 0x80108000."
+_SHOFEL_RAMINIT_PHASES = (
+    "payload entry", "PMC STRAPPING_OPT_A", "RAM_CODE", "board profile gate",
+    "before SDRAM init", "after SDRAM init", "DRAM size MiB", "required DRAM range flags",
+    "DRAM scratch word 0", "DRAM scratch word 1", "DRAM scratch word 2", "DRAM scratch word 3",
+    "DRAM scratch restore flags", "blocked", "complete",
+)
+
+
+def _entry_helper_transcript(output):
+    """Keep only complete, known helper records; never USB serials or chip IDs."""
+    lines = []
+    for line in output.splitlines():  # Staging progress is separated by carriage returns.
+        phase = re.fullmatch(r"RAMINIT phase ([0-9]{1,2}) \(([^()]*)\): 0x[0-9a-fA-F]{8}", line)
+        if phase:
+            index = int(phase[1])
+            if index < len(_SHOFEL_RAMINIT_PHASES) and phase[2] == _SHOFEL_RAMINIT_PHASES[index]:
+                lines.append(line)
+        elif (re.fullmatch(r"Pinned loader validated: [0-9]{1,10} bytes, SHA-256 [0-9a-f]{64}", line) or
+              re.fullmatch(r"Staged [0-9]{1,10} / [0-9]{1,10} bytes", line) or
+              line == "Loader copied to 0x80108000 and verified by SHA-256 readback." or
+              line == _SHOFEL_LAUNCH_LINE):
+            lines.append(line)
+    return tuple(lines)
+
+
+_ENTRY_USB_PATH = re.compile(r"(?:[0-9]+-[0-9]+(?:\.[0-9]+)*|usb[0-9]+)")
+
+
+def _entry_usb_snapshot(found, root=None):
+    """Read only public USB IDs/topology, not names, serials or descriptors."""
+    snapshot: set[tuple[str, str, str]] = {
+        (RCM[0], RCM[1] if device["state"] == "rcm" else DFU[1], device["port"])
+        for device in found if device["state"] in ("rcm", "dfu")
+        and _ENTRY_USB_PATH.fullmatch(device["port"])}
+    if root is not None or sys.platform.startswith("linux"):
+        root = Path(root) if root is not None else Path("/sys/bus/usb/devices")
+        for path in root.glob("*"):
+            if not _ENTRY_USB_PATH.fullmatch(path.name):
+                continue
+            try:
+                pair = tuple((path / name).read_text().strip().lower()
+                             for name in ("idVendor", "idProduct"))
+            except OSError:
+                continue  # A disconnect can race the snapshot.
+            if all(re.fullmatch(r"[0-9a-f]{4}", value) for value in pair):
+                snapshot.add((pair[0], pair[1], path.name))
+    return sorted(snapshot)
+
+
+def _entry_record_usb(trace, found):
+    trace["polls"] += 1
+    elapsed = time.monotonic() - trace["started"]
+    for device in _entry_usb_snapshot(found):
+        first, _ = trace["seen"].get(device, (elapsed, elapsed))
+        trace["seen"][device] = (first, elapsed)
+
+
+def _entry_support_details(transcript, trace, code, stage, dfu_port=None):
+    revision = "unavailable (source or unstamped build)"
+    for folder in (ROOT, Path(getattr(sys, "_MEIPASS", ROOT)) / "runtime"):
+        try:
+            candidate = json.loads((folder / "release-manifest.json").read_text())["revision"]
+            if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate):
+                revision = candidate
+                break
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    before_dfu = {device["port"] for device in trace["before"] if device["state"] == "dfu"}
+    lines = ["Details for support", "Code: " + code, "Reference: " + trace["reference"],
+             "Stage: " + stage, "Wait started (UTC): " + trace["utc"],
+             "Wait ended (UTC): " + _utc_now(),
+             "Elapsed: {:.3f}s; limit: {:.3f}s".format(time.monotonic() - trace["started"], trace["timeout"]),
+             "APX path before launch: " + trace["port"],
+             "DFU path selected: " + (dfu_port or "none"),
+             "DFU devices before launch: " + str(len(before_dfu)),
+             "New DFU paths: " + str(len(trace["dfu"] - before_dfu)),
+             "USB snapshots: " + str(trace["polls"]),
+             "Toolkit build: " + revision,
+             "Python: {}.{}.{}".format(*sys.version_info[:3]),
+             "Helper capability: dfu-stage-launch=1",
+             "USB devices seen during wait: " + str(len(trace["seen"]))]
+    for (vid, pid, port), (first, last) in sorted(trace["seen"].items()):
+        lines.append("  {}:{} path={} first=+{:.3f}s last=+{:.3f}s".format(vid, pid, port, first, last))
+    if not trace["seen"]:
+        lines.append("  (none observed)")
+    lines += ["First/last times are offsets from wait start; brief USB appearances between snapshots can be missed.",
+              "Helper transcript (allowlisted):", *transcript]
+    return "\n".join(lines)
+
+
+def _entry_dfu_candidate(found, port, before, seen_dfu, other_rcm):
+    """Keep a path match; only infer a moved device from an unambiguous handoff."""
+    dfu = [device for device in found if device["state"] == "dfu"]
+    seen_dfu.update(device["port"] for device in dfu)
+    other_rcm.update(device["port"] for device in found
+                     if device["state"] == "rcm" and device["port"] != port)
+    current = select_device(found, port)
+    if current and current["state"] == "dfu":
+        return current  # The original same-path rule does not guess between devices.
+    if not dfu:
+        return None
+    reason = None
+    if any(device["state"] == "dfu" for device in before):
+        reason = "a DFU device was already connected before the launch"
+    elif len(seen_dfu) != 1:
+        reason = "more than one new DFU path appeared after the launch"
+    elif other_rcm:
+        reason = "another RCM/APX device was connected during this entry"
+    if reason:
+        raise DfuError("Cannot safely choose DFU on another USB port: " + reason +
+                       ". Disconnect other recovery devices, then try Enter DFU again. "
+                       "No partition operation was attempted.")
+    # Do not mistake another device for the target while its APX is still visible.
+    return dfu[0] if current is None else None
+
+
 def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
                      timeout=120, confirm_meerkat_rev02=False):
-    """Start the pinned RAM loader through ShofEL, then confirm DFU on the same port."""
+    """Start the pinned RAM loader, then find and verify its DFU device."""
     if not confirm_meerkat_rev02:
         raise DfuError("Confirm the Meerkat Rev02 SDRAM profile before entering DFU through ShofEL.")
     if not 0 < timeout <= 600:
@@ -451,7 +568,8 @@ def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
     if image.is_symlink() or not image.is_file():
         raise DfuError("Missing or symlinked RAM DFU loader image: " + str(image))
     image = image.resolve()
-    selected = select_device(devices(), port)
+    before = devices()
+    selected = select_device(before, port)
     if selected is None or selected["state"] != "rcm":
         raise DfuError("Connect the robot in RCM/APX before entering DFU through ShofEL.")
     port = selected["port"]
@@ -461,21 +579,68 @@ def enter_shofel_dfu(port=None, shofel=None, loader=None, dfu_util=None,
          "--confirm-meerkat-rev02", "--launch"],
         timeout=180, label="Loading the RAM DFU program", cwd=str(Path(executable).parent),
         byte_progress=True)
-    if "Starting verified ARM-state SPL at 0x80108000." not in output:
+    transcript = _entry_helper_transcript(output)
+    if transcript:
+        print("RAM loader helper details (allowlisted):\n" + "\n".join(transcript), flush=True)
+    if _SHOFEL_LAUNCH_LINE not in transcript:
         raise DfuError("ShofEL did not confirm the loader launch.")
 
-    print("Waiting for DFU on USB port " + port + "…", flush=True)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        current = select_device(devices(), port)
-        if current and current["state"] == "dfu":
-            names, _ = _settled_dfu_alternatives(dfu_util, port, deadline=deadline)
-            return {"port": port, "state": "dfu", "already_running": False,
-                    "loader_verified": True, "alternatives": names,
-                    "entry_transport": "ShofEL"}
-        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
-    raise DfuError("The RAM loader started, but DFU did not appear on USB port " +
-                   port + ". Check USB forwarding and the robot's connection.")
+    started = time.monotonic()
+    trace = {"started": started, "utc": _utc_now(), "timeout": timeout, "port": port,
+             "before": before, "dfu": set(), "seen": {}, "polls": 0,
+             "reference": "dfu-" + secrets.token_hex(6)}
+    print("Waiting for DFU (previous USB port " + port + "; watching all USB paths)…\n"
+          "Reference: " + trace["reference"], flush=True)
+    deadline = started + timeout
+    next_report = started + 5
+    other_rcm = {device["port"] for device in before
+                 if device["state"] == "rcm" and device["port"] != port}
+    code, stage, dfu_port = "DFU-WAIT-USB", "dfu-usb-wait", None
+
+    def poll():
+        nonlocal code, stage
+        code, stage = "DFU-WAIT-USB", "dfu-usb-wait"
+        found = devices()
+        _entry_record_usb(trace, found)
+        code = "DFU-WAIT-CHOICE"
+        return _entry_dfu_candidate(found, port, before, trace["dfu"], other_rcm)
+
+    try:
+        while time.monotonic() < deadline:
+            current = poll()
+            if current:
+                dfu_port = current["port"]
+                code, stage = "DFU-WAIT-PROFILE", "dfu-profile-check"
+                print("DFU appeared on USB port " + dfu_port + ". Checking the recovery loader…", flush=True)
+                names, _ = _settled_dfu_alternatives(dfu_util, dfu_port, deadline=deadline)
+                if dfu_port != port:
+                    # Settling can take seconds: fail closed if another device arrived meanwhile.
+                    checked = poll()
+                    if checked is None or checked["port"] != dfu_port:
+                        dfu_port = None
+                        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+                        continue
+                details = _entry_support_details(transcript, trace, "DFU-ENTRY-READY", "dfu-ready", dfu_port)
+                print(details, flush=True)
+                return {"port": dfu_port, "state": "dfu", "already_running": False,
+                        "loader_verified": True, "alternatives": names,
+                        "entry_transport": "ShofEL", "helper_transcript": transcript,
+                        "support_details": details}
+            if time.monotonic() >= next_report:
+                print("Waiting for DFU: {:.0f}s of {:g}s; {} USB snapshots, {} devices seen.".format(
+                    time.monotonic() - started, timeout, trace["polls"], len(trace["seen"])), flush=True)
+                next_report = time.monotonic() + 5
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        code, stage = "DFU-WAIT-TIMEOUT", "dfu-usb-wait"
+        observed = ("DFU appeared, but a safe handoff from RCM/APX was not confirmed. " if trace["dfu"] else
+                    "DFU did not appear in the toolkit. ")
+        raise DfuError("The helper confirmed the RAM loader launch, but the wait ended after {:g}s. ".format(timeout) +
+                       observed + "Check the USB cable and USB forwarding, then try Enter DFU again. "
+                       "No partition operation was attempted. Copy Details for support from Show operation log.")
+    except DfuError as exc:
+        details = _entry_support_details(transcript, trace, code, stage, dfu_port)
+        print(details, flush=True)
+        raise DfuError(str(exc) + "\n\n" + details) from exc
 
 
 def dfu_alternatives(executable, port):

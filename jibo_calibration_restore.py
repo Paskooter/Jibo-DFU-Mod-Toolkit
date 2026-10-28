@@ -80,6 +80,7 @@ def build_fresh_var(stock, identity_image, destination, files, core=None):
             for key, data in files.items():
                 if images._extract(destination, specs[key].image_path, Path(temporary) / "readback") != data:
                     raise ClientError("Calibration offline readback did not match.")
+        images._rearm_first_boot_resize(destination)
         images._check_ext4(destination)
         if destination.stat().st_size != stock.stat().st_size:
             raise ClientError("Fresh calibration image changed length.")

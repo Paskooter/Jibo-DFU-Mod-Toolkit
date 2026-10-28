@@ -248,6 +248,27 @@ def notices(licenses, entry, revision):
         'python': sys.version, 'pyinstaller': PyInstaller.__version__}, indent=2) + '\n')
 
 
+def bundle_ca_certificates(runtime, licenses):
+    """Stage Mozilla roots explicitly; OpenSSL's CI prefix is not portable."""
+    import certifi
+    import importlib.metadata
+    import ssl
+    package = importlib.metadata.distribution('certifi')
+    if package.version != '2026.10.19':
+        raise RuntimeError('Unexpected certifi version')
+    destination = runtime / 'assets/ca/cacert.pem'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(certifi.where(), destination)
+    if not ssl.create_default_context(cafile=str(destination)).cert_store_stats()['x509_ca']:
+        raise RuntimeError('Bundled CA certificates are empty')
+    license_file = next(file for file in package.files or ()
+                        if str(file).endswith('.dist-info/licenses/LICENSE'))
+    shutil.copy2(str(package.locate_file(license_file)), licenses / 'certifi-LICENSE')
+    download('https://files.pythonhosted.org/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2/certifi-2026.10.19.tar.gz',
+             licenses / 'certifi-2026.10.19.tar.gz',
+             '035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae')
+
+
 def entry_build_env(prefix):
     env = os.environ.copy()
     env['LD_LIBRARY_PATH'] = str(prefix / 'lib')
@@ -319,6 +340,7 @@ def native(architecture):
     for path in ROOT.glob('jibo*.py'):
         shutil.copy2(path, runtime / path.name)
     shutil.copytree(ROOT / 'assets', runtime / 'assets')
+    bundle_ca_certificates(runtime, licenses)
     shutil.copy2(ROOT / 'assets/loader.bin', runtime / 'loader.bin')
     shutil.copy2(ROOT / 'tests/gui_fakes.py', runtime / 'gui_fakes.py')
     shutil.copy2(ROOT / 'scripts/release/manifest.py', runtime / 'manifest.py')

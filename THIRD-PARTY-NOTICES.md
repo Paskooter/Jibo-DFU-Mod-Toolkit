@@ -51,4 +51,6 @@ redistributed inside the Windows executable.
 
 ## Hosted image verification
 
+Certifi 2026.10.19 supplies Mozilla CA certificates for HTTPS transport. Its MPL-2.0 license and pinned source archive accompany the bundled `assets/ca/cacert.pem`.
+
 Cryptography 46.0.3 provides Ed25519 verification in the native bundles. Its Apache-2.0/BSD-3-Clause terms, bundled dependency notices and source archive are included in the runtime license directory and corresponding-source download.

@@ -33,7 +33,7 @@ def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
 
 
 @pytest.mark.parametrize('case', [
-    'setup-questions', 'setup-wait-behind', 'support-not-topmost', 'setup-feedback', 'setup-stalls', 'installer-wait', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
+    'setup-questions', 'setup-wait-behind', 'support-not-topmost', 'setup-feedback', 'setup-stalls', 'wsl-prerequisite', 'installer-wait', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',
     'gui-start-failed', 'cleanup-failed', 'monitor-prompt', 'terminal-failed', 'hide-fallback',
     'watcher-exit-race', 'monitor-exit-race', 'gui-handle', 'watcher-handle', 'gui-code-unavailable', 'window-copy', 'window-missing', 'display-copy-preflight', 'display-copy-repaired',
