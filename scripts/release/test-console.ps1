@@ -1,6 +1,16 @@
 # Synthetic console/WSL lifecycle; never invokes Win32, WSL, installers or USB.
 param([string]$BootstrapPath = (Join-Path $PSScriptRoot 'bootstrap.ps1'), [string]$Case = 'classic')
 $ErrorActionPreference = 'Stop'
+function Wait-ToolkitFixtureInteraction([string]$Kind, [double]$TimeoutSeconds = 5, [scriptblock]$ReadEvents = { [ToolkitSetupStatus]::DrainEvents() }) {
+    # Observe the UI queue, not a presumed number of 100 ms timer ticks. A busy
+    # native runner can delay a healthy tick past the old 300/500 ms sleeps.
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        if (@(& $ReadEvents | Where-Object Kind -eq $Kind).Count) { return }
+        if ($deadline.Elapsed.TotalSeconds -ge $TimeoutSeconds) { throw "Real UI timer $Kind deadline expired after $TimeoutSeconds seconds" }
+        Start-Sleep -Milliseconds 25
+    }
+}
 if ($Case -eq 'setup-questions') {
     . (Join-Path (Split-Path $BootstrapPath) 'console.ps1')
     $source = [IO.File]::ReadAllText((Join-Path (Split-Path $BootstrapPath) 'console.ps1'))
@@ -28,8 +38,7 @@ if ($Case -eq 'setup-questions') {
             $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
             $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
             $model.Begin('Reminder fixture', $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
-            Start-Sleep -Milliseconds 300
-            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'question-reminder').Count -lt 1) { throw 'Real UI timer did not remind' }
+            Wait-ToolkitFixtureInteraction -Kind question-reminder
             [ToolkitSetupStatus]::AnswerQuestion('closed')
             if ([ToolkitSetupStatus]::QuestionPending -or [ToolkitSetupStatus]::LastAnswer -ne 'closed' -or $view.Title.Text -ne 'You closed the question' -or $view.Description.Text -notmatch 'counts as') { throw 'Closed question state/text was lost' }
             [ToolkitSetupStatus]::UserWait($true, 'Waiting for you: approve Windows. Look for a flashing shield icon on the taskbar.')
@@ -303,8 +312,7 @@ if ($Case -eq 'setup-wait-behind') {
             # Fire the 60-second wait reminder now (real UI timer, back-dated clock).
             $clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
             [ToolkitSetupStatus].GetField('lastExternalAttention',$flags).SetValue($null, $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
-            Start-Sleep -Milliseconds 500
-            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'user-wait-reminder').Count -lt 1) { throw 'Real UI timer did not send the wait reminder' }
+            Wait-ToolkitFixtureInteraction -Kind user-wait-reminder
             if ($window.TopMost -or [ToolkitZOrderFixture]::TopMostStyle($setup)) { throw 'The wait reminder made the setup window TopMost' }
             if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'The wait reminder put the setup window in front of the installer' }
             if ($foreground -eq [ToolkitZOrderFixture]::Installer -and [ToolkitZOrderFixture]::GetForegroundWindow() -ne $foreground) { throw 'The wait reminder took the focus from the installer' }
@@ -322,8 +330,7 @@ if ($Case -eq 'setup-wait-behind') {
             if (-not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'Another window could not come in front of a question' }
             $model = [ToolkitSetupStatus].GetField('question',$flags).GetValue($null)
             $model.Begin('Set up Linux?', $clock.Elapsed.TotalSeconds - [ToolkitQuestionState]::ReminderSeconds - 1)
-            Start-Sleep -Milliseconds 500
-            if (@([ToolkitSetupStatus]::DrainEvents() | Where-Object Kind -eq 'question-reminder').Count -lt 1) { throw 'Real UI timer did not send the question reminder' }
+            Wait-ToolkitFixtureInteraction -Kind question-reminder
             if ($window.TopMost -or -not [ToolkitZOrderFixture]::Above([ToolkitZOrderFixture]::Installer, $setup)) { throw 'The question reminder put the setup window in front' }
             [ToolkitSetupStatus]::AnswerQuestion('closed')
         } finally { [ToolkitZOrderFixture]::Close(); Stop-ToolkitSetup }

@@ -477,6 +477,7 @@ exit $LASTEXITCODE
                 $code = $LASTEXITCODE
             }
             $text = $messages -join "`n"
+            Write-Output "SCENARIO EXIT: $case -> $code"
             $events = @(Get-Content (Join-Path $fixture ($case + '.jsonl')) | ForEach-Object { $_ | ConvertFrom-Json })
             $prompts = @($events | Where-Object { $_.Kind -eq 'prompt' -and $_.Values[0] -notmatch 'Press Enter' })
             $gui = @($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match '/wsl-user-launch.sh|/AppRun' -and $_.Values -contains 'bash' -and $_.Values -notcontains 'display-mode' -and $_.Values -notcontains 'display-detail' })
@@ -504,7 +505,9 @@ exit $LASTEXITCODE
                 }
             }
             if ($case -notlike 'explicit-*') {
-                if ($text -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali') { throw 'tool/custom distro was listed' }
+                # Exact registered names; the observed os-release ID=debian is
+                # useful readiness data, not a selected distro named Debian.
+                if ($text -cmatch 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali') { throw 'tool/custom distro was listed' }
                 if (@($events | Where-Object { $_.Kind -eq 'wsl' -and ($_.Values -join ' ') -match 'NVIDIA-Workbench|docker-desktop|rancher-desktop|podman-machine-default|My-Ubuntu|Debian|Kali' }).Count) { throw 'tool/custom distro was probed/used' }
             }
             $declines = @('nvidia-decline','tool-set-decline','old-ubuntu-decline','nonstandard-decline','no-distro-decline','wrong-os-decline','old-version-decline','wsl1-decline','arm64-decline','musl-decline','root-user','no-wslg-decline')

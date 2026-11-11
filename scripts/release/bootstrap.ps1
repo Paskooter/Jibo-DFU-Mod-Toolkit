@@ -37,18 +37,31 @@ function Native([string[]]$Arguments, [double]$TimeoutSeconds = 0, [switch]$Watc
     if ($TimeoutSeconds -le 0) { $TimeoutSeconds = $policy.Seconds }
     $result = Invoke-ToolkitNative -File "$env:SystemRoot\System32\wsl.exe" -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowWait:$policy.AllowWait -WatchWslSetup:$WatchWslSetup
     if ($result.WslSetupRequired -or $result.ExitCode -ne 0) {
-        $error = New-Object Exception "WSL failed: $($result.StartError) $($result.Output -join ' ')"
+        $message = "WSL failed: $($result.StartError)`n$($result.Output -join "`n")"
+        if ($message -match '\bHCS_E_HYPERV_NOT_INSTALLED\b') {
+            $message += ' WSL could not start its virtual machine. Check Virtual Machine Platform, firmware virtualization and Windows hypervisor configuration; this code alone does not identify which prerequisite is unavailable. Restart Windows after approved prerequisite changes, then reopen the toolkit. Removing an existing Linux is not a prerequisite fix.'
+        }
+        $error = New-Object Exception $message
         $error.Data['ToolkitExitCode'] = $result.ExitCode
+        $error.Data['ToolkitStartError'] = $result.StartError
         if ($result.WslSetupRequired) {
             $error.Data['ToolkitWslSetupRequired'] = $true
             $advice = ($result.Output -join ' ') -replace "`0", ''
             # A runtime explicitly requesting --update is not a fresh install.
-            $error.Data['ToolkitWslUpdateRequired'] = ($advice -match '(?i)\bwsl\.exe[ \t]+--update\b' -and $advice -notmatch '(?i)\bwsl\.exe[ \t]+--install\b')
+            $error.Data['ToolkitWslUpdateRequired'] = ($advice -match '(?i)\bwsl\.exe[ \t]+--update(?=$|[\s''",;:)]|\.(?:\s|$))' -and $advice -notmatch '(?i)\bwsl\.exe[ \t]+--install(?=$|[\s''",;:)]|\.(?:\s|$))')
         }
         if ($result.TimedOut) { $error.Data['ToolkitStall'] = $true }
         throw $error
     }
-    return (($result.Output | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
+    # Data and diagnostics travel on separate pipes. Keep compatibility with
+    # older injected capture adapters that expose only combined Output.
+    $data = if ($result.PSObject.Properties['Stdout']) { $result.Stdout } else { $result.Output }
+    $text = (($data | ForEach-Object { $_.ToString() -replace "`0", '' }) -join "`n").Trim()
+    # The same envelope can prefix later id/HOME/wslpath reads as well as
+    # readiness. Normalize at their shared data boundary, never scan for a
+    # convenient valid value among unknown or conflicting records.
+    if ($Arguments -contains '--exec') { return (ConvertFrom-DistributionStdout $text) }
+    return $text
 }
 function ConvertTo-NativeArgumentLine([string[]]$Arguments) {
     # Start-Process joins arrays on Windows. Quote for the native argv parser,
@@ -123,7 +136,10 @@ function Install-PrivateDistribution([string]$Root) {
         Native -Arguments @('--terminate', $name) | Out-Null
         Set-ToolkitStep 'Starting Linux'
         if ((Native -Arguments @('--distribution', $name, '--exec', 'id', '-un')) -cne 'jibo') { throw 'Private Linux did not start as the toolkit user.' }
-        if (-not (Get-DistributionRuntime $name -RequireUbuntu)) { throw 'Private Linux compatibility check failed.' }
+        if (-not (Get-DistributionRuntime $name -RequireUbuntu)) {
+            if ($script:ToolkitReadinessFailure) { throw $script:ToolkitReadinessFailure }
+            throw 'Private Linux compatibility check failed.'
+        }
         Write-Host 'Private Linux is ready. Future launches need no setup download.'
         return $name
     } catch {
@@ -286,46 +302,173 @@ function Invoke-WslGui([string]$Name, [string]$User, [string]$Target, [string]$S
         Remove-Item -LiteralPath $run -Recurse -Force
     }
 }
+function Set-DistributionReadinessFailure([string]$Name, [string]$Check, [string]$Reason, [string]$Detail, $ExitCode = 0, [bool]$TimedOut = $false, [string]$StartError = '', [string]$Observed) {
+    # Checks and detail labels are fixed by the caller, never shell arguments.
+    # Redact before retaining a bounded diagnostic in both support and the log.
+    $detailText = Protect-ToolkitText $Detail
+    if ($detailText.Length -gt 800) { $detailText = $detailText.Substring(0,800) + ' [see command log]' }
+    $observedText = ''
+    if ($PSBoundParameters.ContainsKey('Observed')) {
+        $observedText = Protect-ToolkitText $Observed
+        if ($observedText.Length -gt 400) { $observedText = $observedText.Substring(0,400) + ' [truncated]' }
+        $detailText += ' Observed stdout: ' + (ConvertTo-Json -InputObject $observedText -Compress)
+    }
+    $message = "Linux readiness failed: $Check ($Reason). $detailText Existing Linux files were not removed or changed. Copy the setup support details before making changes."
+    $failure = New-Object Exception $message
+    $failure.Data['ToolkitReadinessCheck'] = $Check
+    $failure.Data['ToolkitExitCode'] = $ExitCode
+    $failure.Data['ToolkitStall'] = $TimedOut
+    $failure.Data['ToolkitStartError'] = Protect-ToolkitText $StartError
+    $script:ToolkitReadinessFailure = $failure
+    $safeName = if (Test-WslDistributionName $Name) { $Name } else { '[invalid name]' }
+    Write-ToolkitLog 'linux-readiness' @{ distro=$safeName; check=$Check; reason=$Reason; result='failed'; exit_code=$ExitCode; timed_out=$TimedOut; start_error=[string]$failure.Data['ToolkitStartError']; observed_stdout=$observedText; error=$message }
+}
+function ConvertFrom-DistributionStdout([string]$Text) {
+    # WSL can prefix even stdout with its own diagnostics. Only this explicit
+    # envelope is distinguishable from the command's records. Keep ALL other
+    # lines, including unknown warnings and conflicting/malformed data, so the
+    # caller's anchored parser refuses rather than finding a convenient value.
+    return (($Text -split "`n" | Where-Object { $_ -cnotmatch '\Awsl: [^\r\n]+\z' }) -join "`n").Trim()
+}
 function Test-CompatibleDistribution([string]$Name) {
+    $script:ToolkitReadinessFailure = $null
     try {
-        $libc = Native -Arguments @('--distribution', $Name, '--exec', 'getconf', 'GNU_LIBC_VERSION')
-        if ($libc -notmatch '^glibc\s+(\d+\.\d+)$') { return $false }
-        return ([version]$Matches[1] -ge [version]'2.35')
-    } catch { if ($_.Exception.Data['ToolkitStall']) { throw }; return $false }
+        $libc = ConvertFrom-DistributionStdout (Native -Arguments @('--distribution', $Name, '--exec', 'getconf', 'GNU_LIBC_VERSION'))
+        $libcVersion = $null
+        if ($libc -cnotmatch '\Aglibc[ \t]+([0-9]+\.[0-9]+)\z' -or -not [version]::TryParse($Matches[1], [ref]$libcVersion)) {
+            Set-DistributionReadinessFailure $Name 'glibc' 'parse' 'getconf GNU_LIBC_VERSION must return one glibc <major.minor> record.' -Observed $libc
+            return $false
+        }
+        if ($libcVersion -lt [version]'2.35') {
+            Set-DistributionReadinessFailure $Name 'glibc' 'version' "getconf GNU_LIBC_VERSION reported $libcVersion; glibc 2.35+ is required."
+            return $false
+        }
+        return $true
+    } catch {
+        $cause = $_.Exception
+        Set-DistributionReadinessFailure $Name 'glibc' 'command' ("getconf GNU_LIBC_VERSION failed. " + $cause.Message) $cause.Data['ToolkitExitCode'] ([bool]$cause.Data['ToolkitStall']) ([string]$cause.Data['ToolkitStartError'])
+        if ($cause.Data['ToolkitStall']) { throw $script:ToolkitReadinessFailure }
+        return $false
+    }
 }
 function Get-DistributionRuntime([string]$Name, [switch]$RequireUbuntu) {
+    $script:ToolkitReadinessFailure = $null
     # No shell interpolation: read distro metadata as data, not executable code.
-    if (-not (Test-WslDistributionName $Name)) { return $null }
+    if (-not (Test-WslDistributionName $Name)) {
+        Set-DistributionReadinessFailure $Name 'distribution-name' 'value' 'The distribution name cannot be passed safely to wsl.exe.' $null
+        return $null
+    }
     try {
         Set-ToolkitStep 'Starting Linux'
         if (-not (Test-CompatibleDistribution $Name)) { return $null }
-        if ((Native -Arguments @('--distribution', $Name, '--exec', 'uname', '-m')) -ne 'x86_64') { return $null }
-        $uid = Native -Arguments @('--distribution', $Name, '--exec', 'id', '-u')
-        if ($uid -notmatch '^[1-9][0-9]*$') { return $null }
-        Native -Arguments @('--distribution', $Name, '--exec', 'test', '-d', '/mnt/wslg') | Out-Null
-        $release = Native -Arguments @('--distribution', $Name, '--exec', 'cat', '/etc/os-release')
-        $os = ''; $version = [version]'0.0'
-        foreach ($line in ($release -split "`n")) {
-            if ($line -match '^ID=["'']?([a-z0-9_-]+)["'']?$') { $os = $Matches[1] }
-            if ($line -match '^VERSION_ID=["'']?([0-9]+\.[0-9]+)["'']?$') { $version = [version]$Matches[1] }
+        $check = 'architecture'; $command = 'uname -m'
+        $architecture = ConvertFrom-DistributionStdout (Native -Arguments @('--distribution', $Name, '--exec', 'uname', '-m'))
+        if ($architecture -cne 'x86_64') {
+            Set-DistributionReadinessFailure $Name $check 'value' 'uname -m must report x86_64.' -Observed $architecture
+            return $null
         }
-        if ($RequireUbuntu -and ($os -cne 'ubuntu' -or $version -lt [version]'22.04')) { return $null }
+        $check = 'default-uid'; $command = 'id -u'
+        $uid = ConvertFrom-DistributionStdout (Native -Arguments @('--distribution', $Name, '--exec', 'id', '-u'))
+        if ($uid -notmatch '^[1-9][0-9]*$') {
+            Set-DistributionReadinessFailure $Name $check 'value' 'id -u must report a non-root default UID (a positive integer).' -Observed $uid
+            return $null
+        }
+        $check = 'wslg'; $command = 'test -d /mnt/wslg'
+        $displayCheck = ConvertFrom-DistributionStdout (Native -Arguments @('--distribution', $Name, '--exec', 'test', '-d', '/mnt/wslg'))
+        if ($displayCheck) {
+            Set-DistributionReadinessFailure $Name $check 'parse' 'test -d /mnt/wslg returned unexpected stdout instead of an empty success result.' -Observed $displayCheck
+            return $null
+        }
+        $check = 'os-release'; $command = 'cat /etc/os-release'
+        $release = ConvertFrom-DistributionStdout (Native -Arguments @('--distribution', $Name, '--exec', 'cat', '/etc/os-release'))
+        $metadata = @{}
+        foreach ($line in ($release -split "`n")) {
+            if ([string]::IsNullOrWhiteSpace($line) -or $line -match '^\s*#') { continue }
+            # Parse complete assignments as data. Never source this file, accept
+            # mismatched quotes, ignore unknown text, or let a later duplicate
+            # key overwrite a conflicting value (even identical duplicates fail).
+            if ($line -cnotmatch '\A([A-Z_][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|''[^'']*''|(?:[^\s"''\\]|\\.)*)\z') {
+                Set-DistributionReadinessFailure $Name 'os-release' 'parse' 'cat /etc/os-release returned a malformed or unrecognized stdout record.' -Observed $line
+                return $null
+            }
+            $key = $Matches[1]; $value = $Matches[2]
+            if ($metadata.ContainsKey($key)) {
+                Set-DistributionReadinessFailure $Name 'os-release' 'parse' 'cat /etc/os-release returned duplicate or conflicting keys.'
+                return $null
+            }
+            if ($value.StartsWith('"') -or $value.StartsWith("'")) { $value = $value.Substring(1,$value.Length - 2) }
+            $metadata[$key] = $value
+        }
+        $os = [string]$metadata['ID']; $version = [version]'0.0'
+        if ($RequireUbuntu -and $os -cnotmatch '\A[a-z0-9_-]+\z') {
+            Set-DistributionReadinessFailure $Name 'ubuntu-id' 'parse' '/etc/os-release has no valid ID record.' -Observed $os
+            return $null
+        }
+        if ($RequireUbuntu -and $os -cne 'ubuntu') {
+            Set-DistributionReadinessFailure $Name 'ubuntu-id' 'value' '/etc/os-release must identify Ubuntu with ID=ubuntu.' -Observed $os
+            return $null
+        }
+        $parsedVersion = $null
+        $hasVersion = ([string]$metadata['VERSION_ID'] -cmatch '\A[0-9]+\.[0-9]+\z' -and [version]::TryParse([string]$metadata['VERSION_ID'], [ref]$parsedVersion))
+        if ($RequireUbuntu -and -not $hasVersion) {
+            Set-DistributionReadinessFailure $Name 'ubuntu-version' 'parse' '/etc/os-release has no valid numeric VERSION_ID (major.minor) record.' -Observed ([string]$metadata['VERSION_ID'])
+            return $null
+        }
+        if ($hasVersion) { $version = $parsedVersion }
+        if ($RequireUbuntu -and $version -lt [version]'22.04') {
+            Set-DistributionReadinessFailure $Name 'ubuntu-version' 'value' "/etc/os-release reported VERSION_ID=$version; Ubuntu 22.04+ is required."
+            return $null
+        }
         return [pscustomobject]@{ Name=$Name; OsVersion=$version }
-    } catch { if ($_.Exception.Data['ToolkitStall']) { throw }; return $null }
+    } catch {
+        $cause = $_.Exception
+        # A glibc stall already carries its exact check and must not be relabeled.
+        if ($cause.Data['ToolkitReadinessCheck']) { throw }
+        Set-DistributionReadinessFailure $Name $check 'command' ("$command failed. " + $cause.Message) $cause.Data['ToolkitExitCode'] ([bool]$cause.Data['ToolkitStall']) ([string]$cause.Data['ToolkitStartError'])
+        if ($cause.Data['ToolkitStall']) { throw $script:ToolkitReadinessFailure }
+        return $null
+    }
 }
 function Select-ToolkitDistribution($Rows, [string]$Requested, [string]$Root) {
     if ($Requested) {
-        $row = @($Rows | Where-Object { $_.Name -ceq $Requested -and $_.Version -eq 2 })
-        if ($row.Count -ne 1) { throw 'Requested distribution is not installed as WSL 2.' }
-        if (-not (Get-DistributionRuntime $Requested)) { throw 'Requested distribution is incompatible: x86_64, glibc 2.35+, WSLg and a non-root default user are required.' }
+        if (-not (Test-WslDistributionName $Requested)) {
+            Set-DistributionReadinessFailure $Requested 'distribution-name' 'value' 'The requested distribution name cannot be passed safely to wsl.exe.' $null
+            throw $script:ToolkitReadinessFailure
+        }
+        $row = @($Rows | Where-Object { $_.Name -ceq $Requested })
+        if ($row.Count -ne 1 -or $row[0].Version -ne 2) {
+            Set-DistributionReadinessFailure $Requested 'wsl2' 'registration' 'Requested distribution is not installed exactly once as WSL 2. Check wsl --list --verbose; no conversion was attempted.' $null
+            throw $script:ToolkitReadinessFailure
+        }
+        if (-not (Get-DistributionRuntime $Requested)) {
+            if ($script:ToolkitReadinessFailure) { throw $script:ToolkitReadinessFailure }
+            throw 'Requested distribution is incompatible: x86_64, glibc 2.35+, WSLg and a non-root default user are required.'
+        }
         return $Requested
     }
     # Never even probe a distro belonging to another product. Names are deliberately
     # narrower than WSL's legal-name rule; only an explicit -Distro overrides this.
-    $candidates = @()
+    $candidates = @(); $privateFailure = $null; $lastFailure = $null
+    $privateRows = @($Rows | Where-Object { $_.Name -ceq 'Jibo-DFU-Toolkit' })
+    if ($privateRows.Count -and ($privateRows.Count -ne 1 -or $privateRows[0].Version -ne 2)) {
+        Set-DistributionReadinessFailure 'Jibo-DFU-Toolkit' 'wsl2' 'registration' 'The private Linux is not installed exactly once as WSL 2. Check wsl --list --verbose; no conversion was attempted.' $null
+        $privateFailure = $script:ToolkitReadinessFailure
+    }
+    $seenNames = @{}
     foreach ($row in $Rows) {
-        if ($row.Version -ne 2 -or ($row.Name -cne 'Jibo-DFU-Toolkit' -and $row.Name -cnotmatch '^Ubuntu(-[0-9]{2}\.[0-9]{2})?$')) { continue }
+        if ($row.Name -cne 'Jibo-DFU-Toolkit' -and $row.Name -cnotmatch '^Ubuntu(-[0-9]{2}\.[0-9]{2})?$') { continue }
+        if ($seenNames.ContainsKey($row.Name)) { continue }
+        $seenNames[$row.Name] = $true
+        if ($row.Name -ceq 'Jibo-DFU-Toolkit' -and $privateFailure) { continue }
+        $registration = @($Rows | Where-Object { $_.Name -ceq $row.Name })
+        if ($registration.Count -ne 1 -or $row.Version -ne 2) {
+            Set-DistributionReadinessFailure $row.Name 'wsl2' 'registration' 'The Linux distribution is not installed exactly once as WSL 2. Check wsl --list --verbose; no conversion was attempted.' $null
+            $lastFailure = $script:ToolkitReadinessFailure
+            continue
+        }
         $runtime = Get-DistributionRuntime $row.Name -RequireUbuntu
+        if (-not $runtime -and $script:ToolkitReadinessFailure) { $lastFailure = $script:ToolkitReadinessFailure }
+        if ($row.Name -ceq 'Jibo-DFU-Toolkit') { $privateFailure = $script:ToolkitReadinessFailure }
         if ($runtime) {
             if ($row.Name -ceq 'Jibo-DFU-Toolkit') { return $row.Name }
             $candidates += [pscustomobject]@{ Name=$row.Name; OsVersion=$runtime.OsVersion; Default=$row.Default }
@@ -333,10 +476,19 @@ function Select-ToolkitDistribution($Rows, [string]$Requested, [string]$Root) {
     }
     $ordered = @($candidates | Sort-Object @{Expression='Default'; Descending=$true}, @{Expression='OsVersion'; Descending=$true}, Name)
     if ($ordered.Count) { return $ordered[0].Name }
-    if (@($Rows | Where-Object { $_.Name -ceq 'Jibo-DFU-Toolkit' }).Count) {
-        throw 'The private Linux is not ready. To remove it and its Linux files, run: wsl --unregister Jibo-DFU-Toolkit. Then reopen the toolkit to set it up again.'
+    if ($privateRows.Count) {
+        if ($privateFailure) { throw $privateFailure }
+        throw 'The private Linux is not ready. Its Linux files were not removed or changed. Copy the setup support details before making changes.'
     }
-    if (-not (Confirm-Setup 'Set up a private Linux for the toolkit? One-time download of about 345 MB. No Linux account or password needed.')) { throw 'Distribution setup declined. No download or import was attempted.' }
+    if (-not (Confirm-Setup 'Set up a private Linux for the toolkit? One-time download of about 345 MB. No Linux account or password needed.')) {
+        $message = 'Distribution setup declined. No download or import was attempted.'
+        if ($lastFailure) {
+            $failure = New-Object Exception ($message + ' ' + $lastFailure.Message)
+            foreach ($key in $lastFailure.Data.Keys) { $failure.Data[$key] = $lastFailure.Data[$key] }
+            throw $failure
+        }
+        throw $message
+    }
     return (Install-PrivateDistribution -Root $Root)
 }
 try {

@@ -32,6 +32,74 @@ def test_bootstrap_harness_stubs_native_dialogs_in_both_child_processes():
     assert source.count('public static int MessageBox') == 2
 
 
+@pytest.mark.parametrize('reminder', ['question', 'wait', 'question-behind'])
+def test_question_reminder_fixture_observes_delayed_event(tmp_path, reminder):
+    """Owned scheduler control, not a native Windows UI or CI40 diagnosis."""
+    import shutil
+    pwsh = os.environ.get('PWSH') or shutil.which('pwsh') or shutil.which('powershell.exe')
+    if not pwsh:
+        pytest.skip('requires PowerShell')
+    fixture = ROOT / 'scripts/release/test-console.ps1'
+    assert pwsh is not None
+    source = fixture.read_text()
+    # Execute the real reminder assertion from the Windows fixture against an
+    # event source whose first tick is delayed past the old 300/500 ms sleeps.
+    if reminder == 'question':
+        assertion = source.split('# Advance the real question', 1)[1].split(
+            "[ToolkitSetupStatus]::AnswerQuestion('closed')", 1)[0]
+    elif reminder == 'wait':
+        assertion = source.split('# Fire the 60-second wait reminder', 1)[1].split('if ($window.TopMost', 1)[0]
+    else:
+        assertion = source.split('# reminder must not take the front again.', 1)[1].split(
+            "$model = [ToolkitSetupStatus]", 1)[1].split('if ($window.TopMost', 1)[0]
+        assertion = '\n$model = [ToolkitSetupStatus]' + assertion
+    assertion = assertion.split('\n', 1)[1]
+    kind = 'user-wait-reminder' if reminder == 'wait' else 'question-reminder'
+    script = tmp_path / 'reminder-delay.ps1'
+    script.write_text(r"""
+$ErrorActionPreference = 'Stop'
+. '""" + str(ROOT / 'scripts/release/console.ps1').replace("'", "''") + r"""'
+Add-Type -TypeDefinition ($script:ToolkitQuestionModelSource + @'
+public static class ToolkitSetupStatus {
+    static readonly ToolkitQuestionState question = new ToolkitQuestionState();
+    static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+    static int elapsed;
+    static double lastExternalAttention = 0;
+    public static int Reads;
+    public static string Kind;
+    public static void Advance(int ms) { elapsed += ms; }
+    public static ToolkitInteractionEvent[] DrainEvents() {
+        Reads++;
+        if (elapsed >= 600 && lastExternalAttention <= clock.Elapsed.TotalSeconds &&
+            (Kind == "user-wait-reminder" || question.Remind(clock.Elapsed.TotalSeconds)))
+            return new[] { new ToolkitInteractionEvent(Kind, "Synthetic delayed tick") };
+        return new ToolkitInteractionEvent[0];
+    }
+}
+'@)
+function Start-Sleep { param([int]$Milliseconds); [ToolkitSetupStatus]::Advance($Milliseconds) }
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile('""" + str(fixture).replace("'", "''") + r"""', [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+foreach ($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Wait-ToolkitFixtureInteraction'}, $true)) { Invoke-Expression $f.Extent.Text }
+$flags = [Reflection.BindingFlags]'Static,NonPublic'
+$clock = [ToolkitSetupStatus].GetField('clock',$flags).GetValue($null)
+[ToolkitSetupStatus]::Kind = '""" + kind + r"""'
+""" + assertion + r"""
+if ([ToolkitSetupStatus]::Reads -lt 2) { throw 'Did not wait for an observed timer event' }
+$refused = $false
+try { Wait-ToolkitFixtureInteraction -Kind question-reminder -TimeoutSeconds 0.03 -ReadEvents { @() } }
+catch { if ($_.Exception.Message -notmatch 'question-reminder.*deadline') { throw }; $refused = $true }
+if (-not $refused) { throw 'A permanently missing reminder was accepted' }
+'PASS deterministic reminder: delayed 600 ms event observed; absent event refused'
+""")
+    result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(script)],
+                            capture_output=True, text=True,
+                            env={**os.environ, 'TMPDIR': str(tmp_path)}, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS deterministic reminder' in result.stdout
+
+
 @pytest.mark.parametrize('case', [
     'setup-questions', 'setup-wait-behind', 'support-not-topmost', 'setup-feedback', 'setup-stalls', 'wsl-prerequisite', 'installer-wait', 'setup-download', 'native-status', 'native-command', 'classic', 'terminal', 'gui-success', 'gui-failed', 'never-ready',
     'watcher-failed', 'monitor-failed', 'show-console', 'setup-decline',

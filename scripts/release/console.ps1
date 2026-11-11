@@ -502,8 +502,14 @@ public static class ToolkitSetupText {
         ToolkitFailureText f;
         if (text.StartsWith("WSL setup declined."))
             f = F("info", "Setup stopped", declined + " Windows\u2019 Linux support was not installed, and nothing was changed.", "Open the toolkit again when you are ready to install it.");
-        else if (text.StartsWith("Distribution setup declined."))
+        else if (text.StartsWith("Distribution setup declined.")) {
             f = F("info", "Setup stopped", declined + " Nothing was downloaded or installed.", "Open the toolkit again whenever you are ready to set up the toolkit\u2019s Linux.");
+            int readinessAt = text.IndexOf("Linux readiness failed:", System.StringComparison.Ordinal);
+            if (readinessAt >= 0) {
+                f.What += " " + text.Substring(readinessAt);
+                f.Try = "Keep your existing Linux and its files. Use Copy details to share the failed check with support before changing anything.";
+            }
+        }
         else if (text.StartsWith("USB setup declined."))
             f = F("info", "Setup stopped", declined + " USB support was not installed.", "The toolkit needs USB support to talk to Jibo. Open the toolkit again when you are ready to install it.");
         else if (text.StartsWith("WSL setup requested. Restart Windows,"))
@@ -542,9 +548,12 @@ public static class ToolkitSetupText {
             f = F("error", "The download was damaged", "The downloaded Ubuntu file did not match the official one, so it was not used. Nothing was installed.", "Open the toolkit again to download it again.");
         else if (text.StartsWith("Ubuntu download failed"))
             f = F("error", "The download failed", "The Ubuntu download did not finish.", "Check your internet connection, then open the toolkit again.");
+        else if (text.StartsWith("Linux readiness failed:"))
+            f = F("error", "Linux is not ready for the toolkit", text,
+                "Keep this Linux and its files. Use Copy details to share the failed check and its command output with support before changing anything.");
         else if (text.StartsWith("The private Linux is not ready.") || text.StartsWith("Private Linux did not start") || text.StartsWith("Private Linux compatibility check failed"))
             f = F("error", "The toolkit\u2019s Linux is not working", "The toolkit\u2019s private Linux is installed but did not start correctly.",
-                "To set it up again, run wsl --unregister Jibo-DFU-Toolkit in PowerShell, then open the toolkit again. This deletes all files inside that Linux, including any backups saved there.");
+                "Keep this Linux and its files. Use Copy details to share the setup checks with support before changing anything.");
         else if (text.StartsWith("Private Linux storage already exists"))
             f = F("error", "An old toolkit Linux folder is in the way", "A folder from an earlier toolkit Linux already exists, so setup stopped instead of replacing it.",
                 "If you no longer need the files in it, move that folder somewhere else (its location is in the details), then open the toolkit again.");
@@ -2159,7 +2168,7 @@ function Test-ToolkitWslSetupOutput([string]$Text) {
     # The command spelling is invariant across localized WSL messages. Do not
     # match "not installed" alone: a missing distro is not a missing WSL runtime.
     $clean = $Text -replace "`0", ''
-    return ($clean -match '(?i)\bwsl\.exe[ \t]+--(?:install|update)\b' -or
+    return ($clean -match '(?i)\bwsl\.exe[ \t]+--(?:install|update)(?=$|[\s''",;:)]|\.(?:\s|$))' -or
         $clean -match '(?i)The Windows Subsystem for Linux is not installed\.' -or
         $clean -match '\bWSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED\b')
 }
@@ -2231,13 +2240,15 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$Time
                 }
             }
             $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($probeOut.Completion, $probeErr.Completion), 2000)
-            $lines = @((ConvertTo-ToolkitNativeLines $probeOut.Text)) + @((ConvertTo-ToolkitNativeLines $probeErr.Text))
+            $outLines = @(ConvertTo-ToolkitNativeLines $probeOut.Text)
+            $errLines = @(ConvertTo-ToolkitNativeLines $probeErr.Text)
+            $lines = $outLines + $errLines
             # A normally exiting stub can emit the same message between polls.
             $setupRequired = $setupRequired -or (Test-ToolkitWslSetupOutput $probeOut.Text) -or (Test-ToolkitWslSetupOutput $probeErr.Text)
             if (-not $pipesComplete -or (-not $completed -and -not $setupRequired)) {
-                $result = [pscustomobject]@{Output=$lines; ExitCode=124; TimedOut=$true; WslSetupRequired=$false; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
+                $result = [pscustomobject]@{Output=$lines; Stdout=$outLines; Stderr=$errLines; ExitCode=124; TimedOut=$true; WslSetupRequired=$false; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
             } else {
-                $result = [pscustomobject]@{Output=$lines; ExitCode=$(if ($stoppedProbe) {$null} else {$process.ExitCode}); TimedOut=$false; WslSetupRequired=$setupRequired; StartError=$null}
+                $result = [pscustomobject]@{Output=$lines; Stdout=$outLines; Stderr=$errLines; ExitCode=$(if ($stoppedProbe) {$null} else {$process.ExitCode}); TimedOut=$false; WslSetupRequired=$setupRequired; StartError=$null}
             }
         } else {
             # wsl --list uses UTF-16LE when redirected. StreamReader defaults to UTF-8;
@@ -2247,18 +2258,21 @@ function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$Time
             $completed = Wait-ToolkitProcess $process -TimeoutSeconds $TimeoutSeconds -AllowWait:$AllowWait
             # Pipe readers must also be bounded: descendants can inherit open handles.
             $pipesComplete = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 2000)
-            $lines = @()
-            if ($stdout.IsCompleted -and -not $stdout.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stdout.GetAwaiter().GetResult()) }
-            if ($stderr.IsCompleted -and -not $stderr.IsFaulted) { $lines += @(ConvertTo-ToolkitNativeLines $stderr.GetAwaiter().GetResult()) }
+            $outLines = @(); $errLines = @()
+            if ($stdout.IsCompleted -and -not $stdout.IsFaulted) { $outLines = @(ConvertTo-ToolkitNativeLines $stdout.GetAwaiter().GetResult()) }
+            if ($stderr.IsCompleted -and -not $stderr.IsFaulted) { $errLines = @(ConvertTo-ToolkitNativeLines $stderr.GetAwaiter().GetResult()) }
+            # Output remains stdout followed by stderr for existing callers.
+            # Machine-data consumers must not parse diagnostic stderr as data.
+            $lines = $outLines + $errLines
             if (-not $completed -or -not $pipesComplete) {
-                $result = [pscustomobject]@{Output=$lines; ExitCode=124; TimedOut=$true; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
+                $result = [pscustomobject]@{Output=$lines; Stdout=$outLines; Stderr=$errLines; ExitCode=124; TimedOut=$true; StartError="$commandStep stalled after $TimeoutSeconds seconds. $($script:ToolkitPolicy.Hint)"}
             } else {
-                $result = [pscustomobject]@{Output=$lines; ExitCode=$process.ExitCode; TimedOut=$false; StartError=$null}
+                $result = [pscustomobject]@{Output=$lines; Stdout=$outLines; Stderr=$errLines; ExitCode=$process.ExitCode; TimedOut=$false; StartError=$null}
             }
         }
     } catch {
         $stalled = [bool]$_.Exception.Data['ToolkitStall']
-        $result = [pscustomobject]@{Output=@(); ExitCode=$(if ($stalled) {124} else {1}); TimedOut=$stalled; StartError=$_.Exception.Message}
+        $result = [pscustomobject]@{Output=@(); Stdout=@(); Stderr=@(); ExitCode=$(if ($stalled) {124} else {1}); TimedOut=$stalled; StartError=$_.Exception.Message}
     } finally {
         $process.Dispose()
         if ($result) {
