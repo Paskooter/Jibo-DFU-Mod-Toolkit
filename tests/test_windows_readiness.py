@@ -40,3 +40,17 @@ def test_readiness_through_native_capture(tmp_path, case):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'PASS readiness: ' + case in result.stdout
+
+
+def test_readiness_fixture_never_repoints_process_systemroot():
+    """Windows PowerShell 5.1 resolves GAC assemblies, csc.exe's signing
+    provider and child processes through SystemRoot. Repointing it at the
+    fixture made Add-Type, ConvertFrom-Json and taskkill fail on native
+    windows-2022 while Linux pwsh/mono stayed green; only the wsl.exe path at
+    the native capture boundary may be redirected."""
+    import re
+    text = (ROOT / 'scripts/release/test-readiness.ps1').read_text(encoding='utf-8')
+    code = '\n'.join(line.split('#', 1)[0] for line in text.splitlines())
+    assert not re.search(r'\$env:SystemRoot\s*=(?!=)', code, re.IGNORECASE)
+    assert not re.search(r"(?:Set-Item|New-Item|Remove-Item)\b[^\n]*Env:\\?SystemRoot", code, re.IGNORECASE)
+    assert "if ($File -ceq $script:ReadinessHostWsl)" in code

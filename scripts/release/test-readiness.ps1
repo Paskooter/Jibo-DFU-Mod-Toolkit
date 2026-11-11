@@ -38,16 +38,26 @@ if ($Case -like 'wsl-advice-*') {
 }
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('dfu-readiness-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $fixture | Out-Null
-$oldSystemRoot = $env:SystemRoot
 $oldMode = $env:TOOLKIT_READINESS_FIXTURE
 $oldTrace = $env:TOOLKIT_READINESS_TRACE
 try {
     Initialize-ToolkitLog -Root $fixture -Build ('e' * 40) -ExistingPath ''
     Set-ToolkitStep 'Starting Linux'
-    $env:SystemRoot = Join-Path $fixture 'host'
-    # Use the exact production Native path even on Linux, where backslashes are
+    # Never repoint the process SystemRoot at the fixture. Windows PowerShell
+    # 5.1 resolves GAC assemblies, csc.exe signing providers and every child's
+    # Windows directory through it, so Add-Type, ConvertFrom-Json and taskkill
+    # all fail natively. Instead redirect only the exact production wsl.exe path
+    # at the native capture boundary; the real capture code still runs.
+    $script:ReadinessHostWsl = "$env:SystemRoot\System32\wsl.exe"
+    $script:ReadinessFixtureRoot = Join-Path $fixture 'host'
+    # Use the exact production path shape even on Linux, where backslashes are
     # literal filename characters to ProcessStartInfo (not PowerShell paths).
-    $fake = "$env:SystemRoot\System32\wsl.exe"
+    $fake = "$script:ReadinessFixtureRoot\System32\wsl.exe"
+    $script:ReadinessNative = (Get-Item Function:Invoke-ToolkitNative).ScriptBlock
+    function Invoke-ToolkitNative([string]$File, [string[]]$Arguments, [double]$TimeoutSeconds = 120, [switch]$AllowWait, [switch]$WatchWslSetup) {
+        if ($File -ceq $script:ReadinessHostWsl) { $PSBoundParameters['File'] = "$script:ReadinessFixtureRoot\System32\wsl.exe" }
+        & $script:ReadinessNative @PSBoundParameters
+    }
     if ($Case -eq 'post-import-readiness') {
         # Only this new-import rollback fixture replaces Native; all ordinary
         # readiness cases below execute the real capture against an owned child.
@@ -142,7 +152,7 @@ public class ReadinessFixture {
 }
 '@
     if ($env:OS -eq 'Windows_NT') {
-        New-Item -ItemType Directory (Join-Path $env:SystemRoot 'System32') | Out-Null
+        New-Item -ItemType Directory (Join-Path $script:ReadinessFixtureRoot 'System32') | Out-Null
         Add-Type -TypeDefinition $source -OutputAssembly $fake -OutputType ConsoleApplication
     } else {
         $cs = Join-Path $fixture 'fixture.cs'
@@ -206,7 +216,7 @@ public class ReadinessFixture {
             if ($failure.Message -notmatch [regex]::Escape($term)) { throw ('WSL prerequisite guidance lost: ' + $term) }
         }
     } elseif ($Case -eq 'native-start') {
-        $env:SystemRoot = Join-Path $fixture 'does-not-exist'
+        $script:ReadinessFixtureRoot = Join-Path $fixture 'does-not-exist'
         $failure = Assert-ReadinessRefusal 'glibc' 'command' { Select-ToolkitDistribution -Rows $privateRows -Root $fixture } 1
         $record = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object event -eq 'linux-readiness')[-1]
         if (-not $failure.Data['ToolkitStartError'] -or -not $record.start_error -or $record.timed_out) { throw 'Actual native start failure diagnostic was lost' }
@@ -241,15 +251,6 @@ public class ReadinessFixture {
         # Narrow only the clock policy; use the real native wait, pipe capture,
         # child termination, checker, selection, log and support path.
         function Get-ToolkitStepPolicy { param($Name); return [pscustomobject]@{Seconds=0.5; Hint='Synthetic bounded wait'; AllowWait=$false} }
-        if ($env:OS -eq 'Windows_NT') {
-            $script:ReadinessStop = (Get-Item Function:Stop-ToolkitProcess).ScriptBlock
-            $script:ReadinessHostRoot = $oldSystemRoot
-            function Stop-ToolkitProcess($Process) {
-                $root = $env:SystemRoot
-                try { $env:SystemRoot = $script:ReadinessHostRoot; & $script:ReadinessStop $Process }
-                finally { $env:SystemRoot = $root }
-            }
-        }
         $failure = Assert-ReadinessRefusal 'glibc' 'command' { Select-ToolkitDistribution -Rows $privateRows -Root $fixture } 124
         $record = @(Get-Content $script:ToolkitLogPath | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object event -eq 'linux-readiness')[-1]
         if (-not $record.timed_out -or -not $failure.Data['ToolkitStall'] -or -not $record.start_error) { throw 'Real timeout was swallowed or lost its diagnostics' }
@@ -287,7 +288,6 @@ public class ReadinessFixture {
     } else { throw ('Unknown readiness case: ' + $Case) }
     Write-Output "PASS readiness: $Case"
 } finally {
-    $env:SystemRoot = $oldSystemRoot
     $env:TOOLKIT_READINESS_FIXTURE = $oldMode
     $env:TOOLKIT_READINESS_TRACE = $oldTrace
     $script:ToolkitLogPath = $null
