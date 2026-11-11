@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -44,6 +45,7 @@ class HookTests(unittest.TestCase):
                      "case \"$1\" in\n*/usr/local/*) printf '%s  %s\\n' \"${TEST_STOCK_HASH:-" +
                      STOCK_HASH + "}\" \"$1\" ;;\n*) exec " + real_sha + " \"$@\" ;;\nesac\n")
         self.env = dict(os.environ, JIBO_NETSTATUS_ROOT=str(self.root),
+                        JIBO_NETSTATUS_TEST_NODE_SECONDS="30",
                         PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                         TEST_CALLS=str(self.root / "mount.calls"))
 
@@ -52,9 +54,11 @@ class HookTests(unittest.TestCase):
         path.chmod(0o755)
 
     def run_hook(self, **changes):
-        result = subprocess.run([shutil.which("busybox"), "sh", str(ASSETS / "boot-network-status.sh")],
+        shell = shutil.which("busybox")
+        assert shell is not None
+        result = subprocess.run([shell, "sh", str(ASSETS / "boot-network-status.sh")],
                                 env=dict(self.env, **changes), capture_output=True,
-                                text=True, timeout=10)
+                                text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, "")
         calls = self.root / "mount.calls"
@@ -102,17 +106,87 @@ class HookTests(unittest.TestCase):
         import time
         self.command(self.root / "usr/bin/jibo-getmode", "exec sleep 20\n")
         started = time.monotonic()
+        self.assertEqual(self.run_hook(JIBO_NETSTATUS_TEST_NODE_SECONDS=""), [])
+        self.assertLess(time.monotonic() - started, 7)
+
+    def test_stuck_native_hash_keeps_its_two_second_bound(self):
+        import time
+        self.command(self.root / "usr/bin/sha256sum", "exec sleep 20\n")
+        started = time.monotonic()
         self.assertEqual(self.run_hook(), [])
-        self.assertLess(time.monotonic() - started, 4)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: failed\n")
+
+    def test_stuck_ota_node_is_bounded_and_cannot_mount(self):
+        import time
+        node = self.root / "usr/bin/node"
+        node.unlink()
+        self.command(node, "exec sleep 20\n")
+        started = time.monotonic()
+        self.assertEqual(self.run_hook(JIBO_NETSTATUS_TEST_NODE_SECONDS=""), [])
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: skipped-ota\n")
+
+    def test_stuck_native_mount_keeps_its_two_second_bound(self):
+        import time
+        self.command(self.tools / "mount",
+                     'printf "%s\\n" "$*" >> "$TEST_CALLS"\nexec sleep 20\n')
+        started = time.monotonic()
+        self.assertEqual(len(self.run_hook()), 1)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: failed\n")
+
+    def test_failed_mode_command_cannot_apply_its_valid_output(self):
+        self.command(self.root / "usr/bin/jibo-getmode", 'printf "int-developer\\n"\nexit 7\n')
+        self.assertEqual(self.run_hook(), [])
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: failed\n")
+
+    def test_synthetic_root_can_shorten_the_node_watchdog(self):
+        import time
+        self.command(self.root / "usr/bin/jibo-getmode", "exec sleep 20\n")
+        started = time.monotonic()
+        self.assertEqual(self.run_hook(JIBO_NETSTATUS_TEST_NODE_SECONDS="0.1"), [])
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_slow_node_mode_probe_can_finish_after_two_seconds(self):
+        # getmode is Node on the robot; delay in that one process, not a shell
+        # child which could outlive a watchdog kill.
+        node = shlex.quote(str((self.root / "usr/bin/node").resolve()))
+        self.command(self.root / "usr/bin/jibo-getmode", "exec " + node +
+                     " -e 'setTimeout(function () { console.log(\"int-developer\"); }, 2200)'\n")
+        self.assertEqual(len(self.run_hook(JIBO_NETSTATUS_TEST_NODE_SECONDS="")), 1)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: bound\n")
 
     def test_pending_ota_cannot_acquire_a_services_child_mount(self):
         (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": 0, "items": [{}]}))
+        # The real guard refuses with 0, not safe-to-mount 1 or timeout 124.
+        guard = subprocess.run([str(self.root / "usr/bin/node"), str(self.var / "ota-safe-overlay.js"),
+                                "check", str(self.root), "startup-view.js"],
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(guard.returncode, 0, guard.stderr)
         self.assertEqual(self.run_hook(), [])
         self.assertIn("skipped-ota", (self.var / "boot-network-status.log").read_text())
 
     def test_completed_ota_history_does_not_disable_the_feature(self):
         (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": None, "items": [{}]}))
         self.assertEqual(len(self.run_hook()), 1)
+
+    def test_slow_completed_ota_check_can_finish_after_two_seconds(self):
+        node = self.root / "usr/bin/node"
+        real_node = shlex.quote(str(node.resolve()))
+        node.unlink()
+        self.command(node, 'if [ "$2" = check ]; then\n    exec ' + real_node +
+                     " -e 'setTimeout(function () { require(process.argv[1]); }, 2200)' \"$@\"\nfi\nexec " +
+                     real_node + ' "$@"\n')
+        (self.root / "var/jibo/ota.json").write_text(json.dumps({"idx": None, "items": [{}]}))
+        self.assertEqual(len(self.run_hook(JIBO_NETSTATUS_TEST_NODE_SECONDS="")), 1)
+        self.assertEqual((self.var / "boot-network-status.log").read_text(),
+                         "boot-network-status: bound\n")
 
     def test_malformed_ota_state_is_fail_closed(self):
         (self.root / "var/jibo/ota.json").write_text("invalid JSON")
@@ -171,6 +245,77 @@ class HookTests(unittest.TestCase):
     def test_no_global_log_directory_is_required(self):
         (self.root / "var/log").rmdir()
         self.assertEqual(len(self.run_hook()), 1)
+
+
+@unittest.skipUnless(shutil.which("busybox"), "BusyBox is required for ash checks")
+class BoundedTests(unittest.TestCase):
+    def run_bounded(self, command, prelude="", seconds="0.1"):
+        # Execute the production function verbatim without running apply_status.
+        source = (ASSETS / "boot-network-status.sh").read_text().split("\napply_status()", 1)[0]
+        shell = shutil.which("busybox")
+        assert shell is not None
+        return subprocess.run([shell, "sh", "-c", source + "\n" + prelude +
+                               "\nbounded " + shlex.quote(seconds) + " " + command + "\nexit $?\n"],
+                              env=dict(os.environ, JIBO_NETSTATUS_ROOT=""),
+                              capture_output=True, text=True, timeout=5)
+
+    def test_watchdog_deadline_has_a_distinct_timeout_status(self):
+        result = self.run_bounded("sh -c 'exec sleep 20'")
+        self.assertEqual(result.returncode, 124, result.stderr)
+
+    def test_parent_cleanup_cannot_erase_the_watchdog_timeout_receipt(self):
+        # Hold the watchdog after its real kill so cleanup TERM deterministically
+        # races with receipt publication. This used to leak signal status 137.
+        result = self.run_bounded("sh -c 'exec sleep 20'", """
+kill() {
+    if [ "$1" = -KILL ]; then
+        command kill "$@"
+        status=$?
+        sleep 0.1
+        return "$status"
+    fi
+    command kill "$@"
+}
+""")
+        self.assertEqual(result.returncode, 124, result.stderr)
+
+    def test_completed_status_is_preserved_without_waiting_for_deadline(self):
+        for status in (0, 1, 7, 124, 137):
+            with self.subTest(status=status):
+                # The subprocess's five-second outer limit is shorter than the
+                # watchdog: preserving a result must not wait for its deadline.
+                result = self.run_bounded("sh -c 'exit " + str(status) + "'", seconds="20")
+                self.assertEqual(result.returncode, status, result.stderr)
+
+    def test_unrelated_sigkill_is_not_a_watchdog_timeout(self):
+        result = self.run_bounded("sh -c 'kill -KILL $$'", seconds="20")
+        self.assertEqual(result.returncode, 137, result.stderr)
+
+    def test_missing_command_keeps_its_failure_status(self):
+        result = self.run_bounded("jibo-synthetic-nonexistent-command", seconds="20")
+        self.assertEqual(result.returncode, 127, result.stderr)
+
+
+@unittest.skipUnless(shutil.which("busybox"), "BusyBox is required for ash checks")
+class BudgetTests(unittest.TestCase):
+    def test_test_budget_override_requires_a_synthetic_root(self):
+        source = (ASSETS / "boot-network-status.sh").read_text().split("\napply_status()", 1)[0]
+
+        def budget(root, override):
+            shell = shutil.which("busybox")
+            assert shell is not None
+            result = subprocess.run([shell, "sh", "-c",
+                                     source + '\nprintf "%s" "$node_seconds"\n'],
+                                    env=dict(os.environ, JIBO_NETSTATUS_ROOT=root,
+                                             JIBO_NETSTATUS_TEST_NODE_SECONDS=override),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        default = budget("", "")
+        self.assertEqual(default, "5")
+        self.assertEqual(budget("", "9"), default)
+        self.assertEqual(budget("/synthetic", "9"), "9")
 
 
 if __name__ == "__main__":

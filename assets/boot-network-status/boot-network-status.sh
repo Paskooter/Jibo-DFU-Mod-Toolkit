@@ -7,28 +7,44 @@ target="$root/usr/local/bin/jibo-ssm/startup/startup-view.js"
 log="$root/var/jibo/phoenix/network-status/boot-network-status.log"
 result=failed
 
-# Shipped BusyBox has no timeout applet. Bound local commands to two seconds.
+# Shipped BusyBox has no timeout applet. Allow five seconds for Node cold
+# starts; keep the native hash/mount probes at two seconds. No retries.
+# Preserve completed status; only a successful watchdog kill earns timeout 124.
 # None of these commands forks workers: getmode is Node, hashes/mount are native.
+node_seconds=5
+# Only synthetic-root tests may relax Node scheduling deadlines under CI load.
+if [ -n "$root" ]; then
+    node_seconds=${JIBO_NETSTATUS_TEST_NODE_SECONDS:-$node_seconds}
+fi
 bounded() {
+    seconds=$1
+    shift
     "$@" &
     command_pid=$!
     (
-        sleep 2 &
-        sleep_pid=$!
         trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+        sleep "$seconds" &
+        sleep_pid=$!
         wait "$sleep_pid"
-        kill -KILL "$command_pid" 2>/dev/null
+        # Once the deadline wins, parent cleanup must not erase its receipt.
+        trap '' TERM
+        kill -KILL "$command_pid" 2>/dev/null && exit 124
+        exit 0
     ) >/dev/null 2>&1 &
     watchdog_pid=$!
     wait "$command_pid" 2>/dev/null
     command_status=$?
     kill "$watchdog_pid" 2>/dev/null
     wait "$watchdog_pid" 2>/dev/null
+    watchdog_status=$?
+    if [ "$command_status" = 137 ] && [ "$watchdog_status" = 124 ]; then
+        return 124
+    fi
     return "$command_status"
 }
 
 apply_status() {
-    mode=$(bounded "$root/usr/bin/jibo-getmode") || return
+    mode=$(bounded "$node_seconds" "$root/usr/bin/jibo-getmode") || return
     case "$mode" in
         int-developer|developer) ;;
         *) result=skipped-mode; return ;;
@@ -41,7 +57,7 @@ apply_status() {
         fi
     done < "$root/proc/self/mountinfo"
     [ -f "$target" ] && [ ! -L "$target" ] || return
-    sum=$(bounded "$root/usr/bin/sha256sum" "$target") || return
+    sum=$(bounded 2 "$root/usr/bin/sha256sum" "$target") || return
     case "${sum%% *}" in
         66824555951d3be55d74f7d736655f11e945dea887e52f71ff2a5fa2064c14d6)
             name=startup-view.js
@@ -56,18 +72,18 @@ apply_status() {
     esac
     asset="$root/var/jibo/phoenix/network-status/$name"
     [ -f "$asset" ] && [ ! -L "$asset" ] || return
-    sum=$(bounded "$root/usr/bin/sha256sum" "$asset") || return
+    sum=$(bounded 2 "$root/usr/bin/sha256sum" "$asset") || return
     [ "${sum%% *}" = "$expected" ] || {
         result=skipped-asset-hash
         return
     }
     helper="$root/var/jibo/phoenix/network-status/ota-safe-overlay.js"
     [ -f "$helper" ] && [ ! -L "$helper" ] || return
-    sum=$(bounded "$root/usr/bin/sha256sum" "$helper") || return
+    sum=$(bounded 2 "$root/usr/bin/sha256sum" "$helper") || return
     [ "${sum%% *}" = "a5e2bd2af5d33ee0e29af13ba84cb4933661787f2169017881e576ae5214f3e8" ] || return
-    bounded "$root/usr/bin/node" "$helper" check "$root" "$name"
+    bounded "$node_seconds" "$root/usr/bin/node" "$helper" check "$root" "$name"
     [ "$?" = 1 ] || { result=skipped-ota; return; }
-    bounded "$root/bin/mount" -n -o bind "$asset" "$target" || return
+    bounded 2 "$root/bin/mount" -n -o bind "$asset" "$target" || return
     # Release the exact owned child bind when an OTA becomes pending. All I/O
     # stays local. Detach stdio so this monitor cannot hold ifup/boot open.
     "$root/usr/bin/node" "$helper" watch "$root" "$name" </dev/null >/dev/null 2>&1 &
