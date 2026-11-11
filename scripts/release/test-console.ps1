@@ -445,7 +445,7 @@ public class ToolkitHttpFixture : IDisposable {
     public long ObservedBytes { get { lock (gate) { return observedBytes; } } }
     public int ByteObservations { get { lock (gate) { return byteObservations; } } }
     public long SentBytes { get { return Interlocked.Read(ref sentBytes); } }
-    public bool IdleGapApplied { get { return Thread.VolatileRead(ref idleGap) != 0; } }
+    public bool IdleGapApplied { get { return Interlocked.CompareExchange(ref idleGap, 0, 0) != 0; } }
     public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
     public void Observe(int percent) {
         // Presentation is an observation only. It never releases a body write:
