@@ -9,12 +9,27 @@ from test_gui_window import window
 pytestmark = pytest.mark.skipif(os.environ.get("JIBO_GUI_TEST_DISPLAY") != "1", reason="real Tk display required")
 
 
-def test_more_tools_window_has_no_calibration_service_entries(window):
+@pytest.mark.parametrize("poll_due", [False, True])
+def test_more_tools_window_has_no_calibration_service_entries(window, monkeypatch, poll_due):
     w = window
+    if poll_due:
+        # Deterministically deliver the queued 'started' event on the same
+        # nested update that used to race the directly rendered fixture prompt.
+        real_update = w.root.update
+        def update_with_due_poll():
+            w.root.after_cancel(w._poll_job)
+            w._poll()
+            return real_update()
+        monkeypatch.setattr(w.root, "update", update_with_due_poll)
     captured = []
     rendered = []
     def ask(prompt):
         captured.append(prompt)
+        # This synchronous test prompter renders directly, unlike production's
+        # queued prompt. Deliver the earlier 'started' event through the real
+        # poller first, so a due timer cannot replace this prompt with progress.
+        w.root.after_cancel(w._poll_job)
+        w._poll()
         w.show_prompt(prompt)
         w.root.update()
         options = w.controls["options"]
