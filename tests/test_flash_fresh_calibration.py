@@ -302,11 +302,15 @@ def test_cli_typed_unsafe_sets_the_dedicated_ack(tmp_path, command):
         argv += ['--directory', str(tmp_path)]
     argv += ['--without-calibration','--confirm','FLASH UPDATE']
     target = 'flash_update' if command=='flash-update' else 'flash_hosted_update'
+    real_directory = dfu.hosted._directory
+    def fixture_directory(path):
+        assert Path(path).is_relative_to(tmp_path), 'user image folder entered'
+        return real_directory(path)
     with patch.object(dfu,'tool',return_value='offline'), patch.object(dfu,target,return_value={'status':'cancelled'}) as flash, \
          patch.object(dfu.hosted,'download_image',return_value='package'), \
-         patch.object(dfu.hosted,'default_updates_dir',side_effect=AssertionError('user image folder entered')) as user_folder, redirect_stdout(io.StringIO()):
+         patch.object(dfu.hosted,'_directory',side_effect=fixture_directory) as session_folder, redirect_stdout(io.StringIO()):
         assert dfu.main(argv) == 0
-    user_folder.assert_not_called()
+    assert session_folder.called == (command == 'flash-hosted-update')
     assert flash.call_args.kwargs['unsafe_without_calibration'] is True
     policy = flash.call_args.args[1] if command=='flash-update' else flash.call_args.kwargs['var_policy']
     assert policy == 'without-calibration'
