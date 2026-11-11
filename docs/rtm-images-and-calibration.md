@@ -47,10 +47,21 @@ camera calibration and identity from a verified same-robot backup, preferring th
 image read immediately before this flash. Supported IMU and microphone files are
 restored when present, with their exact bytes, ownership and permissions. It sets
 hostname, hosts and OOBE mode and checks the edited filesystem before writing.
-Wi-Fi, pairing and user settings start fresh. Saved camera files that match package
-defaults are still copied and their status is recorded. If this robot's identity
-and camera calibration are not available in a verified local backup, the flash
+Wi-Fi, pairing and user settings start fresh. Each required camera item is refused
+if its measurements match the package defaults or pinned known stock defaults,
+including formatting, extra-field and supported-version-only variations. If this
+robot's identity and non-default camera calibration are not available in a verified local backup, the flash
 stops without writing to the robot. Calibration backups and restores stay on this computer.
+
+Pending ext4 journals are replayed only on disposable private copies, including
+when choosing an older same-robot var/rootfs/skills backup or reading local identity.
+The original backups and package images are never repaired in place. Workspace
+preflight reserves one full largest eligible partition replay copy at a time,
+in addition to normal preparation space; local paths check the actual destination
+filesystem before copying. Insufficient space or replay failure stops preparation.
+Only the checked package-owned regular resize-complete marker is removed from
+disposable calibrated output, so first boot can grow the fresh filesystems.
+The old robot backup's marker is not copied as the starting var image.
 
 The CLI defaults to this policy too: `flash-update PACKAGE --keep-calibration --yes`.
 

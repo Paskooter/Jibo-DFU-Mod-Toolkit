@@ -143,19 +143,18 @@ class PackageTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(tool) for tool in ('mke2fs', 'debugfs', 'e2fsck')),
                          'ext4 tools required')
     def test_extracted_package_keeps_calibration_without_source_imports(self):
-        from calibration_support import make_image, FILES, PATHS, IDENTITY
+        from calibration_support import make_image, FILES, GENERIC_CAMERA, PATHS, IDENTITY
         self.run_package()
         extracted = self.root / 'extracted'
         with zipfile.ZipFile(self.output) as archive:
             archive.extractall(extracted)
         camera_keys = ('left', 'right', 'inter_camera')
-        stock = make_image(self.root, 'stock.img', {PATHS[k]: FILES[k] for k in camera_keys})
+        stock = make_image(self.root, 'stock.img', {PATHS[k]: GENERIC_CAMERA[k] for k in camera_keys})
         saved = {k: FILES[k] for k in (*camera_keys, 'imu', 'audio')}
-        # Distinct synthetic measurements, not the package's default cameras.
-        for key in ('left', 'right'):
-            camera = json.loads(saved[key])
-            camera['center_x'] += 1
-            saved[key] = json.dumps(camera).encode()
+        # Every camera item, including alignment, must be robot-specific. An
+        # unchanged alignment is now correctly refused by the per-item guard.
+        for key in camera_keys:
+            self.assertNotEqual(json.loads(saved[key]), json.loads(GENERIC_CAMERA[key]), key)
         entries = {PATHS[k]: raw for k, raw in saved.items()}
         entries['/jibo/identity.json'] = IDENTITY
         backup = make_image(self.root, 'backup.img', entries)

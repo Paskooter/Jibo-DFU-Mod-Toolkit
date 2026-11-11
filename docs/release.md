@@ -32,6 +32,11 @@ its embedded interpreter rather than silently falling back to dfu-util.
 `run.ps1` keeps its USB algorithm; one manual-help string now parses on both
 Windows PowerShell 5.1 and PowerShell 7.
 
+The source-launcher's separate `.pyz` inventory includes all three calibration
+modules and invalidates a cached package when any changes or is missing. That
+path is tested from an extraction outside the checkout, not inferred from the
+native builder's all-module inventory.
+
 ## HTTPS trust in frozen apps
 
 The generated PyInstaller spec includes `runtime/assets/ca/cacert.pem`, copied
@@ -256,7 +261,32 @@ powershell -NoProfile -File scripts/release/test-bootstrap.ps1 -Scenario 'wsl-*'
 PowerShell Core on Linux exercises fixtures only. Use Windows PowerShell 5.1 on
 a fresh Windows PC to check UAC, installation, restart/resume and the final EXE.
 
+### Linux readiness failures are not a reinstall instruction
+
+After WSL itself starts, automatic selection still checks registered WSL 2,
+x86_64, glibc 2.35+, non-root default UID, `/mnt/wslg`, and Ubuntu 22.04+.
+Native stdout is parsed as data separately from stderr; only explicit WSL
+diagnostic-envelope lines are excluded from data parsing. Malformed/conflicting
+data still refuses readiness. **Copy details** and the setup log retain the named
+failed check, actual native status/start error/timeout and bounded redacted output.
+A failed value check can correctly have native exit 0. Save that evidence and
+keep the existing Linux and its files; neither a display variable nor the vague
+older readiness message establishes virtualization failure.
+
+`HCS_E_HYPERV_NOT_INSTALLED` identifies failure to start WSL's VM, not which of
+Virtual Machine Platform, firmware virtualization or Windows hypervisor
+configuration is unavailable. Check those prerequisites, restart after approved
+changes, and reopen the app. Unregistering Linux is not a prerequisite fix.
+
 ## Run a build without a release
+
+Standalone `python scripts/release/build.py` on a prepared Linux or native Mac
+build host, or `python scripts/release/build.py --windows-payload PATH` on native
+Windows, writes only local build output. It does not push a tag, create a release
+or upload files. Preserve real subprocess exits and revision/hash/size receipts.
+This is the permitted non-publishing path when remote workflow dispatch or public
+test artifacts are not authorized. It still needs the documented native build
+prerequisites; cross-host source/Core checks do not substitute for native gates.
 
 On Actions → **Single-file release builds** → **Run workflow**, choose any branch.
 The workflow must first be merged into the default branch for GitHub's manual-run
@@ -320,6 +350,33 @@ Before publishing, test these **on real hosts**:
   first launch without Homebrew/Python, USB enumeration and RCM → DFU entry.
 - All platforms: existing per-write reviews, backups and readback checks with a
   robot; **CI never flashes a robot**.
+
+Keep an exact candidate's gate status separate from workflow configuration and
+historical green runs. Require the complete combined source suite on frozen
+bytes, native Windows PowerShell 5.1 fixtures and final EXE, Linux AppImage, and
+both mounted native Mac DMGs, with inner exits and matching source/artifact
+hashes. Missing native proof is a missing release gate, not a supported-platform
+waiver. A same-SHA retry, in particular a reminder-timer green, is not proof of
+a permanent race fix. Reminder fixtures wait for their observed events; the
+download fixture advances a synthetic inactivity clock only around controlled
+real loopback transport observations, retaining the product's 120-second budget.
+
+## Recovery and rollback boundaries
+
+Before a robot write, cancelling setup/review or closing an idle app does not
+need a firmware rollback. Keep the saved logs and backups. If this toolkit build
+fails to start, retain it for diagnosis and use a checksum-verified previous
+toolkit download (currently v1.0.3), understanding that it lacks these fixes.
+Changing the host executable does **not** roll back a robot image or a private
+WSL filesystem. Do not delete/reimport existing Linux as generic recovery.
+
+After an interrupted flash, keep USB connected, the same-robot rollback backup
+and update record. The toolkit does not support resuming mid-image; select the
+same verified package for a new reviewed flash, or use the normal verified
+same-robot partition restore flow where a complete matching backup exists.
+Never substitute another robot's calibration or an unchecked raw image.
+Image/OS faults, body-board firmware recovery, unknown M1 USB failures and the
+separate physical USB image test are not solved or certified by a toolkit tag.
 
 ## Extraction, sources and troubleshooting
 

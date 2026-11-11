@@ -413,37 +413,94 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+public class ToolkitFixtureIdleClock {
+    long origin = ToolkitHttpFixture.Milliseconds;
+    public static ToolkitFixtureIdleClock StartNew() { return new ToolkitFixtureIdleClock(); }
+    public void Restart() { origin = ToolkitHttpFixture.Milliseconds; }
+    public TimeSpan Elapsed { get { return TimeSpan.FromMilliseconds(ToolkitHttpFixture.Milliseconds - origin); } }
+}
 public class ToolkitHttpFixture : IDisposable {
     readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+    readonly AutoResetEvent acknowledged = new AutoResetEvent(false);
+    readonly ManualResetEvent stopped = new ManualResetEvent(false);
+    readonly object gate = new object();
+    static long milliseconds;
+    int requiredBlock, observedBlock;
     TcpClient client;
+    Thread thread;
+    public string Error;
+    public static long Milliseconds { get { return Interlocked.Read(ref milliseconds); } }
+    public int ObservedBlocks { get { lock (gate) { return observedBlock; } } }
     public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
+    public void Observe(int percent) {
+        lock (gate) {
+            if (requiredBlock > observedBlock && percent >= 100 * requiredBlock / 8) {
+                observedBlock = requiredBlock;
+                acknowledged.Set();
+            }
+        }
+    }
     public ToolkitHttpFixture(string mode) {
+        Interlocked.Exchange(ref milliseconds, 0);
         listener.Start();
-        var thread = new Thread(delegate() {
+        thread = new Thread(delegate() {
             try {
                 using (client = listener.AcceptTcpClient()) {
                     var stream = client.GetStream();
                     stream.Read(new byte[4096], 0, 4096);
-                    if (mode == "headers") Thread.Sleep(2000);
+                    // Deliberate scheduler/transport startup delay: the old 0.4s
+                    // wall-clock fixture fails here. It is not product idle time.
+                    if (mode == "active") Thread.Sleep(600);
+                    if (mode == "headers") {
+                        Interlocked.Add(ref milliseconds, 400);
+                        stopped.WaitOne(5000); return;
+                    }
                     byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n");
                     stream.Write(header, 0, header.Length);
                     byte[] block = new byte[65536];
                     for (int i = 0; i < 8; i++) {
+                        lock (gate) { requiredBlock = i + 1; }
+                        Interlocked.Add(ref milliseconds, 100);
                         stream.Write(block, 0, block.Length); stream.Flush();
-                        Thread.Sleep(mode == "idle" ? 2000 : 100);
+                        // Do not send the next block until the REAL downloader's
+                        // progress reaches this one. No sleep-then-assume oracle.
+                        if (i < 7 && !acknowledged.WaitOne(5000)) throw new Exception("Download progress was not observed");
+                        if (mode == "idle") {
+                            Interlocked.Add(ref milliseconds, 400);
+                            stopped.WaitOne(5000); return;
+                        }
                     }
                 }
-            } catch { } // Client cancellation is the idle test's expected result.
+            } catch (Exception e) { if (!stopped.WaitOne(0)) Error = e.GetType().Name; }
         });
         thread.IsBackground = true; thread.Start();
     }
-    public void Dispose() { listener.Stop(); if (client != null) client.Close(); }
+    public void Dispose() {
+        stopped.Set(); listener.Stop(); if (client != null) client.Close();
+        if (!thread.Join(1000)) throw new Exception("Download fixture thread survived cleanup");
+        acknowledged.Dispose(); stopped.Dispose();
+    }
 }
 '@
+    # Inject only the inactivity clock in a process-local copy of the REAL
+    # consumer. Keep its 0.4s test threshold, 120s product default, transfer,
+    # progress, cancellation and all result assertions unchanged. Real I/O is
+    # bounded by the server's 5s observation gates and the outer 30s test cap.
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $BootstrapPath) 'console.ps1'), [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw ($errors | Out-String) }
+    $downloadSource = @($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Receive-ToolkitDownload'}, $true))[0].Extent.Text
+    $clockLine = '$idle = [Diagnostics.Stopwatch]::StartNew()'
+    if ($downloadSource.Split(@($clockLine), [StringSplitOptions]::None).Count -ne 2) { throw 'Idle-clock injection did not match exactly once' }
+    Invoke-Expression $downloadSource.Replace($clockLine, '$idle = [ToolkitFixtureIdleClock]::StartNew()')
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-download-' + [guid]::NewGuid().ToString('N'))
     Initialize-ToolkitLog -Root $tmp -Build ('d' * 40)
     function Show-ToolkitSupportDialog { param($Message, [switch]$AllowWait); return $false }
-    function Update-ToolkitSetup { param($Text,$Detail,$Percent); if ($Percent -gt 0 -and $Percent -lt 100) { $script:intermediate++ } }
+    function Update-ToolkitSetup {
+        param($Text,$Detail,$Percent)
+        if ($Percent -gt 0 -and $Percent -lt 100) { $script:intermediate++ }
+        if ($server) { $server.Observe([int]$Percent) }
+    }
     try {
         foreach ($mode in @('active','idle','headers')) {
             $script:intermediate = 0
@@ -457,6 +514,9 @@ public class ToolkitHttpFixture : IDisposable {
                 if ($stalled -ne ($mode -ne 'active')) { throw "Wrong download result: $mode" }
                 if ($mode -eq 'active' -and ($script:intermediate -lt 1 -or (Get-Item $file).Length -ne 524288)) { throw 'Download lacked real byte progress' }
                 if ($stalled -and (Test-Path $file)) { throw 'Stalled download was not removed' }
+                if ($server.Error) { throw ('Download fixture failed: ' + $server.Error) }
+                if ($mode -eq 'active' -and $server.ObservedBlocks -lt 7) { throw 'Active blocks were not observed before the next send' }
+                if ($mode -eq 'idle' -and $server.ObservedBlocks -ne 1) { throw 'Idle clock advanced before first-byte progress' }
             } finally { $server.Dispose() }
         }
         Write-Output "PASS console: $Case"

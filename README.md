@@ -43,6 +43,15 @@ then open the same EXE again. It checks WSL again and continues setup; it does n
 restart the PC or register a Linux distribution before you reopen it. **Not now**
 installs nothing. If installation fails, use **Copy details** in the setup window.
 
+If WSL explicitly requests `wsl.exe --update`, setup updates WSL rather than
+substituting a fresh installation, then follows the stated restart/reopen boundary.
+For **Linux readiness failed**, **Copy details** preserves the exact failed check,
+command status and bounded diagnostic output. A working automatic choice requires
+WSL 2, x86_64, glibc 2.35+, a non-root default user, `/mnt/wslg`, and Ubuntu 22.04+;
+display variables alone are not proof. Keep the existing Linux and its files:
+unregistering/reinstalling it is not generic recovery. See
+[Windows readiness troubleshooting](#windows-troubleshooting).
+
 The Windows download also checks the Linux display's current mode before opening
 the GUI. If Windows reports **WARN:COPY MODE** (a known WSL bug when the toolkit's
 Linux starts again while other Linux apps keep WSL running), setup shows
@@ -106,7 +115,7 @@ Linux file managers may require **Allow Launching** or **Trust** for the `.deskt
 
 The GUI enables DFU entry in RCM and partition actions only after the recovery loader is ready in DFU. It shares the text menu's device operations, validation, backups and per-write review, including the ON-by-default boot-network checkbox for developer mode + Wi-Fi setup. It shows USB state and progress, refuses duplicate starts, and does not allow window closure during a transfer. **Keep USB connected and wait for completion**; forcibly killing the app can still interrupt a transfer. Read the [hardware limitations](#hardware-results-and-remaining-work) and [boot-screen diagnostic caveats](#boot-screen-wi-fiip-diagnostic-usb-only-setup) before proceeding.
 
-On Linux, the `.pyz` package is generated locally and reused on later runs; on macOS, the launcher runs the Python source directly. See [GUI setup, safety and verification](docs/gui.md) for details.
+On Linux, the `.pyz` package is generated locally and reused on later runs; its calibration modules are included and changes to them invalidate the cache. On macOS, the launcher runs the Python source directly. This source-package fix is separate from frozen EXE/AppImage/DMG qualification. See [GUI setup, safety and verification](docs/gui.md) for details.
 
 ### Text menu (alternate)
 
@@ -211,6 +220,16 @@ Ubuntu download, check your internet connection. For **Connecting USB**, look
 for a Windows administrator approval prompt and check the USB cable.
 `Jibo-DFU-Windows-x64.exe -ShowConsole` still provides console diagnostics.
 
+For **Linux readiness failed**, save **Copy details** before changing anything.
+The named predicate distinguishes registration, architecture, glibc, default user,
+WSLg and Ubuntu metadata failures; harmless command warnings are kept separate
+from the Linux data being checked. This is not proof of missing virtualization.
+`HCS_E_HYPERV_NOT_INSTALLED` means WSL could not start its virtual machine: check
+**Virtual Machine Platform**, **firmware virtualization** and **Windows hypervisor
+configuration**. The code does not identify which prerequisite is unavailable.
+After approved prerequisite changes, restart Windows and reopen the toolkit.
+Do not delete an existing Linux as a prerequisite fix.
+
 If `run-gui.cmd` says the only Linux is **Jibo-DFU-Toolkit**, use
 **Jibo-DFU-Windows-x64.exe** instead. That private Linux intentionally has no
 Linux password or sudo access; do not try to invent a password or run the source
@@ -312,6 +331,12 @@ The GPT check reads the complete `jibo-dfu-v1` alternate. Its final short transf
 **Transfer speed:** Whole-partition reads and writes go through `jibo_dfu_pipeline.py`, which talks to Linux usbfs directly and keeps DFU requests queued instead of waiting a USB round trip for every block. The included loader uses 32 KiB blocks and accepts queued writes; it lists the read-only `jibo-dfu-queue-v1` alternate to say so. With an older loader, reads are still queued, but writes send one block at a time. Over WSL with usbipd-win, a 500 MiB `var` read took 52.0 s, against 115 s with dfu-util 0.9. A readback-checked `var` write took 76.4 s, against about 2 MiB/s with dfu-util. Set `JIBO_DFU_TRANSFER=dfu-util` to use dfu-util for these transfers. Small file-level requests always use dfu-util.
 
 **Calibration choices:** Keep copies camera L/R and alignment plus local identity into fresh var; supported IMU and microphone files are restored when present. Touchscreen calibration and the factory record are restored only from existing, verified same-robot rootfs/skills partition backups. Existing standalone rollback images are kept; named partition backup sets are managed separately under **Backups**. Without calibration uses the image's generic measurements and identity (which may be absent); camera, motion, hearing and setup may not work properly. Restore a valid local identity before setup if the image has none. The full current var backup is retained locally for recovery.
+
+Keep-calibration refuses any required camera item with known generic/package-default
+measurements, even with different formatting, extra fields or a supported version
+change. It reads pending ext4 journals only on disposable, space-accounted copies;
+the original backup stays unchanged. This rejects known defaults, not proof of
+factory provenance or mechanical safety. [Calibration and recovery details](docs/rtm-images-and-calibration.md).
 
 The included loader supports bounded changes to existing files. It reads the target file once before the change, then checks the file and its ownership and permissions after writing. The first `var` change saves a rollback image; later `var` changes reuse any verified `var` image for the same robot, even if the live filesystem has changed. Other partitions are backed up only when selected. The file writer currently handles only existing regular files of at most 4 KiB in one allocated block, mapped by one extent or one legacy direct pointer. Stock RTM Wi-Fi configs may occupy four 1 KiB blocks because of comments, and stock network startup files occupy two. A full-`var` Wi-Fi edit removes comment-only and blank lines from these stock files while keeping their active settings. That can make later file edits fit in one block. When a mode or Wi-Fi file uses an unsupported layout, or `var` has an unclean ext4 journal, the menu offers the slower full-`var` edit as an explicit choice, with cancel selected by default. The journal check protects direct writes and remains in force after a robot boot until Linux cleanly unmounts `var` or the full transfer replays the journal on a local copy. Full image writes and update packages still use partition transfers. See [the file-level protocol](firmware/file-level-protocol.md). An earlier direct mode-file write passed content and metadata readback.
 

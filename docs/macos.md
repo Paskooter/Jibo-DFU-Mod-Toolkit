@@ -239,6 +239,12 @@ The transport uses Python urllib/OpenSSL, **not curl or another download
 subprocess**. See [release trust checks](release.md#https-trust-in-frozen-apps).
 Native DMG and real M1 USB acceptance still require testing on a Mac.
 
+The CA/diagnostic changes address the computer's HTTPS path, not unknown M1 USB
+failures, robot-side certificate setup or image/OS issues. A successful Linux
+transport test or frozen-layout probe is not native DMG acceptance. Keep the
+macOS 15+ download floor, unsigned Gatekeeper caveat and experimental Apple silicon
+USB status when describing a candidate release.
+
 ## Automated coverage and remaining work
 
 The Mac tests simulate libusb descriptors, handles, library discovery, and
