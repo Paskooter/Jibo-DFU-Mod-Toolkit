@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -76,7 +77,8 @@ class PackageTests(unittest.TestCase):
             "jibo_dfu_bounded.py", "jibo_dfu_pipeline.py", "jibo_images.py",
             "jibo_updates.py", "jibo_tui.py", "jibo_gui.py", "jibo_gui_core.py",
             "jibo_hosted_updates.py", "jibo_flash_policy.py", "jibo_flash_contract.py", "jibo_flash_schema.py",
-            "jibo_calibration_client.py",
+            "jibo_calibration_client.py", "jibo_calibration.py",
+            "jibo_calibration_flow.py", "jibo_calibration_restore.py",
             "assets/flash-images/contract-v1.json", "assets/flash-images/trust.json",
             "assets/flash-images/flash-release-public.pem",
             "tools/shofel2_t124", "tools/intermezzo.bin", "tools/dfu_stage2.bin",
@@ -137,6 +139,83 @@ class PackageTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['images'], [])
+
+    @unittest.skipUnless(all(shutil.which(tool) for tool in ('mke2fs', 'debugfs', 'e2fsck')),
+                         'ext4 tools required')
+    def test_extracted_package_keeps_calibration_without_source_imports(self):
+        from calibration_support import make_image, FILES, PATHS, IDENTITY
+        self.run_package()
+        extracted = self.root / 'extracted'
+        with zipfile.ZipFile(self.output) as archive:
+            archive.extractall(extracted)
+        camera_keys = ('left', 'right', 'inter_camera')
+        stock = make_image(self.root, 'stock.img', {PATHS[k]: FILES[k] for k in camera_keys})
+        saved = {k: FILES[k] for k in (*camera_keys, 'imu', 'audio')}
+        # Distinct synthetic measurements, not the package's default cameras.
+        for key in ('left', 'right'):
+            camera = json.loads(saved[key])
+            camera['center_x'] += 1
+            saved[key] = json.dumps(camera).encode()
+        entries = {PATHS[k]: raw for k, raw in saved.items()}
+        entries['/jibo/identity.json'] = IDENTITY
+        backup = make_image(self.root, 'backup.img', entries)
+        command = dedent('''\
+            import hashlib, json, pathlib, sys
+            root = pathlib.Path(sys.argv[1]).resolve()
+            sys.path.insert(0, str(root))
+            # -I -S removes cwd, PYTHONPATH and site packages. Refuse all sockets
+            # and USB helpers even if an unexpected branch tries to use them.
+            def offline_only(event, args):
+                if event.startswith('socket.'):
+                    raise AssertionError('network access attempted')
+                if event == 'subprocess.Popen' and pathlib.Path(args[0]).name not in ('debugfs', 'e2fsck'):
+                    raise AssertionError('unexpected helper: ' + str(args[0]))
+            sys.addaudithook(offline_only)
+            import jibo_dfu as dfu
+            backup, stock = map(pathlib.Path, sys.argv[2:4])
+            digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+            before, stock_before = digest(backup), digest(stock)
+            tag = 'serial-sha256:' + 'a' * 64
+            manifest = backup.parent / 'backup-manifest.json'
+            manifest.write_text(json.dumps({'kind': 'jibo-var-backup', 'device_tag': tag, 'sha256': before}))
+            preferred = {'image': str(backup), 'sha256': before, 'manifest': str(manifest)}
+            dfu.EXPECTED_VAR_SIZE = backup.stat().st_size
+            dfu.BACKUP_ROOT = backup.parent / 'unused-backups'
+            destination = backup.parent / 'fresh.img'
+            selected, result, remote = dfu._resolve_factory_fresh_var(
+                tag, preferred, stock, destination, 'synthetic-port', 'forbidden-dfu-util')
+            assert selected == preferred and remote is None
+            assert result['identity_restored'] is True and result['mode'] == 'oobe'
+            for key in ('left', 'right', 'inter_camera', 'imu', 'audio'):
+                assert result['calibration_status'][key] == 'restored', key
+            import jibo_calibration_flow as flow
+            import jibo_calibration_restore as restore
+            import jibo_calibration_client as client
+            core = client.load_core()
+            assert core.__name__ == 'jibo_calibration'
+            session = object()
+            with flow.operation(session):
+                assert flow.active() is session
+            assert flow.active() is None
+            assert client.CALIBRATION_SHARING_AVAILABLE is False
+            assert restore.local_identity(destination) == restore.local_identity(backup)
+            for path in result['calibration_files']:
+                assert dfu.images._extract(destination, path, backup.parent / 'readback') == dfu.images._extract(
+                    backup, path, backup.parent / 'original')
+            assert digest(backup) == before and digest(stock) == stock_before
+            modules = {name: str(pathlib.Path(module.__file__).resolve())
+                       for name, module in sys.modules.items() if name.startswith('jibo_')}
+            assert all(pathlib.Path(path).parent == root for path in modules.values()), modules
+            print(json.dumps({'status': 'keep-calibration selected and restored', 'modules': sorted(modules)}))
+            ''')
+        result = subprocess.run([sys.executable, '-I', '-S', '-c', command,
+                                 str(extracted), str(backup), str(stock)], cwd=self.root,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt['status'], 'keep-calibration selected and restored')
+        self.assertTrue({'jibo_calibration', 'jibo_calibration_flow', 'jibo_calibration_restore'}
+                        .issubset(receipt['modules']))
 
     def test_bootstrap_runs_the_packaged_cli(self):
         self.run_package()

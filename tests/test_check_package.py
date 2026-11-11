@@ -8,6 +8,9 @@ import zipfile
 
 from scripts import check_package
 
+CALIBRATION_SOURCES = ('jibo_calibration.py', 'jibo_calibration_flow.py',
+                       'jibo_calibration_restore.py')
+
 
 class CachedPackageTests(unittest.TestCase):
     def setUp(self):
@@ -17,21 +20,22 @@ class CachedPackageTests(unittest.TestCase):
         self.package = self.root / "tool.pyz"
         self.source = self.root / "source"
         self.source.mkdir()
-        for name in check_package.SOURCES:
+        for name in (*check_package.SOURCES, *CALIBRATION_SOURCES):
             (self.source / name).parent.mkdir(parents=True, exist_ok=True)
             (self.source / name).write_bytes(("content of " + name).encode())
         patch_path = self.source / "patches/shofel2-dfu-entry.patch"
         patch_path.parent.mkdir()
         patch_path.write_bytes(b"test entry patch")
 
-    def create_package(self, capability="1"):
+    def create_package(self, capability="1", omitted=()):
         loader_hash = bytes.fromhex(check_package.PINNED_LOADER_SHA256)
         with zipfile.ZipFile(self.package, "w") as archive:
             archive.writestr("entry-patch.sha256", hashlib.sha256(
                 (self.source / "patches/shofel2-dfu-entry.patch").read_bytes()
             ).hexdigest() + "\n")
             for name in check_package.SOURCES:
-                archive.write(self.source / name, name)
+                if name not in omitted:
+                    archive.write(self.source / name, name)
             archive.write(check_package.ROOT / "assets/loader.bin", "loader.bin")
             archive.writestr("tools/shofel2_t124",
                              ("#!/bin/sh\nprintf 'dfu-stage-launch={}\\n'\nexit 0\n"
@@ -55,6 +59,29 @@ class CachedPackageTests(unittest.TestCase):
                 self.assertFalse(ready)
                 self.assertIn(name, reason)
                 (self.source / name).write_bytes(original)
+
+    def test_each_calibration_source_change_requires_rebuild(self):
+        self.create_package()
+        self.assertEqual(check_package.check_package(self.package, self.source), (True, "ready"))
+        for name in CALIBRATION_SOURCES:
+            with self.subTest(source=name):
+                path = self.source / name
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b'changed')
+                    self.assertEqual(check_package.check_package(self.package, self.source),
+                                     (False, name + " has changed since the package was built"))
+                finally:
+                    path.write_bytes(original)
+        self.assertEqual(check_package.check_package(self.package, self.source), (True, "ready"))
+
+    def test_missing_calibration_source_requires_rebuild(self):
+        for omitted in (*((name,) for name in CALIBRATION_SOURCES), CALIBRATION_SOURCES):
+            with self.subTest(omitted=omitted):
+                self.create_package(omitted=omitted)
+                ready, reason = check_package.check_package(self.package, self.source)
+                self.assertFalse(ready)
+                self.assertIn(omitted[0], reason)
 
     def test_valid_package_is_accepted(self):
         self.create_package()
