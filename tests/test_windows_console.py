@@ -166,6 +166,42 @@ def test_download_fixture_accepts_delayed_coalesced_presentation(tmp_path):
     assert 'PASS console: setup-download' in result.stdout
 
 
+def test_download_fixture_refusals_survive_framework_timespan_rounding(tmp_path):
+    """Native Windows PowerShell 5.1 regression (release run 43029164361).
+
+    .NET Framework computes TimeSpan.TotalSeconds as ticks * (1.0 / 1e7), so an
+    injected virtual gap of exactly 400 ms reads as 0.39999999999999997 s and
+    never reaches the 0.4 s fixture threshold. .NET Core divides exactly, which
+    hid this on Linux. Model the Framework arithmetic in the process-local copy
+    of the real consumer and run the unchanged setup-download refusals.
+    """
+    import shutil
+    pwsh = os.environ.get('PWSH') or shutil.which('pwsh') or shutil.which('powershell.exe')
+    if not pwsh:
+        pytest.skip('requires PowerShell')
+    assert pwsh is not None
+    source = (ROOT / 'scripts/release/test-console.ps1').read_text()
+    inject = "Invoke-Expression $downloadSource.Replace($clockLine, '$idle = [ToolkitFixtureIdleClock]::StartNew()')"
+    assert source.count(inject) == 1
+    consumer = (ROOT / 'scripts/release/console.ps1').read_text()
+    reading = '$idle.Elapsed.TotalSeconds'
+    assert consumer.count(reading) == 1
+    framework = "($idle.Elapsed.Ticks * (1.0 / 10000000))"
+    source = source.replace(inject, inject.replace(
+        'Invoke-Expression $downloadSource',
+        "Invoke-Expression $downloadSource.Replace('" + reading + "', '" + framework + "')"))
+    script = tmp_path / 'framework-timespan-download.ps1'
+    script.write_text(source)
+    result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(script),
+                             '-BootstrapPath', str(ROOT / 'scripts/release/bootstrap.ps1'),
+                             '-Case', 'setup-download'], capture_output=True, text=True,
+                            env={**os.environ, 'TMPDIR': str(tmp_path)}, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for mode in ('active', 'idle', 'headers'):
+        assert 'PASS download observation: mode=' + mode in result.stdout
+    assert 'PASS console: setup-download' in result.stdout
+
+
 @pytest.mark.parametrize('args', [
     ['-ShowConsole'], ['-ShowConsole', '-Distro', 'Ubuntu-22.04'],
     ['-Distro', 'Ubuntu-22.04', '-ShowConsole'],

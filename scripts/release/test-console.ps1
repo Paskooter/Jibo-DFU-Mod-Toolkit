@@ -467,9 +467,11 @@ public class ToolkitHttpFixture : IDisposable {
         // Only refusal modes manufacture inactivity. For body-idle, first prove
         // the real consumer received bytes and restarted its clock. Header-idle
         // requires an accepted request but deliberately supplies no response.
+        // The one-shot gap must strictly exceed the 0.4s threshold: .NET
+        // Framework reads exactly 400 ms as TotalSeconds 0.39999999999999997.
         if (holdingResponse && (mode == "headers" || (ObservedBytes > 0 && ClockRestarts > 0)) &&
             Interlocked.CompareExchange(ref idleGap, 1, 0) == 0)
-            Interlocked.Add(ref milliseconds, 400);
+            Interlocked.Add(ref milliseconds, 500);
     }
     public ToolkitHttpFixture(string mode) {
         this.mode = mode; Current = this;
