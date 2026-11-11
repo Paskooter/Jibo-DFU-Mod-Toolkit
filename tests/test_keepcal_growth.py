@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import jibo_dfu as dfu
 import jibo_images as images
-from calibration_support import FILES, IDENTITY, PATHS, make_image
+from calibration_support import FILES, GENERIC_CAMERA, IDENTITY, PATHS, make_image
 from test_updates import STOCK_13_RESIZE_SCRIPT, compact_set
 
 MARKER = '/etc/first_boot_resize.done'
@@ -23,7 +23,7 @@ def inputs(root, package_marker):
     calibration = {PATHS[k]: FILES[k] for k in ('left', 'right', 'inter_camera', 'imu', 'audio')}
     backup = make_image(root, 'backup.img', {**calibration, '/jibo/identity.json': IDENTITY,
         MARKER: b'old completed boot\n', '/jibo/credentials.json': b'{"region":"api"}'})
-    stock = make_image(root, 'stock.img', {**{PATHS[k]: FILES[k] for k in ('left', 'right', 'inter_camera')},
+    stock = make_image(root, 'stock.img', {**{PATHS[k]: GENERIC_CAMERA[k] for k in ('left', 'right', 'inter_camera')},
         SCRIPT: STOCK_13_RESIZE_SCRIPT, **({MARKER: b''} if package_marker else {})})
     return stock, backup, calibration
 
@@ -58,7 +58,7 @@ def run_stock_growth(root, candidate):
     script = script.replace('/var/etc/first_boot_resize.done', str(marker))
     partitions, before = {}, {}
     for index in (1, 2, 5, 4, 6):
-        target = make_image(root, 'p%d.img' % index, {})
+        target = make_image(root, 'p%d.img' % index, {}, size_bytes=4 * 1024 * 1024)
         before[index] = blocks(target)
         with target.open('r+b') as stream:
             stream.truncate(target.stat().st_size * 2)
@@ -86,6 +86,10 @@ def test_keepcal_package_marker_rearmed_and_stock_grows_all_five_partitions(tmp_
     run_stock_growth(tmp_path, candidate)
     assert images._extract(candidate, MARKER, tmp_path / 'absent', optional=True) is None
     assert {path: images.sha256_file(path) for path in original} == original
+    # Re-arming an already prepared candidate is a read-only no-op.
+    prepared_hash = images.sha256_file(candidate)
+    images._rearm_first_boot_resize(candidate)
+    assert images.sha256_file(candidate) == prepared_hash
 
 
 def test_backup_only_marker_is_not_imported_even_without_the_fix(tmp_path):

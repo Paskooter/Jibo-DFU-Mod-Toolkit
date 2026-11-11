@@ -659,10 +659,10 @@ class FactoryFreshVarTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
                          "e2fsprogs required")
     def test_fresh_v3_restores_imu_audio_bytes_modes_and_reports_missing_items(self):
-        from calibration_support import FILES, PATHS, TEMP_DIR, IDENTITY, make_image
+        from calibration_support import FILES, GENERIC_CAMERA, PATHS, TEMP_DIR, IDENTITY, make_image
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
             root = Path(temp)
-            stock = make_image(root, "stock.ext4", {PATHS[k]: FILES[k] for k in
+            stock = make_image(root, "stock.ext4", {PATHS[k]: GENERIC_CAMERA[k] for k in
                                                     ("left", "right", "inter_camera")})
             metadata = {PATHS["imu"]: {"mode": "0100644", "uid": "0", "gid": "0"},
                         PATHS["audio"]: {"mode": "0100600", "uid": "0", "gid": "0"}}
@@ -689,13 +689,14 @@ class FactoryFreshVarTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
                          "e2fsprogs required")
     def test_fresh_v3_removes_every_distortion_cache_from_candidate_only(self):
-        from calibration_support import FILES, PATHS, TEMP_DIR, IDENTITY, make_image, debug
+        from calibration_support import FILES, GENERIC_CAMERA, PATHS, TEMP_DIR, IDENTITY, make_image, debug
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
             root = Path(temp)
             caches = ["/jibo/lps/distortionPrecomputeFile_" + suffix for suffix in
                       ("left_eye_1", "right_eye_0", "left_eye_0", "right_eye_1", "future_variant")]
             cameras = {PATHS[k]: FILES[k] for k in ("left", "right", "inter_camera")}
-            stock = make_image(root, "stock.ext4", {**cameras, **{p: b"stock cache" for p in caches}})
+            stock = make_image(root, "stock.ext4", {**{PATHS[k]: v for k, v in GENERIC_CAMERA.items()},
+                                                   **{p: b"stock cache" for p in caches}})
             backup = make_image(root, "backup.ext4", {**cameras, "/jibo/identity.json": IDENTITY,
                                                        **{p: b"saved cache" for p in caches}})
             debug(stock, "symlink /jibo/lps/distortionPrecomputeFile_link " + PATHS["left"])
@@ -709,11 +710,11 @@ class FactoryFreshVarTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
                          "e2fsprogs required")
     def test_fresh_v3_reports_unsupported_optional_files_without_copying(self):
-        from calibration_support import FILES, PATHS, TEMP_DIR, IDENTITY, make_image, debug
+        from calibration_support import FILES, GENERIC_CAMERA, PATHS, TEMP_DIR, IDENTITY, make_image, debug
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
             root = Path(temp)
             cameras = {PATHS[k]: FILES[k] for k in ("left", "right", "inter_camera")}
-            stock = make_image(root, "stock.ext4", cameras)
+            stock = make_image(root, "stock.ext4", {PATHS[k]: v for k, v in GENERIC_CAMERA.items()})
             backup = make_image(root, "backup.ext4", {**cameras, "/jibo/identity.json": IDENTITY,
                                                        PATHS["imu"]: b'{"private": "secret"}',
                                                        PATHS["audio"]: b"oversize" * 100})
@@ -753,14 +754,14 @@ class FactoryFreshVarTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(name) for name in ("mke2fs", "debugfs", "e2fsck")),
                          "e2fsprogs required")
     def test_fresh_v3_flash_uses_same_robot_partition_backups_before_any_write(self):
-        from calibration_support import FILES, PATHS, TEMP_DIR, IDENTITY, POINTERCAL, FACTORY_RECORD, make_image
+        from calibration_support import FILES, GENERIC_CAMERA, PATHS, TEMP_DIR, IDENTITY, POINTERCAL, FACTORY_RECORD, make_image
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temp:
             root = Path(temp)
             folder = root / "release/flash_jibo/output/images"
             folder.mkdir(parents=True)
             for filename in updates.IMAGE_NAMES:
                 (folder / filename).write_bytes(b"package placeholder")
-            stock = make_image(root, "stock.ext4", {PATHS[k]: FILES[k] for k in
+            stock = make_image(root, "stock.ext4", {PATHS[k]: GENERIC_CAMERA[k] for k in
                                                     ("left", "right", "inter_camera")})
             saved_var = make_image(root, "var-backup.ext4", {**{PATHS[k]: v for k, v in FILES.items()},
                                                             "/jibo/identity.json": IDENTITY})
@@ -858,6 +859,7 @@ class FactoryFreshVarTests(unittest.TestCase):
             put(backup, "/jibo/identity.json", json.dumps({
                 "name": "Example-Unit-Test-Robot", "serial_number": "BOJW-1000-0001-0002-0003",
                 "cpuid": "123", "wifi_mac": "00:11:22:33:44:55"}).encode())
+            toolkit.images._run_debugfs(backup, "set_inode_field /jibo/identity.json mode 0100600", writable=True)
             put(backup, "/etc/wpa_supplicant.conf", b"old-user-network")
             put(stock, "/etc/wpa_supplicant.conf", b"stock-network-template")
             put(stock, "/etc/hostname", b"jibo\n")
@@ -884,10 +886,10 @@ class FactoryFreshVarTests(unittest.TestCase):
                 subprocess.run(["debugfs", "-w", "-R", "rm " + path, str(backup)],
                                check=True, capture_output=True)
                 put(backup, path, b'{ "value" : "default" }')
-            self.assertTrue(toolkit.images.factory_calibration_available(backup, stock))
-            stock_matched = toolkit.images.build_factory_fresh_var(
-                stock, backup, root / "stock-matched.ext4")
-            self.assertTrue(stock_matched["camera_matches_stock"])
+            self.assertFalse(toolkit.images.factory_calibration_available(backup, stock))
+            with self.assertRaisesRegex(toolkit.images.ImageError, "generic camera calibration"):
+                toolkit.images.build_factory_fresh_var(stock, backup, root / "stock-matched.ext4")
+            self.assertFalse((root / "stock-matched.ext4").exists())
 
     def test_calibrated_flash_writes_edited_var_after_backup(self):
         with tempfile.TemporaryDirectory() as temp:

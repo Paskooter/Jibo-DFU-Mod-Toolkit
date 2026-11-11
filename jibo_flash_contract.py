@@ -543,13 +543,17 @@ def verify_archive(source, manifest=None):
 
 
 
-def workspace_bytes(manifest, var_capacity=524288000):
+def workspace_bytes(manifest, var_capacity=524288000, replay_capacity=None):
     total = validate_members(manifest)
     sizes = {member['role']: member['size'] for member in manifest['members']}
     largest = max(sizes.values())
     # In addition to extraction/copies, rollback and readback, keep-calibration
     # may create distinct candidates for BOTH root slots and the skills image.
-    calibration_copies = 2 * sizes['rootfs'] + sizes['skills']
+    # Journal reads need ONE full partition backup copy at a time, not merely
+    # its compact package prefix. Before GPT is available reserve at least var;
+    # the DFU preflight supplies the largest eligible partition capacity.
+    replay_copy = max(var_capacity, replay_capacity or 0)
+    calibration_copies = 2 * sizes['rootfs'] + sizes['skills'] + replay_copy
     return max(manifest.get('workspace_bytes', 0),
                2 * total + 3 * var_capacity + max(largest, var_capacity) +
                calibration_copies + 1024**3)

@@ -143,7 +143,7 @@ class ReleaseTests(unittest.TestCase):
 
     @contextmanager
     def flash_fixture(self, cameras=True):
-        from calibration_support import make_image, FILES, PATHS, IDENTITY
+        from calibration_support import make_image, FILES, GENERIC_CAMERA, PATHS, IDENTITY
         from test_updates import compact_set
         directory = self.root / ("flash-" + str(len(list(self.root.glob("flash-*")))))
         directory.mkdir()
@@ -151,7 +151,7 @@ class ReleaseTests(unittest.TestCase):
         if cameras:
             entries.update({PATHS[k]: FILES[k] for k in ("left", "right", "inter_camera", "imu", "audio")})
         source = make_image(directory, "backup.img", entries)
-        stock = make_image(directory, "stock.img", {**{PATHS[k]: FILES[k] for k in ("left", "right", "inter_camera")},
+        stock = make_image(directory, "stock.img", {**{PATHS[k]: GENERIC_CAMERA[k] for k in ("left", "right", "inter_camera")},
                                                    "/jibo/mode.json": b'{"mode":"oobe"}'})
         tag = "serial-sha256:" + "a" * 64
         digest = dfu._sha256_file(source)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline, secret-conscious editing helpers for Jibo var images."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -97,6 +98,32 @@ def _replay_journal_on_copy(image):
     return result.returncode == 1
 
 
+@contextmanager
+def _settled_image(image, workdir=None):
+    """Read checkpointed ext4 plus its journal, without modifying the input.
+
+    debugfs does not replay journals. Charge a private disposable replay copy to
+    the caller's workspace (the input's filesystem by default), and remove it
+    even if replay, validation or a consumer fails.
+    """
+    image = Path(image)
+    if image.is_symlink() or not image.is_file():
+        raise ImageError("Calibration inputs must be regular partition images.")
+    if "needs_recovery" not in _run_debugfs(image, "features").split():
+        yield image
+        return
+    workdir = Path(workdir) if workdir is not None else image.parent
+    required = image.stat().st_size
+    if shutil.disk_usage(workdir).free < required:
+        raise ImageError("Not enough free space for calibration journal replay: " + str(required) + " bytes required.")
+    with tempfile.TemporaryDirectory(prefix="jibo-journal-replay-", dir=workdir) as temporary:
+        working = Path(temporary) / "settled.img"
+        shutil.copyfile(image, working)
+        working.chmod(0o600)
+        _replay_journal_on_copy(working)
+        yield working
+
+
 def _extract(image, image_path, destination, optional=False):
     destination = Path(destination)
     if destination.exists():
@@ -170,14 +197,52 @@ def _put_factory_file(image, image_path, content, workdir, mode, source_metadata
                      writable=True)
     if _extract(image, image_path, Path(workdir) / "verified") != content:
         raise ImageError("The factory file did not match its offline readback: " + image_path)
+    if source_metadata is not None and _file_metadata(image, image_path) != source_metadata:
+        raise ImageError("Restored calibration permissions did not match the backup.")
 
 
-def _factory_inputs(backup, stock):
+def _check_camera_calibration(stock, files, workdir):
+    """Reject each known generic camera independently of the others.
+
+    Parsed package equality ignores formatting and additional fields: adding
+    metadata does not turn generic measurements into this robot's calibration.
+    Passing this check is not proof of factory provenance or mechanical safety.
+    """
+    import jibo_calibration as calibration
+    stock_matches = calibration.stock_equivalent(files)
+    generic = []
+    for index, (key, path) in enumerate(zip(("left", "right", "inter_camera"), FACTORY_CAMERA_PATHS)):
+        content = _extract(stock, path, Path(workdir) / ("default-" + str(index)))
+        if content is None:
+            raise ImageError("Missing package camera calibration at " + path)
+        try:
+            default = json.loads(content.decode("utf-8"))
+            value = json.loads(files[key].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ImageError("Invalid camera calibration JSON at " + path) from exc
+        if (not isinstance(default, dict) or not default or not isinstance(value, dict) or
+                not set(default).issubset(value)):
+            raise ImageError("The saved camera calibration does not match the package schema.")
+        compared = set(default)
+        if key in ("left", "right"):
+            compared -= {"camera_id", "version", "frame_name", "distortion_precompute_filename",
+                         "image_width", "image_height"}
+        if not compared:
+            raise ImageError("The package camera schema contains no calibration measurements.")
+        if all(value[field] == default[field] for field in compared) or stock_matches.get(key, False):
+            generic.append(path)
+    if generic:
+        raise ImageError("The var backup contains generic camera calibration, not a robot-specific set: " +
+                         ", ".join(generic))
+
+
+def _factory_inputs(backup, stock, workdir=None):
     """Read identity and camera files from one robot's verified var."""
-    with tempfile.TemporaryDirectory(prefix="jibo-factory-input-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="jibo-factory-input-", dir=workdir) as temporary:
         raw = {}
         parsed = {}
         for index, path in enumerate((FACTORY_IDENTITY_PATH, *FACTORY_CAMERA_PATHS)):
+            _file_metadata(backup, path)  # Accept regular files only.
             content = _extract(backup, path, Path(temporary) / str(index))
             if not content or len(content) > 65536:
                 raise ImageError("Missing or oversized factory file in the var backup: " + path)
@@ -195,25 +260,18 @@ def _factory_inputs(backup, stock):
                 not all(isinstance(identity.get(key), str) and identity[key]
                         for key in ("serial_number", "cpuid", "wifi_mac")):
             raise ImageError("The var backup does not contain a complete robot identity.")
-        defaults = []
-        for index, path in enumerate(FACTORY_CAMERA_PATHS):
-            content = _extract(stock, path, Path(temporary) / ("default-" + str(index)))
-            try:
-                value = json.loads(content.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ImageError("The package has invalid default calibration at " + path) from exc
-            if not isinstance(value, dict) or not value or not set(value).issubset(parsed[path]):
-                raise ImageError("The saved camera calibration does not match the package schema.")
-            defaults.append(value)
-        camera_matches_stock = all(parsed[path] == default
-                                   for path, default in zip(FACTORY_CAMERA_PATHS, defaults))
-        return raw, name, camera_matches_stock
+        camera = {key: raw[path] for key, path in zip(("left", "right", "inter_camera"), FACTORY_CAMERA_PATHS)}
+        _check_camera_calibration(stock, camera, temporary)
+        # Rejecting known defaults does not establish factory provenance.
+        return raw, name, False
 
 
-def factory_calibration_available(backup, stock):
+def factory_calibration_available(backup, stock, workdir=None):
     """Whether this var backup can supply a factory-like fresh stock image."""
     try:
-        _factory_inputs(backup, stock)
+        workdir = Path(stock).parent if workdir is None else workdir
+        with _settled_image(backup, workdir) as settled:
+            _factory_inputs(settled, stock, workdir)
     except ImageError:
         return False
     return True
@@ -307,19 +365,23 @@ def _rearm_first_boot_resize(candidate):
 def build_factory_fresh_var(stock, backup, destination):
     """Make stock var fresh for OOBE while retaining this robot's factory files."""
     stock, backup, destination = Path(stock), Path(backup), Path(destination)
-    if stock.is_symlink() or backup.is_symlink() or destination.exists() or destination.is_symlink():
+    if (stock.is_symlink() or not stock.is_file() or backup.is_symlink() or not backup.is_file() or
+            destination.exists() or destination.is_symlink()):
         raise ImageError("Factory var inputs must be regular files and the output must be new.")
-    raw, name, camera_matches_stock = _factory_inputs(backup, stock)
+
     restored = list(FACTORY_CAMERA_PATHS)
     status = {"left": "restored", "right": "restored", "inter_camera": "restored",
               "touchscreen": "not preserved (no backup of that partition)",
               "factory_record": "not preserved (no backup of that partition)"}
     try:
-        shutil.copyfile(stock, destination)
-        destination.chmod(0o600)
-        with tempfile.TemporaryDirectory(prefix="jibo-factory-edit-") as temporary:
+        with _settled_image(backup, destination.parent) as backup, \
+                tempfile.TemporaryDirectory(prefix="jibo-factory-edit-", dir=destination.parent) as temporary:
+            raw, name, camera_matches_stock = _factory_inputs(backup, stock, temporary)
+            shutil.copyfile(stock, destination)
+            destination.chmod(0o600)
             for path in FACTORY_CAMERA_PATHS:
-                _put_factory_file(destination, path, raw[path], temporary, 0o644)
+                _put_factory_file(destination, path, raw[path], temporary, 0o644,
+                                  source_metadata=_file_metadata(backup, path))
             for key in ("imu", "audio"):
                 spec, content, item_status, metadata = _calibration_item(backup, key, temporary)
                 status[key] = item_status
@@ -329,7 +391,8 @@ def build_factory_fresh_var(stock, backup, destination):
                     restored.append(spec.image_path)
             removed_caches = _remove_distortion_caches(destination)
             _put_factory_file(destination, FACTORY_IDENTITY_PATH,
-                              raw[FACTORY_IDENTITY_PATH], temporary, 0o600)
+                              raw[FACTORY_IDENTITY_PATH], temporary, 0o600,
+                              source_metadata=_file_metadata(backup, FACTORY_IDENTITY_PATH))
             _put_factory_file(destination, "/jibo/mode.json", b'{"mode":"oobe"}',
                               temporary, 0o600)
             _put_factory_file(destination, "/etc/hostname", (name + "\n").encode("ascii"),
@@ -370,9 +433,10 @@ def build_calibrated_partition(stock, backup, destination, partition):
         if backup.is_symlink() or not backup.is_file():
             raise ImageError("The calibration backup must be a regular partition image.")
     try:
-        with tempfile.TemporaryDirectory(prefix="jibo-partition-calibration-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="jibo-partition-calibration-", dir=destination.parent) as temporary:
             if backup is not None:
-                spec, raw, status, metadata = _calibration_item(backup, key, temporary)
+                with _settled_image(backup, destination.parent) as settled:
+                    spec, raw, status, metadata = _calibration_item(settled, key, temporary)
             if raw is not None:
                 shutil.copyfile(stock, destination)
                 destination.chmod(0o600)

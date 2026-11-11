@@ -2207,8 +2207,9 @@ def _select_factory_calibration_backup(device_tag, preferred, stock_var):
                 return backup
         except (DfuError, OSError, ValueError, TypeError):
             continue
-    raise DfuError("No verified var backup for this robot contains its identity and camera "
-                   "calibration. No partition write was attempted.")
+    raise DfuError("No verified var backup for this robot contains its identity and its own camera "
+                   "calibration (generic package camera files do not count). "
+                   "No partition write was attempted.")
 
 
 def _resolve_factory_fresh_var(device_tag, backup, stock, destination, port, dfu_util):
@@ -2225,7 +2226,7 @@ def _resolve_factory_fresh_var(device_tag, backup, stock, destination, port, dfu
             raise  # Scripted/CLI write approval does not authorize a network lookup.
         from jibo_calibration_restore import local_identity, build_fresh_var
         _verify_var_backup_for_robot(backup, device_tag)
-        local_identity(backup["image"])
+        local_identity(backup["image"], workdir=Path(destination).parent)
         identity = calibration_identity(port, dfu_util)
         download = session.lookup_for_fresh_setup(identity)
         if download is None:
@@ -2622,8 +2623,9 @@ def _prepare_partition_calibration(prepared, capacities, device_tag, workdir):
         for backup in _saved_calibration_partitions(device_tag, names, capacities):
             if selected is None:
                 selected = backup
-            with tempfile.TemporaryDirectory(prefix="calibration-check-", dir=workdir) as temp:
-                _spec, raw, _status, _metadata = images._calibration_item(backup["image"], key, temp)
+            with tempfile.TemporaryDirectory(prefix="calibration-check-", dir=workdir) as temp, \
+                    images._settled_image(backup["image"], temp) as settled:
+                _spec, raw, _status, _metadata = images._calibration_item(settled, key, temp)
             if raw is not None:
                 selected = backup
                 break
@@ -2651,9 +2653,9 @@ def _confirm_update_plan(plan, confirmation):
     return True
 
 
-def _hosted_space_precheck(metadata, out, var_capacity):
+def _hosted_space_precheck(metadata, out, var_capacity, replay_capacity=None):
     import jibo_flash_contract
-    required = jibo_flash_contract.workspace_bytes(metadata, var_capacity)
+    required = jibo_flash_contract.workspace_bytes(metadata, var_capacity, replay_capacity)
     volumes = {}
     for selected, budget in ((Path(out).expanduser().absolute() if out else BACKUP_ROOT,
                                required), (BACKUP_ROOT, var_capacity + 1024**3)):
@@ -2727,7 +2729,8 @@ def flash_update(package_path, var_policy=flash_policy.KEEP, port=None, dfu_util
                            'metadata_sha256': phoenix['_metadata_sha256'],
                            'var_policy': var_policy, 'image_notice': flash_policy.PHOENIX_LINE,
                            'scope': 'Userspace filesystems only; no boot0/boot1, BCT, GPT, fuses or universal brick recovery'}
-        _hosted_space_precheck(phoenix, out, capacities['var'])
+        replay_capacity = max(capacities[name] for name in ('var', 'rootfsA', 'rootfsB', 'skills'))
+        _hosted_space_precheck(phoenix, out, capacities['var'], replay_capacity)
     if dry_run:
         return plan
     print("\nFull-flash update plan:")

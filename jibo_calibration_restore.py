@@ -13,11 +13,13 @@ import jibo_images as images
 from jibo_calibration_client import ClientError, _json, load_core
 
 
-def local_identity(image):
-    with tempfile.TemporaryDirectory(prefix="jibo-local-identity-") as directory:
+def local_identity(image, workdir=None):
+    workdir = Path(image).parent if workdir is None else workdir
+    with images._settled_image(image, workdir) as settled, \
+            tempfile.TemporaryDirectory(prefix="jibo-local-identity-", dir=workdir) as directory:
         path = images.FACTORY_IDENTITY_PATH
-        images._file_metadata(image, path)  # Regular files only.
-        raw = images._extract(image, path, Path(directory) / "identity")
+        images._file_metadata(settled, path)  # Regular files only.
+        raw = images._extract(settled, path, Path(directory) / "identity")
         if not raw or len(raw) > 65536:
             raise ClientError("A complete verified local robot identity is required; calibration cannot reconstruct it.")
         value = _json(raw)
@@ -50,12 +52,14 @@ def build_fresh_var(stock, identity_image, destination, files, core=None):
     for key, data in files.items():
         if core.validate_item(key, data) != data:
             raise ClientError("Calibration validator changed original bytes.")
-    identity, name = local_identity(identity_image)
+    with tempfile.TemporaryDirectory(prefix="jibo-camera-check-", dir=destination.parent) as temporary:
+        images._check_camera_calibration(stock, files, temporary)
+    identity, name = local_identity(identity_image, workdir=destination.parent)
     try:
         shutil.copyfile(stock, destination)
         destination.chmod(0o600)
         images._replay_journal_on_copy(destination)
-        with tempfile.TemporaryDirectory(prefix="jibo-remote-calibration-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="jibo-remote-calibration-", dir=destination.parent) as temporary:
             for directory in ("/jibo", "/jibo/lps", "/etc"):
                 _ensure_directory(destination, directory)
             for key, data in files.items():

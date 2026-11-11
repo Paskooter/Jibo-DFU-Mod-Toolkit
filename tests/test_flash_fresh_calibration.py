@@ -99,13 +99,13 @@ def test_real_ext4_fresh_backup_then_write_exact_policy_bytes(tmp_path, policy, 
     from contextlib import ExitStack
     from types import SimpleNamespace
     import jibo_images as images
-    from calibration_support import make_image, FILES, PATHS, IDENTITY, POINTERCAL, FACTORY_RECORD
+    from calibration_support import make_image, FILES, GENERIC_CAMERA, PATHS, IDENTITY, POINTERCAL, FACTORY_RECORD
     from test_updates import compact_set
     entries = {PATHS[k]: FILES[k] for k in ('left','right','inter_camera','imu','audio')}
     entries.update({'/jibo/identity.json': IDENTITY, '/jibo/credentials.json': b'{"region":"api"}',
                     '/etc/wpa_supplicant.conf': b'network={ssid="Test"}', '/jibo/user.txt': b'private'})
     backup_img = make_image(tmp_path, 'backup.img', entries)
-    stock_entries = {PATHS[k]: FILES[k] for k in ('left', 'right', 'inter_camera')}
+    stock_entries = {PATHS[k]: GENERIC_CAMERA[k] for k in ('left', 'right', 'inter_camera')}
     stock_entries['/jibo/mode.json'] = b'{"mode":"oobe"}'
     stock = make_image(tmp_path, 'stock.img', stock_entries)
     tag = 'serial-sha256:' + 'a' * 64
