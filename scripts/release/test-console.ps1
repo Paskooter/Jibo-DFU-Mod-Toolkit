@@ -416,31 +416,63 @@ using System.Threading;
 public class ToolkitFixtureIdleClock {
     long origin = ToolkitHttpFixture.Milliseconds;
     public static ToolkitFixtureIdleClock StartNew() { return new ToolkitFixtureIdleClock(); }
-    public void Restart() { origin = ToolkitHttpFixture.Milliseconds; }
-    public TimeSpan Elapsed { get { return TimeSpan.FromMilliseconds(ToolkitHttpFixture.Milliseconds - origin); } }
+    public void Restart() {
+        origin = ToolkitHttpFixture.Milliseconds;
+        ToolkitHttpFixture.Current.ClockRestarts++;
+    }
+    public TimeSpan Elapsed {
+        get {
+            ToolkitHttpFixture.Current.AdvanceHeldResponse();
+            return TimeSpan.FromMilliseconds(ToolkitHttpFixture.Milliseconds - origin);
+        }
+    }
 }
 public class ToolkitHttpFixture : IDisposable {
     readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
-    readonly AutoResetEvent acknowledged = new AutoResetEvent(false);
     readonly ManualResetEvent stopped = new ManualResetEvent(false);
     readonly object gate = new object();
+    readonly string mode;
     static long milliseconds;
-    int requiredBlock, observedBlock;
+    long observedBytes, sentBytes;
+    int byteObservations, idleGap;
+    volatile bool holdingResponse;
     TcpClient client;
     Thread thread;
     public string Error;
+    public int ClockRestarts, PresentationEvents;
+    public static ToolkitHttpFixture Current;
     public static long Milliseconds { get { return Interlocked.Read(ref milliseconds); } }
-    public int ObservedBlocks { get { lock (gate) { return observedBlock; } } }
+    public long ObservedBytes { get { lock (gate) { return observedBytes; } } }
+    public int ByteObservations { get { lock (gate) { return byteObservations; } } }
+    public long SentBytes { get { return Interlocked.Read(ref sentBytes); } }
+    public bool IdleGapApplied { get { return Thread.VolatileRead(ref idleGap) != 0; } }
     public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
     public void Observe(int percent) {
+        // Presentation is an observation only. It never releases a body write:
+        // WebClient may buffer/coalesce progress before the UI samples it.
+        if (percent > 0 && percent < 100) PresentationEvents++;
+    }
+    public void ObserveBytes(long bytes) {
         lock (gate) {
-            if (requiredBlock > observedBlock && percent >= 100 * requiredBlock / 8) {
-                observedBlock = requiredBlock;
-                acknowledged.Set();
+            if (bytes > observedBytes) {
+                observedBytes = bytes; byteObservations++;
+                // Advance the injected clock at a REAL consumer-byte observation,
+                // before the real consumer restarts its idle clock. One interval
+                // exceeds the 0.4s threshold: omitting Restart must fail active.
+                Interlocked.Add(ref milliseconds, 500);
             }
         }
     }
+    public void AdvanceHeldResponse() {
+        // Only refusal modes manufacture inactivity. For body-idle, first prove
+        // the real consumer received bytes and restarted its clock. Header-idle
+        // requires an accepted request but deliberately supplies no response.
+        if (holdingResponse && (mode == "headers" || (ObservedBytes > 0 && ClockRestarts > 0)) &&
+            Interlocked.CompareExchange(ref idleGap, 1, 0) == 0)
+            Interlocked.Add(ref milliseconds, 400);
+    }
     public ToolkitHttpFixture(string mode) {
+        this.mode = mode; Current = this;
         Interlocked.Exchange(ref milliseconds, 0);
         listener.Start();
         thread = new Thread(delegate() {
@@ -448,50 +480,54 @@ public class ToolkitHttpFixture : IDisposable {
                 using (client = listener.AcceptTcpClient()) {
                     var stream = client.GetStream();
                     stream.Read(new byte[4096], 0, 4096);
-                    // Deliberate scheduler/transport startup delay: the old 0.4s
-                    // wall-clock fixture fails here. It is not product idle time.
-                    if (mode == "active") Thread.Sleep(600);
+                    // Deliberate transport startup delay, not virtual idle time.
+                    if (mode == "active" && stopped.WaitOne(600)) return;
                     if (mode == "headers") {
-                        Interlocked.Add(ref milliseconds, 400);
-                        stopped.WaitOne(5000); return;
+                        holdingResponse = true;
+                        if (!stopped.WaitOne(5000) && !IdleGapApplied) throw new Exception("Header refusal was not observed");
+                        return;
                     }
                     byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n");
                     stream.Write(header, 0, header.Length);
                     byte[] block = new byte[65536];
                     for (int i = 0; i < 8; i++) {
-                        lock (gate) { requiredBlock = i + 1; }
-                        Interlocked.Add(ref milliseconds, 100);
                         stream.Write(block, 0, block.Length); stream.Flush();
-                        // Do not send the next block until the REAL downloader's
-                        // progress reaches this one. No sleep-then-assume oracle.
-                        if (i < 7 && !acknowledged.WaitOne(5000)) throw new Exception("Download progress was not observed");
-                        if (mode == "idle") {
-                            Interlocked.Add(ref milliseconds, 400);
-                            stopped.WaitOne(5000); return;
+                        Interlocked.Add(ref sentBytes, block.Length);
+                        if (mode == "idle" && i == 3) {
+                            holdingResponse = true;
+                            if (!stopped.WaitOne(5000) && !IdleGapApplied) throw new Exception("Body refusal was not observed");
+                            return;
                         }
+                        // Pace the real response to expose intermediate samples,
+                        // but NEVER wait for a presentation callback or assume a
+                        // one-to-one relation between writes and progress events.
+                        if (i < 7 && stopped.WaitOne(100)) return;
                     }
                 }
-            } catch (Exception e) { if (!stopped.WaitOne(0)) Error = e.GetType().Name; }
+            } catch (Exception e) { if (!stopped.WaitOne(0)) Error = e.Message; }
         });
         thread.IsBackground = true; thread.Start();
     }
     public void Dispose() {
         stopped.Set(); listener.Stop(); if (client != null) client.Close();
         if (!thread.Join(1000)) throw new Exception("Download fixture thread survived cleanup");
-        acknowledged.Dispose(); stopped.Dispose();
+        stopped.Dispose();
     }
 }
 '@
-    # Inject only the inactivity clock in a process-local copy of the REAL
-    # consumer. Keep its 0.4s test threshold, 120s product default, transfer,
-    # progress, cancellation and all result assertions unchanged. Real I/O is
-    # bounded by the server's 5s observation gates and the outer 30s test cap.
+    # Instrument only the inactivity clock and a raw byte-sample observation in a
+    # process-local copy of the REAL consumer. Keep the 0.4s fixture threshold,
+    # 120s product default, WebClient, transfer, presentation and cancellation.
+    # Refusal holds retain their 5s cap and the Python caller retains its 30s cap.
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $BootstrapPath) 'console.ps1'), [ref]$tokens, [ref]$errors)
     if ($errors.Count) { throw ($errors | Out-String) }
     $downloadSource = @($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Receive-ToolkitDownload'}, $true))[0].Extent.Text
     $clockLine = '$idle = [Diagnostics.Stopwatch]::StartNew()'
     if ($downloadSource.Split(@($clockLine), [StringSplitOptions]::None).Count -ne 2) { throw 'Idle-clock injection did not match exactly once' }
+    $sampleLine = '$bytes = $transfer.Bytes'
+    if ($downloadSource.Split(@($sampleLine), [StringSplitOptions]::None).Count -ne 2) { throw 'Byte observation did not match exactly once' }
+    $downloadSource = $downloadSource.Replace($sampleLine, $sampleLine + '; $server.ObserveBytes($bytes)')
     Invoke-Expression $downloadSource.Replace($clockLine, '$idle = [ToolkitFixtureIdleClock]::StartNew()')
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('dfu-download-' + [guid]::NewGuid().ToString('N'))
     Initialize-ToolkitLog -Root $tmp -Build ('d' * 40)
@@ -514,10 +550,20 @@ public class ToolkitHttpFixture : IDisposable {
                 if ($stalled -ne ($mode -ne 'active')) { throw "Wrong download result: $mode" }
                 if ($mode -eq 'active' -and ($script:intermediate -lt 1 -or (Get-Item $file).Length -ne 524288)) { throw 'Download lacked real byte progress' }
                 if ($stalled -and (Test-Path $file)) { throw 'Stalled download was not removed' }
-                if ($server.Error) { throw ('Download fixture failed: ' + $server.Error) }
-                if ($mode -eq 'active' -and $server.ObservedBlocks -lt 7) { throw 'Active blocks were not observed before the next send' }
-                if ($mode -eq 'idle' -and $server.ObservedBlocks -ne 1) { throw 'Idle clock advanced before first-byte progress' }
+                if ($mode -eq 'active') {
+                    if ($server.ByteObservations -lt 1 -or $server.ClockRestarts -ne $server.ByteObservations -or [ToolkitHttpFixture]::Milliseconds -lt 500 -or $server.IdleGapApplied) { throw 'Active bytes did not exercise the real idle-clock reset' }
+                    $hasher = [Security.Cryptography.SHA256]::Create()
+                    try { $expectedHash = [BitConverter]::ToString($hasher.ComputeHash((New-Object byte[] 524288))).Replace('-', '') }
+                    finally { $hasher.Dispose() }
+                    if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Downloaded bytes differ from the loopback body' }
+                }
+                if ($mode -eq 'idle' -and ($server.ObservedBytes -le 0 -or $server.ClockRestarts -lt 1 -or -not $server.IdleGapApplied)) { throw 'Idle clock advanced before first-byte progress' }
+                if ($mode -eq 'headers' -and ($server.ObservedBytes -ne 0 -or $server.ClockRestarts -ne 0 -or -not $server.IdleGapApplied)) { throw 'Header-idle refusal did not observe an empty accepted response' }
             } finally { $server.Dispose() }
+            if ($server.Error) { throw ('Download fixture failed: ' + $server.Error) }
+            if ($mode -eq 'active' -and $server.SentBytes -ne 524288) { throw 'Active producer did not send the complete body' }
+            if ($mode -eq 'idle' -and $server.SentBytes -ne 262144) { throw 'Body-idle producer did not hold a partial response' }
+            Write-Output ('PASS download observation: mode={0}; bytes={1}; samples={2}; resets={3}; presentation={4}; virtual_ms={5}' -f $mode, $server.ObservedBytes, $server.ByteObservations, $server.ClockRestarts, $server.PresentationEvents, [ToolkitHttpFixture]::Milliseconds)
         }
         Write-Output "PASS console: $Case"
     } finally { Remove-Item -Recurse -Force $tmp }

@@ -118,6 +118,54 @@ def test_console_lifecycle_with_mocked_win32(tmp_path, case):
     assert 'PASS console: ' + case in result.stdout
 
 
+def test_download_fixture_accepts_delayed_coalesced_presentation(tmp_path):
+    """UI notifications may coalesce; they must never gate the HTTP producer."""
+    import shutil
+    pwsh = os.environ.get('PWSH') or shutil.which('pwsh') or shutil.which('powershell.exe')
+    if not pwsh:
+        pytest.skip('requires PowerShell')
+    assert pwsh is not None
+    source = (ROOT / 'scripts/release/test-console.ps1').read_text()
+    observe = 'if ($server) { $server.Observe([int]$Percent) }'
+    assert source.count(observe) == 1
+    # Keep the real WebClient, bytes and consumer loop. Delay the first positive
+    # presentation and coalesce subsequent notifications until at least half the
+    # body has arrived. The old per-64-KiB presentation barrier deadlocks here.
+    source = source.replace(observe, r"""
+        if ($Percent -gt 0) {
+            $script:positivePresentations++
+            if ($script:positivePresentations -eq 1 -or $Percent -lt 50) {
+                $script:withheldPresentations++
+            } else {
+                $server.Observe([int]$Percent)
+                $script:deliveredPresentations++
+            }
+        }
+""")
+    reset = '$script:intermediate = 0'
+    assert source.count(reset) == 1
+    source = source.replace(reset, reset + r"""
+            $script:positivePresentations = 0
+            $script:withheldPresentations = 0
+            $script:deliveredPresentations = 0
+""")
+    check = "if ($stalled -and (Test-Path $file)) { throw 'Stalled download was not removed' }"
+    assert source.count(check) == 1
+    source = source.replace(check, check + r"""
+                if ($mode -eq 'active' -and ($script:withheldPresentations -lt 1 -or $script:deliveredPresentations -lt 1)) {
+                    throw 'Controlled delayed/coalesced presentation was not exercised'
+                }
+""")
+    script = tmp_path / 'coalesced-download.ps1'
+    script.write_text(source)
+    result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(script),
+                             '-BootstrapPath', str(ROOT / 'scripts/release/bootstrap.ps1'),
+                             '-Case', 'setup-download'], capture_output=True, text=True,
+                            env={**os.environ, 'TMPDIR': str(tmp_path)}, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PASS console: setup-download' in result.stdout
+
+
 @pytest.mark.parametrize('args', [
     ['-ShowConsole'], ['-ShowConsole', '-Distro', 'Ubuntu-22.04'],
     ['-Distro', 'Ubuntu-22.04', '-ShowConsole'],
