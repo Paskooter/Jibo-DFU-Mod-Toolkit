@@ -1,97 +1,127 @@
-name: macOS portability
+name: Final-source Windows native acceptance (TEST ONLY)
 
+# Isolated wrapper branch only; NOT FOR MERGE. Registered dispatch path reused
+# without modifying main, the private candidate or its real release pipeline.
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: windows-full-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            architecture: x86_64
-          - runner: macos-15
-            architecture: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      - name: Install native dependencies
+      - name: Check out immutable test wrapper
+        uses: actions/checkout@v5
+        with:
+          path: acceptance-wrapper
+          persist-credentials: false
+      - name: Check out immutable final candidate source
+        uses: actions/checkout@v5
+        with:
+          ref: 2afc92a4b9f0bea5a52015f831d96619b3abd6ca
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install source-test dependency only
+        shell: powershell
         run: |
-          brew install --overwrite python@3.12 dfu-util libusb e2fsprogs openssl@3
-          "$(brew --prefix python@3.12)/bin/python3.12" -m venv "$RUNNER_TEMP/portability-venv"
-          "$RUNNER_TEMP/portability-venv/bin/python" -m pip install pytest pillow cryptography==46.0.3 certifi==2026.10.19
-          printf '%s\n' "$RUNNER_TEMP/portability-venv/bin" >> "$GITHUB_PATH"
-          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Check native launcher and USB enumeration
-        env:
-          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          python -m pip install pytest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run original Windows bootstrap console window and readiness checks
+        shell: powershell
         run: |
-          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
-          /bin/bash -n run.sh run-macos.sh
-          ./run.sh --help
-          ./run.sh detect
-      - name: Verify the native RCM-to-DFU entry helper
+          $ErrorActionPreference = 'Continue'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File acceptance-wrapper/scripts/release/test-windows-final-source.ps1 -ToolkitRoot (Join-Path $env:GITHUB_WORKSPACE 'candidate') -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts') -Group source
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          exit $code
+      - name: Run original complete 49-phase native USB acceptance
+        if: always()
+        shell: powershell
         run: |
-          test -x .build/file-level-entry/shofel2_t124
-          test -s .build/file-level-entry/intermezzo.bin
-          test -s .build/file-level-entry/dfu_stage2.bin
-          test "$(.build/file-level-entry/shofel2_t124 --dfu-stage-capability)" = "dfu-stage-launch=1"
-      - name: Build the entry payloads from source (Apple silicon)
-        if: matrix.architecture == 'arm64'
+          $ErrorActionPreference = 'Continue'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File acceptance-wrapper/scripts/release/test-windows-final-source.ps1 -ToolkitRoot (Join-Path $env:GITHUB_WORKSPACE 'candidate') -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts') -Group usb
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          exit $code
+      - name: Run original native support acceptance
+        if: always()
+        timeout-minutes: 3
+        shell: powershell
         run: |
-          brew install arm-none-eabi-gcc
-          python3 scripts/build_file_level_entry.py --build-payloads \
-            --source .build/ShofEL2-for-T124 --out "$RUNNER_TEMP/entry-from-source"
-          test "$("$RUNNER_TEMP/entry-from-source/shofel2_t124" --dfu-stage-capability)" = "dfu-stage-launch=1"
-      - name: Test Mac USB selection and launcher behavior
-        run: python3 -m unittest discover -s tests -p test_macos.py -v
-      - name: Test bounded DFU reads
-        run: python3 -m unittest discover -s tests -p test_dfu_bounded.py -v
-      - name: Test boot-screen delivery and bundled renderers
+          $ErrorActionPreference = 'Continue'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File acceptance-wrapper/scripts/release/test-windows-final-source.ps1 -ToolkitRoot (Join-Path $env:GITHUB_WORKSPACE 'candidate') -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts') -Group support
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          exit $code
+      - name: Retain original native receipts before strict post-upload gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-final-original-${{ github.sha }}
+          path: windows-final-receipts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require original strict full USB receipt gate
+        if: always()
+        shell: powershell
         run: |
-          # Homebrew has no BusyBox formula; the BusyBox ash hook tests skip here and run in Linux CI/locally.
-          brew install coreutils node
-          ext4_prefix=$(brew --prefix e2fsprogs)
-          coreutils_prefix=$(brew --prefix coreutils)
-          openssl_prefix=$(brew --prefix openssl@3)
-          export PATH="$openssl_prefix/bin:$ext4_prefix/sbin:$ext4_prefix/bin:$coreutils_prefix/libexec/gnubin:$PATH"
-          python3 -m unittest discover -s tests -p 'test_boot_network_status*.py' -v
-          python3 -m unittest discover -s tests -p test_boot_network_release_gate.py -v
-          python3 -m unittest discover -s tests -p test_package.py -v
-          python3 -m unittest discover -s tests -p test_check_package.py -v
-          node tests/ota-safe-overlay.test.js
-          node tests/startup-view.test.js
-          node tests/startup-view.test.js assets/boot-network-status/startup-view-x11-early.js
-          node tests/startup-view-dom.test.js
-          node tests/startup-view.test.js assets/boot-network-status/startup-view-dom.js '^(default source|source |UTF8)'
-      - name: Test pinned direct-download image hosts offline
+          $env:GITHUB_SHA = '2afc92a4b9f0bea5a52015f831d96619b3abd6ca'
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE 'candidate')
+          $root = Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts'
+          $ErrorActionPreference = 'Continue'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/release/test-usbipd-native.ps1 -Mode Validate -OutputRoot (Join-Path $root 'usbipd-native-receipts') 1> (Join-Path $root 'usb-validate-stdout.txt') 2> (Join-Path $root 'usb-validate-stderr.txt')
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          [IO.File]::WriteAllText((Join-Path $root 'usb-validate-exit.json'), ('{"exit_code":' + $code + '}'))
+          Get-Content -LiteralPath (Join-Path $root 'usb-validate-stdout.txt')
+          Get-Content -LiteralPath (Join-Path $root 'usb-validate-stderr.txt')
+          exit $code
+      - name: Require original strict native support receipt gate
+        if: always()
+        shell: powershell
+        timeout-minutes: 1
         run: |
-          openssl_prefix=$(brew --prefix openssl@3)
-          export PATH="$openssl_prefix/bin:$PATH"
-          python3 -m pytest -q -p no:cacheprovider tests/test_flash_download_host.py
-      - name: Test authenticated hosted downloads and Phoenix var safety offline
+          $env:GITHUB_SHA = '2afc92a4b9f0bea5a52015f831d96619b3abd6ca'
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE 'candidate')
+          $root = Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts'
+          $ErrorActionPreference = 'Continue'
+          powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/release/test-support-native.ps1 -Mode Validate -OutputRoot (Join-Path $root 'support-native-receipts') 1> (Join-Path $root 'support-validate-stdout.txt') 2> (Join-Path $root 'support-validate-stderr.txt')
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          [IO.File]::WriteAllText((Join-Path $root 'support-validate-exit.json'), ('{"exit_code":' + $code + '}'))
+          Get-Content -LiteralPath (Join-Path $root 'support-validate-stdout.txt')
+          Get-Content -LiteralPath (Join-Path $root 'support-validate-stderr.txt')
+          exit $code
+      - name: Close original output inventory even on failure
+        if: always()
+        shell: powershell
         run: |
-          ext4_prefix=$(brew --prefix e2fsprogs)
-          openssl_prefix=$(brew --prefix openssl@3)
-          export PATH="$openssl_prefix/bin:$ext4_prefix/sbin:$ext4_prefix/bin:$PATH"
-          python3 -m unittest discover -s tests -p 'test_hosted_*.py' -v
-          python3 -m unittest discover -s tests -p 'test_phoenix_flash*.py' -v
-          python3 -m unittest discover -s tests -p 'test_flashflow*.py' -v
-      - name: Test hosted TLS roots and network diagnostics offline
-        run: |
-          openssl_prefix=$(brew --prefix openssl@3)
-          export PATH="$openssl_prefix/bin:$PATH"
-          python3 -m pytest -q tests/test_hosted_macos_transport.py
-      - name: Test local ext4 update preparation
-        run: |
-          ext4_prefix=$(brew --prefix e2fsprogs)
-          export PATH="$ext4_prefix/sbin:$ext4_prefix/bin:$PATH"
-          python3 -m unittest discover -s tests -p test_calibration.py -v
-          python3 -m unittest discover -s tests -p test_updates.py -v
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'windows-final-receipts'
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'Final-source output absent' }
+          $files = [ordered]@{}
+          foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Recurse | Sort-Object FullName)) {
+            $name = $file.FullName.Substring($root.Length + 1).Replace('\','/')
+            $files[$name] = @{ bytes=$file.Length; sha256=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          $manifest = [ordered]@{ kind='closed-native-Windows-inventory'; source_revision='2afc92a4b9f0bea5a52015f831d96619b3abd6ca'; wrapper_revision=$env:GITHUB_SHA; github_run_id=$env:GITHUB_RUN_ID; github_run_attempt=$env:GITHUB_RUN_ATTEMPT; files=$files }
+          [IO.File]::WriteAllText((Join-Path $root 'bundle-manifest.json'), ($manifest | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
+      - name: Retain closed native evidence including strict-gate outcome logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-final-closed-${{ github.sha }}
+          path: windows-final-receipts/
+          if-no-files-found: error
+          retention-days: 7
