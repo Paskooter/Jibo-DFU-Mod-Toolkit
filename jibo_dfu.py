@@ -381,13 +381,14 @@ def _usbfs_available():
 
 
 def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=None,
-                             alternative_size=None):
+                             alternative_size=None, depth=None):
     """Build a whole-alternative read (-U) or write (-D) command.
 
     The pipelined helper queues DFU requests instead of waiting a USB round
     trip for each block. JIBO_DFU_TRANSFER=dfu-util selects dfu-util. A read
     of the first size bytes of a larger alternative still reads the helper's
     whole alternative_size, so the loader's read cursor ends at the start.
+    depth sets how many reads the helper queues; dfu-util always sends one.
     """
     mode = os.environ.get("JIBO_DFU_TRANSFER", "pipelined")
     if mode not in ("pipelined", "dfu-util"):
@@ -399,6 +400,8 @@ def _partition_transfer_argv(dfu_util, port, alternative, option, path, size=Non
         if option == "-U" and alternative_size is not None and alternative_size != size:
             argv[-1] = str(alternative_size)
             argv += ["--prefix", str(size)]
+        if option == "-U" and depth is not None:
+            argv += ["--depth", str(depth)]
         return [sys.executable, str(PIPELINE_HELPER)] + argv
     return [dfu_util] + argv
 
@@ -732,25 +735,116 @@ def _upload_var(dfu_util, port, destination):
         raise
 
 
+class UsbLinkTimeoutError(DfuError):
+    """A partition read stopped because a USB request got no reply."""
+
+
+# Alternatives whose next read uses one queued request after a USB-link timeout.
+_SLOW_READS_NAME = ".usb-slow-reads.json"
+# Printed by jibo_dfu_pipeline.py (LINK_TIMEOUT_MARKER) when it exits with EXIT_LINK_TIMEOUT.
+_LINK_TIMEOUT_LINE = re.compile(r"jibo-dfu-link-timeout alt=(\S+) block=(\d+) depth=(\d+) "
+                                r"block_size=(\d+) received=(\d+)")
+
+
+def _slow_reads():
+    try:
+        record = json.loads((BACKUP_ROOT / _SLOW_READS_NAME).read_text())
+        pending = record.get("alternatives", {})
+        return dict(pending) if isinstance(pending, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _set_slow_read(alternative, details=None):
+    """Arrange (details) or drop (None) a one-request-at-a-time next read."""
+    pending = _slow_reads()
+    if details is None and pending.pop(alternative, None) is None:
+        return
+    if details is not None:
+        pending[alternative] = details
+    path = BACKUP_ROOT / _SLOW_READS_NAME
+    if not pending:
+        path.unlink(missing_ok=True)
+        return
+    BACKUP_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _private_write(path, {"schema": 1, "kind": "jibo-usb-slow-reads", "alternatives": pending})
+
+
+def _usb_link_timeout_error(partition, match, slow, exc):
+    """Explain a USB-link timeout and arrange at most one slower read after DFU re-entry.
+
+    The loader may have served the lost request, and DFU_ABORT does not reset
+    its read cursor for a partition alternative, so the read is never repeated
+    in the same DFU session. A same-session attempt stalls at block 0 or ends
+    short; the helper refuses both.
+    """
+    _alternative, block, depth, block_size, _received = match.groups()
+    where = "DFU_UPLOAD block {} with {} request{} queued and {}-byte blocks".format(
+        block, depth, "" if depth == "1" else "s", block_size)
+    if slow:
+        try:
+            _set_slow_read(partition, None)
+        except OSError:
+            pass
+        message = ("Reading {} timed out again at DFU_UPLOAD block {} ({}-byte blocks), this "
+                   "time with one request at a time. The partial file was deleted; nothing on "
+                   "Jibo was changed. The toolkit will not retry automatically. The cause of "
+                   "these USB-link timeouts is not known.").format(partition, block, block_size)
+    else:
+        message = ("Reading {} stopped: USB-link timeout at {}. The partial file was deleted; "
+                   "nothing on Jibo was changed. Jibo's recovery loader cannot continue or "
+                   "restart this read in the same DFU session.").format(partition, where)
+        try:
+            _set_slow_read(partition, {"block": int(block), "depth": int(depth),
+                                       "block_size": int(block_size), "recorded_utc": _utc_now()})
+            message += (" Shut Jibo down, put him back in RCM mode (hold the RCM button while "
+                        "you turn him on), choose Enter DFU with ShofEL, then start the same "
+                        "backup or read again: the toolkit will read {} once with one request "
+                        "at a time, which is slower.").format(partition)
+        except OSError:
+            message += (" Re-enter DFU from RCM mode before reading {} again. The toolkit could "
+                        "not record a slower next read.").format(partition)
+    return UsbLinkTimeoutError(message + "\n\n" + str(exc))
+
+
 def _upload_partition(dfu_util, port, partition, size, destination, alternative_size=None):
     """Read the first size bytes of one named DFU partition into a private local file.
 
     alternative_size is the partition's whole size when size is only a prefix.
+    After a USB-link timeout on this alternative its next read queues one
+    request at a time; that read clears the arrangement when it completes or
+    itself times out.
     """
     destination = Path(destination)
     destination.unlink(missing_ok=True)
+    slow = partition in _slow_reads()
     try:
-        run_with_progress(
-            _partition_transfer_argv(dfu_util, port, partition, "-U", destination, size,
-                                     alternative_size),
-            timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size),
-            progress_path=destination, progress_size=size)
+        if slow:
+            print("Reading {} with one request at a time after an earlier USB-link "
+                  "timeout.".format(partition), file=sys.stderr, flush=True)
+        try:
+            run_with_progress(
+                _partition_transfer_argv(dfu_util, port, partition, "-U", destination, size,
+                                         alternative_size, depth=1 if slow else None),
+                timeout=14400, label="Reading {} ({} bytes) from USB".format(partition, size),
+                progress_path=destination, progress_size=size)
+        except DfuError as exc:
+            match = _LINK_TIMEOUT_LINE.search(str(exc))
+            if match is None:
+                raise
+            raise _usb_link_timeout_error(partition, match, slow, exc) from exc
         if destination.stat().st_size != size:
             raise DfuError("Uploaded {} has {} bytes; expected {}.".format(
                 partition, destination.stat().st_size, size))
         destination.chmod(0o600)
         _chown_to_invoking_user(destination)
-        return _sha256_file(destination)
+        digest = _sha256_file(destination)
+        if slow:
+            try:
+                _set_slow_read(partition, None)
+            except OSError:
+                pass
+        return digest
     except (DfuError, OSError):
         destination.unlink(missing_ok=True)
         raise

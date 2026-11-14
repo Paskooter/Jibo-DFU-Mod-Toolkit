@@ -1,6 +1,9 @@
 import collections
+from contextlib import redirect_stderr, redirect_stdout
 import ctypes
 import errno
+import hashlib
+import io
 import os
 import struct
 from pathlib import Path
@@ -125,14 +128,27 @@ class FakeUbootDfu:
 class FakeUsbfs:
     """The usbfs calls the pipeline makes, completing queued URBs in FIFO order."""
 
-    def __init__(self, device, stall_upload_block=None):
+    def __init__(self, device, stall_upload_block=None, timeout_upload_block=None,
+                 timeout_status=-errno.ETIME, timeout_consumes=True, upload_status_block=None,
+                 upload_status=None):
         self.device = device
         self.stall_upload_block = stall_upload_block
+        # A USB-link timeout: usbfs hands the URB back with -ETIME or -ETIMEDOUT. With
+        # timeout_consumes the loader served the request and advanced its read cursor,
+        # but the reply never reached the host.
+        self.timeout_upload_block = timeout_upload_block
+        self.timeout_status = timeout_status
+        self.timeout_consumes = timeout_consumes
+        self.upload_status_block = upload_status_block
+        self.upload_status = upload_status
         self.queue = collections.deque()
         self.cancelled = collections.deque()
         self.retained = []
         self.max_outstanding = 0
         self.dnload_with_queue = 0
+        # A request the host never hears back about (the pipeline's own deadline).
+        self.hang_upload_block = None
+        self.clock = 0.0
 
     def submit(self, urb):
         setup = ctypes.string_at(urb.buffer, 8)
@@ -153,9 +169,23 @@ class FakeUsbfs:
             return ctypes.addressof(self.cancelled.popleft())
         if not self.queue:
             return None
+        if self.hang_upload_block is not None:
+            head = pipeline._SETUP.unpack(ctypes.string_at(self.queue[0].buffer, 8))
+            if head[1] == pipeline._DFU_UPLOAD and head[2] == self.hang_upload_block:
+                return None
         urb = self.queue.popleft()
         raw = ctypes.string_at(urb.buffer, urb.buffer_length)
         request_type, request, value, _index, length = pipeline._SETUP.unpack(raw[:8])
+        if request == pipeline._DFU_UPLOAD and value == self.timeout_upload_block:
+            if self.timeout_consumes:
+                self.device.control(request_type, request, value, length, raw[8:])
+            urb.status = self.timeout_status
+            urb.actual_length = 0
+            return ctypes.addressof(urb)
+        if request == pipeline._DFU_UPLOAD and value == self.upload_status_block:
+            urb.status = self.upload_status
+            urb.actual_length = 0
+            return ctypes.addressof(urb)
         if request == pipeline._DFU_UPLOAD and value == self.stall_upload_block:
             response = None
             self.device.state = 10
@@ -173,8 +203,8 @@ class FakeUsbfs:
                 urb.actual_length = length
         return ctypes.addressof(urb)
 
-    def wait(self, _seconds):
-        pass
+    def wait(self, seconds):
+        self.clock += seconds
 
     def retain(self, item):
         self.retained.append(item)
@@ -430,8 +460,8 @@ class QueueLoaderTests(unittest.TestCase):
 class FakeDeviceNode(FakeUsbfs):
     """A usbfs node that also serves descriptors, strings, and interface calls."""
 
-    def __init__(self, names, transfer_size=32768, vendor=0x0955):
-        super().__init__(FakeUbootDfu(bytes(4096)))
+    def __init__(self, names, transfer_size=32768, vendor=0x0955, device=None, **usbfs):
+        super().__init__(device or FakeUbootDfu(bytes(4096)), **usbfs)
         self.names = names
         self.transfer_size = transfer_size
         self.vendor = vendor
@@ -576,6 +606,314 @@ class TransferCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(toolkit.DfuError, "JIBO_DFU_TRANSFER"):
                 toolkit._partition_transfer_argv("dfu-util", "1-1", "var", "-D",
                                                  Path("/tmp/var.img"))
+
+    def test_slow_read_depth_only_reaches_pipelined_reads(self):
+        with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "pipelined"}), \
+                patch.object(toolkit, "_usbfs_available", return_value=True):
+            read = toolkit._partition_transfer_argv("dfu-util", "1-1", "rootfsA", "-U",
+                                                    Path("/tmp/a.img"), 8192, depth=1)
+            write = toolkit._partition_transfer_argv("dfu-util", "1-1", "rootfsA", "-D",
+                                                     Path("/tmp/a.img"), depth=1)
+        with patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "dfu-util"}):
+            fallback = toolkit._partition_transfer_argv("dfu-util", "1-1", "rootfsA", "-U",
+                                                        Path("/tmp/a.img"), 8192, depth=1)
+        self.assertEqual(read[-4:], ["-Z", "8192", "--depth", "1"])
+        self.assertNotIn("--depth", write)
+        self.assertNotIn("--depth", fallback)
+
+
+BLOCK = 4096
+CONTENT_SIZE = 40 * BLOCK + 100
+
+
+class LinkTimeoutTests(unittest.TestCase):
+    """A USB-link timeout is named and is not confused with stalls or short data."""
+
+    def test_urb_timeout_at_block_5_names_a_usb_link_timeout(self):
+        for status in (-errno.ETIME, -errno.ETIMEDOUT):
+            with self.subTest(status=status):
+                device = FakeUbootDfu(pattern(CONTENT_SIZE))
+                lib = FakeUsbfs(device, timeout_upload_block=5, timeout_status=status)
+
+                with self.assertRaises(pipeline.UsbLinkTimeout) as caught:
+                    pipeline._upload_stream(lib, 0, BLOCK, CONTENT_SIZE, bytearray().extend, 16)
+
+                error = caught.exception
+                self.assertEqual((error.block, error.depth, error.block_size, error.received),
+                                 (5, 16, BLOCK, 5 * BLOCK))
+                message = str(error)
+                self.assertIn("USB-link timeout at DFU_UPLOAD block 5", message)
+                self.assertIn("16 requests queued", message)
+                self.assertIn("4096-byte blocks", message)
+                self.assertIn(os.strerror(-status), message)
+                self.assertNotIn("interrupted earlier read", message)
+                self.assertEqual(error.undrained, 0)
+                self.assertTrue(lib.idle())
+
+    def test_no_reply_within_the_transfer_timeout_is_a_link_timeout(self):
+        device = FakeUbootDfu(pattern(CONTENT_SIZE))
+        lib = FakeUsbfs(device)
+        lib.hang_upload_block = 5
+
+        with patch.object(pipeline.time, "monotonic", lambda: lib.clock), \
+                self.assertRaises(pipeline.UsbLinkTimeout) as caught:
+            pipeline._upload_stream(lib, 0, BLOCK, CONTENT_SIZE, bytearray().extend, 16)
+
+        self.assertEqual(caught.exception.block, 5)
+        self.assertIn("no reply within 20 s", str(caught.exception))
+        self.assertTrue(lib.idle())
+
+    def test_stall_disconnect_and_short_data_are_not_link_timeouts(self):
+        cases = (
+            (FakeUsbfs(FakeUbootDfu(pattern(CONTENT_SIZE)), stall_upload_block=3),
+             CONTENT_SIZE, "block 3 stalled"),
+            (FakeUsbfs(FakeUbootDfu(pattern(CONTENT_SIZE)), upload_status_block=3,
+                       upload_status=-errno.ENODEV), CONTENT_SIZE, "block 3 device disconnected"),
+            (FakeUsbfs(FakeUbootDfu(pattern(BLOCK + 10))), 3 * BLOCK, "block 1 returned 10 bytes"),
+        )
+        for lib, size, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(pipeline.DfuTransferError, expected) as caught:
+                    pipeline._upload_stream(lib, 0, BLOCK, size, bytearray().extend, 16)
+                self.assertNotIsInstance(caught.exception, pipeline.UsbLinkTimeout)
+                self.assertNotIn("USB-link timeout", str(caught.exception))
+
+    def test_wrapped_stale_cursor_is_refused_by_the_length_check(self):
+        # The loader's cursor wraps every 65536 blocks. If the lost reply was block 65535
+        # its next expected block number is 0 again, so it would accept a fresh read and
+        # serve data from the middle of the partition. The byte count must refuse it.
+        block, size = 64, 65536 * 64 + 1000
+        device = FakeUbootDfu(pattern(size), buffer_size=block)
+        lib = FakeUsbfs(device, timeout_upload_block=65535)
+        with self.assertRaises(pipeline.UsbLinkTimeout):
+            pipeline._upload_stream(lib, 0, block, size, bytearray().extend, 16)
+        pipeline._ensure_idle(lib, 0)
+        self.assertEqual((device.state, device.read_inited, device.expected_block), (2, True, 0))
+
+        received = bytearray()
+        with self.assertRaisesRegex(pipeline.DfuTransferError,
+                                    "block 15 returned 40 bytes after 960 bytes") as caught:
+            pipeline._upload_stream(FakeUsbfs(device), 0, block, size, received.extend, 1)
+        self.assertNotIsInstance(caught.exception, pipeline.UsbLinkTimeout)
+
+
+class LinkTimeoutUploadTests(unittest.TestCase):
+    """upload() after a link timeout: the loader's cursor and the session boundary."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        node = self.root / "sys" / "1-1"
+        node.mkdir(parents=True)
+        for name, value in (("idVendor", "0955"), ("idProduct", "701a"), ("busnum", "1"),
+                            ("devnum", "5"), ("bConfigurationValue", "1")):
+            (node / name).write_text(value + "\n")
+        self.content = pattern(CONTENT_SIZE)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def upload(self, node, depth, name="rootfsA.img"):
+        destination = self.root / name
+        original = pipeline._Session
+
+        def session(port, alternate):
+            return original(port, alternate, sysfs_root=self.root / "sys",
+                            usb_root=Path("/dev/bus/usb"), opener=lambda _path: node)
+        with patch.object(pipeline, "_Session", session):
+            result = pipeline.upload("1-1", "rootfsA", destination, CONTENT_SIZE, depth)
+        return destination, result
+
+    def node(self, device, **usbfs):
+        return FakeDeviceNode(["jibo-dfu-v1", "rootfsA"], transfer_size=BLOCK, device=device,
+                              **usbfs)
+
+    def test_timeout_leaves_dfu_idle_with_a_stale_cursor_that_is_refused(self):
+        loader = FakeUbootDfu(self.content)
+        destination = self.root / "rootfsA.img"
+
+        with self.assertRaises(pipeline.UsbLinkTimeout) as caught:
+            self.upload(self.node(loader, timeout_upload_block=5), 16)
+        message = str(caught.exception)
+        self.assertIn("rootfsA", message)
+        self.assertIn("The loader reports dfuIDLE", message)
+        self.assertIn("until Jibo re-enters DFU", message)
+        self.assertFalse(destination.exists())
+        # DFU_ABORT returned the loader to dfuIDLE but did not reset its read cursor.
+        self.assertEqual((loader.state, loader.read_inited, loader.expected_block), (2, True, 6))
+
+        # The same loader session (USB reopened, robot not restarted) must refuse a re-read.
+        with self.assertRaisesRegex(pipeline.DfuTransferError, "block 0 stalled") as caught:
+            self.upload(self.node(loader), 1)
+        self.assertNotIsInstance(caught.exception, pipeline.UsbLinkTimeout)
+        self.assertFalse(destination.exists())
+
+    def test_slower_read_after_reentering_dfu_yields_exact_bytes(self):
+        with self.assertRaises(pipeline.UsbLinkTimeout):
+            self.upload(self.node(FakeUbootDfu(self.content), timeout_upload_block=5), 16)
+
+        fresh = self.node(FakeUbootDfu(self.content))
+        destination, (count, block_size) = self.upload(fresh, 1)
+
+        self.assertEqual((count, block_size), (CONTENT_SIZE, BLOCK))
+        self.assertEqual(destination.read_bytes(), self.content)
+        self.assertEqual(fresh.max_outstanding, 1)
+
+    def test_repeated_timeout_at_depth_1_fails_cleanly_and_deletes_the_file(self):
+        node = self.node(FakeUbootDfu(self.content), timeout_upload_block=5)
+
+        with self.assertRaises(pipeline.UsbLinkTimeout) as caught:
+            self.upload(node, 1)
+
+        self.assertEqual((caught.exception.block, caught.exception.depth), (5, 1))
+        self.assertIn("1 request queued", str(caught.exception))
+        self.assertFalse((self.root / "rootfsA.img").exists())
+        self.assertTrue(node.idle())
+
+
+class ToolkitSlowReadTests(unittest.TestCase):
+    """jibo_dfu arranges one depth-1 read of a timed-out alternative after DFU re-entry."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        node = self.root / "sys" / "1-1"
+        node.mkdir(parents=True)
+        for name, value in (("idVendor", "0955"), ("idProduct", "701a"), ("busnum", "1"),
+                            ("devnum", "5"), ("bConfigurationValue", "1")):
+            (node / name).write_text(value + "\n")
+        self.content = pattern(CONTENT_SIZE)
+        self.nodes = {}
+        self.argvs = []
+        for item in (patch.object(toolkit, "BACKUP_ROOT", self.root / "Jibo-Backups"),
+                     patch.object(toolkit, "_usbfs_available", return_value=True),
+                     patch.object(toolkit, "run_with_progress", self.run_helper),
+                     patch.dict(os.environ, {"JIBO_DFU_TRANSFER": "pipelined"})):
+            item.start()
+            self.addCleanup(item.stop)
+        self.addCleanup(self.temp.cleanup)
+
+    def run_helper(self, argv, timeout, label, **_kwargs):
+        """Run the real helper in-process and fail the way run_with_progress does."""
+        self.argvs.append(argv)
+        self.assertEqual(argv[1], str(toolkit.PIPELINE_HELPER))
+        original = pipeline._Session
+
+        def session(port, alternate):
+            return original(port, alternate, sysfs_root=self.root / "sys",
+                            usb_root=Path("/dev/bus/usb"), opener=lambda _path: self.nodes[alternate])
+        output = io.StringIO()
+        with patch.object(pipeline, "_Session", session), redirect_stdout(output), \
+                redirect_stderr(output):
+            code = pipeline.main(argv[2:])
+        if code:
+            raise toolkit.DfuError("Command failed: {}\n{}".format(
+                Path(argv[1]).name, toolkit._transfer_error_detail(output.getvalue())))
+        return output.getvalue()
+
+    def attach(self, device, name="rootfsA", **usbfs):
+        self.nodes[name] = FakeDeviceNode(["jibo-dfu-v1", name], transfer_size=BLOCK,
+                                          device=device, **usbfs)
+        return self.nodes[name]
+
+    def read(self, name="rootfsA"):
+        destination = self.root / (name + ".img")
+        digest = toolkit._upload_partition("dfu-util", "1-1", name, CONTENT_SIZE, destination)
+        return destination, digest
+
+    def depth_of_last_read(self):
+        argv = self.argvs[-1]
+        return int(argv[argv.index("--depth") + 1]) if "--depth" in argv else None
+
+    def test_link_timeout_arranges_one_slower_read_after_reentering_dfu(self):
+        loader = FakeUbootDfu(self.content)
+        self.attach(loader, timeout_upload_block=5)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError) as caught:
+            self.read()
+        message = str(caught.exception)
+        for text in ("rootfsA", "USB-link timeout at DFU_UPLOAD block 5", "16 requests queued",
+                     "4096-byte blocks", "partial file was deleted", "RCM",
+                     "Enter DFU with ShofEL", "one request at a time"):
+            self.assertIn(text, message)
+        self.assertIsNone(self.depth_of_last_read())
+        self.assertFalse((self.root / "rootfsA.img").exists())
+
+        # Without re-entering DFU the loader's stale cursor refuses the read; the slower
+        # read stays arranged for the next session.
+        self.attach(loader)
+        with self.assertRaisesRegex(toolkit.DfuError, "block 0 stalled") as caught:
+            self.read()
+        self.assertNotIsInstance(caught.exception, toolkit.UsbLinkTimeoutError)
+        self.assertEqual(self.depth_of_last_read(), 1)
+        self.assertFalse((self.root / "rootfsA.img").exists())
+
+        fresh = self.attach(FakeUbootDfu(self.content))
+        destination, digest = self.read()
+        self.assertEqual(self.depth_of_last_read(), 1)
+        self.assertEqual(fresh.max_outstanding, 1)
+        self.assertEqual(destination.read_bytes(), self.content)
+        self.assertEqual(digest, hashlib.sha256(self.content).hexdigest())
+
+        self.attach(FakeUbootDfu(self.content))
+        self.read()
+        self.assertIsNone(self.depth_of_last_read())
+
+    def test_repeated_timeout_at_depth_1_fails_cleanly_without_another_retry(self):
+        self.attach(FakeUbootDfu(self.content), timeout_upload_block=5)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError):
+            self.read()
+
+        self.attach(FakeUbootDfu(self.content), timeout_upload_block=5,
+                    timeout_status=-errno.ETIMEDOUT)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError) as caught:
+            self.read()
+        message = str(caught.exception)
+        self.assertEqual(self.depth_of_last_read(), 1)
+        self.assertIn("timed out again", message)
+        self.assertIn("will not retry", message)
+        self.assertIn("1 request queued", message)
+        self.assertFalse((self.root / "rootfsA.img").exists())
+
+        self.attach(FakeUbootDfu(self.content))
+        self.read()
+        self.assertIsNone(self.depth_of_last_read())
+
+    def test_stall_disconnect_and_short_data_do_not_arrange_a_slower_read(self):
+        for usbfs, content in (({"stall_upload_block": 3}, self.content),
+                               ({"upload_status_block": 3, "upload_status": -errno.ENODEV},
+                                self.content),
+                               ({}, self.content[:BLOCK + 10])):
+            with self.subTest(usbfs=usbfs):
+                self.attach(FakeUbootDfu(content), **usbfs)
+                with self.assertRaises(toolkit.DfuError) as caught:
+                    self.read()
+                self.assertNotIsInstance(caught.exception, toolkit.UsbLinkTimeoutError)
+                self.assertFalse((self.root / "rootfsA.img").exists())
+                self.attach(FakeUbootDfu(self.content))
+                self.read()
+                self.assertIsNone(self.depth_of_last_read())
+
+    def test_skills_chunk_timeout_slows_only_that_chunk(self):
+        chunks = [{"name": "skills-001", "offset_bytes": 0, "size_bytes": CONTENT_SIZE},
+                  {"name": "skills-002", "offset_bytes": CONTENT_SIZE, "size_bytes": CONTENT_SIZE}]
+        second = pattern(2 * CONTENT_SIZE)[CONTENT_SIZE:]
+        destination = self.root / "skills.img"
+        self.attach(FakeUbootDfu(self.content), "skills-001")
+        self.attach(FakeUbootDfu(second), "skills-002", timeout_upload_block=5)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError) as caught:
+            toolkit._upload_skills_partition("dfu-util", "1-1", 2 * CONTENT_SIZE, chunks,
+                                             destination, self.root)
+        self.assertIn("skills-002", str(caught.exception))
+        self.assertFalse(destination.exists())
+
+        self.argvs.clear()
+        self.attach(FakeUbootDfu(self.content), "skills-001")
+        self.attach(FakeUbootDfu(second), "skills-002")
+        result = toolkit._upload_skills_partition("dfu-util", "1-1", 2 * CONTENT_SIZE, chunks,
+                                                  destination, self.root)
+        self.assertEqual(["--depth" in argv for argv in self.argvs], [False, True])
+        self.assertEqual(destination.read_bytes(), self.content + second)
+        self.assertEqual(result["sha256"], hashlib.sha256(self.content + second).hexdigest())
 
 
 if __name__ == "__main__":

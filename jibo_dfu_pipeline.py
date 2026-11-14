@@ -22,6 +22,13 @@ transfers larger than 4 KiB, while usbfs accepts them when they are queued.
 
 The command line accepts the subset of dfu-util options the toolkit uses for
 partition transfers and prints dfu-util's progress and completion lines.
+
+A read that stops because a USB request got no reply (usbfs -ETIME or
+-ETIMEDOUT, or no completion within TRANSFER_TIMEOUT_SECONDS) is reported as a
+USB-link timeout and exits with EXIT_LINK_TIMEOUT. The loader may already have
+served the lost request, and DFU_ABORT does not reset its read cursor for a
+partition alternative, so the read is never resumed or restarted in the same
+DFU session. The toolkit arranges one slower read after Jibo re-enters DFU.
 """
 
 from __future__ import annotations
@@ -50,6 +57,8 @@ TRANSFER_TIMEOUT_SECONDS = 20.0
 CANCEL_GRACE_SECONDS = 10.0
 MANIFEST_TIMEOUT_SECONDS = 30.0
 PROGRESS_STEP = 1 << 20
+EXIT_LINK_TIMEOUT = 75
+LINK_TIMEOUT_MARKER = "jibo-dfu-link-timeout"
 
 _REQUEST_OUT = 0x21
 _REQUEST_IN = 0xA1
@@ -86,10 +95,33 @@ _URB_STATUS_NAMES = {
     -errno.ESHUTDOWN: "device disconnected",
     -errno.EOVERFLOW: "overflow",
 }
+# usbfs completes a control URB with one of these when the host controller (or
+# usbip's virtual one) stops waiting for the device's reply.
+_LINK_TIMEOUT_STATUSES = (-errno.ETIME, -errno.ETIMEDOUT)
 
 
 class DfuTransferError(RuntimeError):
     """A pipelined DFU transfer failed or returned unexpected data."""
+
+
+class UsbLinkTimeout(DfuTransferError):
+    """A queued request got no reply; the loader's read cursor is now unknown."""
+
+    def __init__(self, message, block=None, depth=None, block_size=None, received=None,
+                 undrained=0, alternate=None):
+        super().__init__(message)
+        self.block = block
+        self.depth = depth
+        self.block_size = block_size
+        self.received = received
+        self.undrained = undrained
+        self.alternate = alternate
+
+    def marker(self):
+        """One machine-readable line for the toolkit that started this helper."""
+        return "{} alt={} block={} depth={} block_size={} received={}".format(
+            LINK_TIMEOUT_MARKER, self.alternate, self.block, self.depth, self.block_size,
+            self.received)
 
 
 class _Urb(ctypes.Structure):
@@ -236,6 +268,8 @@ class _ControlPipeline:
         self._slots = {}
         self._free = collections.deque(range(depth))
         self._queued = collections.deque()
+        # Transfers the kernel had not handed back when cancel_all() gave up.
+        self.undrained = 0
         for slot in range(depth):
             buffer = (ctypes.c_ubyte * (_SETUP.size + data_size))()
             urb = _Urb()
@@ -291,13 +325,19 @@ class _ControlPipeline:
         while not self._done[slot]:
             if not self._collect():
                 if time.monotonic() > deadline:
-                    raise DfuTransferError("{} timed out.".format(label))
+                    error = UsbLinkTimeout("{} timed out.".format(label))
+                    error.cause = "no reply within {:g} s".format(self.timeout)
+                    raise error
                 self.device.wait(0.1)
         self._queued.popleft()
         self._free.append(slot)
         urb = self._urbs[slot]
         if urb.status:
             name = _URB_STATUS_NAMES.get(urb.status, os.strerror(-urb.status))
+            if urb.status in _LINK_TIMEOUT_STATUSES:
+                error = UsbLinkTimeout("{} {}.".format(label, name))
+                error.cause = "usbfs reported {}".format(name)
+                raise error
             raise DfuTransferError("{} {}.".format(label, name))
         return ctypes.string_at(ctypes.addressof(self._buffers[slot]) + _SETUP.size,
                                 urb.actual_length)
@@ -315,7 +355,8 @@ class _ControlPipeline:
                     self.device.wait(0.1)
         except DfuTransferError:
             pass
-        if any(not self._done[slot] for slot in self._queued):
+        self.undrained = sum(not self._done[slot] for slot in self._queued)
+        if self.undrained:
             self.device.retain(self)
         self._free.extend(slot for slot in self._queued if self._done[slot])
         self._queued.clear()
@@ -421,31 +462,48 @@ def _upload_stream(device, interface, transfer_size, expected_size, sink,
     requests = expected_size // transfer_size + 1
     final_length = expected_size % transfer_size
     received = 0
-    with _ControlPipeline(device, min(depth, requests), transfer_size) as pipeline:
-        queued = 0
-        for block in range(requests):
-            while queued < requests and pipeline.can_submit:
-                pipeline.submit(_REQUEST_IN, _DFU_UPLOAD, queued, interface, transfer_size)
-                queued += 1
-            try:
-                data = pipeline.retire("DFU_UPLOAD block {}".format(block))
-            except DfuTransferError as exc:
-                if block == 0:
-                    raise DfuTransferError(str(exc) + " An interrupted earlier read of this "
-                                           "alternative can cause this; re-enter DFU and "
-                                           "retry.") from exc
-                raise
-            wanted = transfer_size if block < requests - 1 else final_length
-            if len(data) != wanted:
-                raise DfuTransferError(
-                    "DFU_UPLOAD block {} returned {} bytes after {} bytes; expected {} bytes "
-                    "for a {}-byte alternative.".format(
-                        block, len(data), received, wanted, expected_size))
-            if data:
-                sink(data)
-            received += len(data)
-            if progress:
-                progress(received)
+    block = 0
+    queue_depth = min(depth, requests)
+    pipeline = _ControlPipeline(device, queue_depth, transfer_size)
+    try:
+        with pipeline:
+            queued = 0
+            for block in range(requests):
+                while queued < requests and pipeline.can_submit:
+                    pipeline.submit(_REQUEST_IN, _DFU_UPLOAD, queued, interface, transfer_size)
+                    queued += 1
+                try:
+                    data = pipeline.retire("DFU_UPLOAD block {}".format(block))
+                except UsbLinkTimeout:
+                    raise
+                except DfuTransferError as exc:
+                    if block == 0:
+                        raise DfuTransferError(str(exc) + " An interrupted earlier read of this "
+                                               "alternative can cause this; re-enter DFU and "
+                                               "retry.") from exc
+                    raise
+                wanted = transfer_size if block < requests - 1 else final_length
+                if len(data) != wanted:
+                    raise DfuTransferError(
+                        "DFU_UPLOAD block {} returned {} bytes after {} bytes; expected {} bytes "
+                        "for a {}-byte alternative.".format(
+                            block, len(data), received, wanted, expected_size))
+                if data:
+                    sink(data)
+                received += len(data)
+                if progress:
+                    progress(received)
+    except UsbLinkTimeout as exc:
+        # The pipeline has cancelled and collected every queued request by now.
+        message = ("USB-link timeout at DFU_UPLOAD block {} ({}) with {} request{} queued, "
+                   "{}-byte blocks, after {} bytes.".format(
+                       block, getattr(exc, "cause", str(exc)), queue_depth,
+                       "" if queue_depth == 1 else "s", transfer_size, received))
+        if pipeline.undrained:
+            message += (" {} queued request{} never came back from the USB stack.".format(
+                pipeline.undrained, "" if pipeline.undrained == 1 else "s"))
+        raise UsbLinkTimeout(message, block, queue_depth, transfer_size, received,
+                             pipeline.undrained) from exc
     return received
 
 
@@ -657,6 +715,8 @@ def upload(port, alternate, destination, size, depth=DEFAULT_UPLOAD_DEPTH, progr
                     received = _upload_stream(session.device, session.interface, block_size,
                                               size, _prefix_sink(stream.write, keep), depth,
                                               progress)
+                except UsbLinkTimeout as exc:
+                    raise _link_timeout_in_session(exc, session, alternate) from exc
                 except DfuTransferError as exc:
                     raise DfuTransferError(str(exc) + _recovery_note(
                         session.device, session.interface)) from exc
@@ -666,6 +726,24 @@ def upload(port, alternate, destination, size, depth=DEFAULT_UPLOAD_DEPTH, progr
     finally:
         if not completed:
             destination.unlink(missing_ok=True)
+
+
+def _link_timeout_in_session(exc, session, alternate):
+    """Return the DFU interface to dfuIDLE and say why this session cannot read again.
+
+    In the pinned loader (and the queue loader) DFU_ABORT only changes the
+    state; dfu_read() keeps the alternative's block counter and offset until a
+    short final block. The lost request may already have moved them, so a new
+    read in this session would stall at block 0, or, after a 65536-block wrap,
+    start mid-partition and end short. Neither is retried here.
+    """
+    cleanup = _recovery_note(session.device, session.interface)
+    message = str(exc) + (cleanup or " The loader reports dfuIDLE again.")
+    message += (" The loader's read position for {} is no longer known and DFU_ABORT does "
+                "not reset it, so {} cannot be read again until Jibo re-enters DFU.".format(
+                    alternate, alternate))
+    return UsbLinkTimeout(message, exc.block, exc.depth, exc.block_size, exc.received,
+                          exc.undrained, alternate)
 
 
 def download(port, alternate, source, progress=None, transfer_size=None, depth=None):
@@ -754,6 +832,10 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Transfer interrupted.", file=sys.stderr, flush=True)
         return 130
+    except UsbLinkTimeout as exc:
+        print("Error: {}".format(exc), file=sys.stderr, flush=True)
+        print(exc.marker(), file=sys.stderr, flush=True)
+        return EXIT_LINK_TIMEOUT
     except (DfuTransferError, bounded.BoundedDfuError, OSError) as exc:
         print("Error: {}".format(exc), file=sys.stderr, flush=True)
         return 1

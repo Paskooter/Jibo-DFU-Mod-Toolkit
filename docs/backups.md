@@ -32,6 +32,31 @@ transfer timeouts. The text progress view shows elapsed time and the current
 partition; the GUI also shows transfer output. Neither interface cancels an
 active restore write midway.
 
+### If a read stops with a USB-link timeout
+
+Large partition reads queue 16 USB requests at a time. If one of them gets no
+reply, the read stops with **USB-link timeout at DFU_UPLOAD block N**, plus the
+number of queued requests and the block size. The underlying USB error is shown
+too, for example `Timer expired` or `no reply within 20 s`. The cause of these
+timeouts is not known.
+
+The toolkit cancels the queued requests, returns the loader to its idle state and
+deletes the partial file. Nothing on Jibo is written. It does not retry in the
+same DFU session: the robot's recovery loader may already have sent the lost
+block, and it keeps its read position after an abort, so a new read would not
+start at the beginning.
+
+Shut Jibo down, put him back in RCM mode, choose **Enter DFU with ShofEL**, then
+start the same backup again. The next read of the partition that timed out (for
+skills, the chunk that timed out) queues one request at a time. It is slower,
+and it happens once: it ends when that read completes or times out again. A
+second timeout stops with no further automatic retry. If you start the backup
+again without re-entering DFU, the read is refused (normally at block 0) and the
+slower read stays arranged. Stalls, disconnects and wrong-length blocks are not
+retried and do not arrange a slower read. The arrangement is kept in
+`Jibo-Backups/.usb-slow-reads.json`; deleting that file cancels it. A var read
+shows the same timeout message but does not arrange a slower read.
+
 ## Restore a partition set
 
 Choose **Backups → Restore partitions**, select a backup of this Jibo and check
