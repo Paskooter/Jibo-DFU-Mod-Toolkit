@@ -787,19 +787,21 @@ def _usb_link_timeout_error(partition, match, slow, exc):
         except OSError:
             pass
         message = ("Reading {} timed out again at DFU_UPLOAD block {} ({}-byte blocks), this "
-                   "time with one request at a time. The partial file was deleted; nothing on "
-                   "Jibo was changed. The toolkit will not retry automatically. The cause of "
+                   "time with one request at a time. The partial file was deleted. This read "
+                   "changed nothing on Jibo; if it was checking a restore or update, that write "
+                   "is not verified. The toolkit will not retry automatically. The cause of "
                    "these USB-link timeouts is not known.").format(partition, block, block_size)
     else:
-        message = ("Reading {} stopped: USB-link timeout at {}. The partial file was deleted; "
-                   "nothing on Jibo was changed. Jibo's recovery loader cannot continue or "
+        message = ("Reading {} stopped: USB-link timeout at {}. The partial file was deleted. "
+                   "This read changed nothing on Jibo; if it was checking a restore or update, "
+                   "that write is not verified. Jibo's recovery loader cannot continue or "
                    "restart this read in the same DFU session.").format(partition, where)
         try:
             _set_slow_read(partition, {"block": int(block), "depth": int(depth),
                                        "block_size": int(block_size), "recorded_utc": _utc_now()})
             message += (" Shut Jibo down, put him back in RCM mode (hold the RCM button while "
                         "you turn him on), choose Enter DFU with ShofEL, then start the same "
-                        "backup or read again: the toolkit will read {} once with one request "
+                        "backup, read, restore or update again: the toolkit will read {} once with one request "
                         "at a time, which is slower.").format(partition)
         except OSError:
             message += (" Re-enter DFU from RCM mode before reading {} again. The toolkit could "

@@ -306,8 +306,8 @@ Windows-build input, not a user download.
    hosts and a Jibo. CI is not a USB acceptance test. Do not ship a known-broken platform.
 2. Pick the version, then from your reviewed clean checkout:
    ```sh
-   git tag -a v1.0.4 -m 'Jibo DFU Toolkit v1.0.4'
-   git push origin v1.0.4
+   git tag -a v1.0.5 -m 'Jibo DFU Toolkit v1.0.5'
+   git push origin v1.0.5
    ```
    Only maintainers create release tags.
 3. Wait for every build and the aggregate job to pass. The tag job creates a
@@ -366,7 +366,7 @@ real loopback transport observations, retaining the product's 120-second budget.
 Before a robot write, cancelling setup/review or closing an idle app does not
 need a firmware rollback. Keep the saved logs and backups. If this toolkit build
 fails to start, retain it for diagnosis and use a checksum-verified previous
-toolkit download (currently v1.0.3), understanding that it lacks these fixes.
+toolkit download (currently v1.0.4), understanding that it lacks these fixes.
 Changing the host executable does **not** roll back a robot image or a private
 WSL filesystem. Do not delete/reimport existing Linux as generic recovery.
 

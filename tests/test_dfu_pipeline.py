@@ -878,6 +878,24 @@ class ToolkitSlowReadTests(unittest.TestCase):
         self.read()
         self.assertIsNone(self.depth_of_last_read())
 
+    def test_timeout_wording_also_fits_a_readback_after_a_write(self):
+        # Restore and update verification read back through _upload_partition too, so a
+        # timeout there must not claim Jibo is unchanged or tell the user to start a backup.
+        self.attach(FakeUbootDfu(self.content), timeout_upload_block=5)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError) as caught:
+            self.read()
+        first = str(caught.exception)
+        self.attach(FakeUbootDfu(self.content), timeout_upload_block=5)
+        with self.assertRaises(toolkit.UsbLinkTimeoutError) as caught:
+            self.read()
+        second = str(caught.exception)
+        for message in (first, second):
+            self.assertNotIn("nothing on Jibo was changed", message)
+            self.assertIn("This read changed nothing on Jibo", message)
+            self.assertIn("checking a restore or update, that write is not verified", message)
+        self.assertIn("start the same backup, read, restore or update again", first)
+        self.assertNotIn("start the same backup or read again", first)
+
     def test_stall_disconnect_and_short_data_do_not_arrange_a_slower_read(self):
         for usbfs, content in (({"stall_upload_block": 3}, self.content),
                                ({"upload_status_block": 3, "upload_status": -errno.ENODEV},

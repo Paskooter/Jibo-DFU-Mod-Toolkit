@@ -71,7 +71,7 @@ class SignatureTests(unittest.TestCase):
 
     def test_shipped_toolkit_version_is_1_0_4(self):
         import jibo_flash_contract as c
-        self.assertEqual(c.TOOLKIT_VERSION, '1.0.4')
+        self.assertEqual(c.TOOLKIT_VERSION, '1.0.5')
 
     def test_release_build_refuses_a_test_signed_index(self):
         import jibo_flash_contract as c

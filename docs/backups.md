@@ -57,6 +57,12 @@ retried and do not arrange a slower read. The arrangement is kept in
 `Jibo-Backups/.usb-slow-reads.json`; deleting that file cancels it. A var read
 shows the same timeout message but does not arrange a slower read.
 
+A restore or update checks each write by reading the partition back, and that
+readback can time out the same way. The read itself changes nothing, but the
+write it was checking is then not verified. Re-enter DFU as above and start the
+same restore or update again; its readback of that partition (not var) is the
+slower read.
+
 ## Restore a partition set
 
 Choose **Backups → Restore partitions**, select a backup of this Jibo and check
