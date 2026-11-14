@@ -10,7 +10,10 @@ public static class UsbipdBoundsFixture {
         // Existence is the observer's ready signal. Close the complete PID
         // before publishing it; a direct WriteAllText exposes an open writer.
         File.WriteAllText(path+".writing",Process.GetCurrentProcess().Id.ToString());
-        File.Move(path+".writing",path);
+        // Keep a previous probe's complete journal visible until replacement;
+        // resolver fallback probes intentionally share this phase directory.
+        if(File.Exists(path)) File.Replace(path+".writing",path,null);
+        else File.Move(path+".writing",path);
     }
     public static int Main(string[] args) {
         string folder=Environment.GetEnvironmentVariable("USBIPD_BOUNDS_DIRECTORY");

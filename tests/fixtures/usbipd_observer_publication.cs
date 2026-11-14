@@ -32,6 +32,10 @@ public static class PublicationFile {
         File.Move(source,target);
         if(target.EndsWith(".pid",StringComparison.Ordinal)) throw new PublicationComplete();
     }
+    public static void Replace(string source, string target, string backup) {
+        File.Replace(source,target,backup);
+        if(target.EndsWith(".pid",StringComparison.Ordinal)) throw new PublicationComplete();
+    }
     public static bool Exists(string path) { return File.Exists(path); }
     public static string ReadAllText(string path) { return File.ReadAllText(path); }
     public static void AppendAllText(string path, string value) { File.AppendAllText(path,value); }
@@ -46,7 +50,12 @@ public static class ObserverPublicationControl {
     static string Executable() {
         using(Process current=Process.GetCurrentProcess()) { return current.MainModule.FileName; }
     }
-    static void Publication(string folder, string phase, string role) {
+    static void Publication(string folder, string phase, string role, bool repeat) {
+        string journal=Path.Combine(folder,role+".pid");
+        string previous=Process.GetCurrentProcess().Id.ToString()+"\n";
+        // A valid prior journal remains complete/readable until replacement.
+        // Distinct bytes expose any premature overwrite, even with the same PID.
+        if(repeat) File.WriteAllText(journal,previous);
         // Finish the polling thread before a synchronous, precisely scheduled
         // Observe call. Separate controls below exercise Watch/Finish/Error.
         using(NativeBoundsObserver observer=new NativeBoundsObserver(folder,Executable())) {
@@ -55,9 +64,12 @@ public static class ObserverPublicationControl {
             int checks=0;
             PublicationFile.DuringWrite=delegate {
                 using(Process found=Observe(observer,role)) {
-                    Require(found==null,"unclosed PID publication was observed");
+                    if(repeat) {
+                        Require(found!=null && found.Id==Process.GetCurrentProcess().Id,"previous live identity lost during replacement");
+                        Require(File.ReadAllText(journal)==previous,"previous journal changed before writer closed");
+                    } else Require(found==null,"unclosed PID publication was observed");
                 }
-                Require(!File.Exists(Path.Combine(folder,role+".observed")),"writer released before publication");
+                if(!repeat) Require(!File.Exists(Path.Combine(folder,role+".observed")),"writer released before publication");
                 checks++;
             };
             Environment.SetEnvironmentVariable("USBIPD_BOUNDS_DIRECTORY",folder);
@@ -72,7 +84,7 @@ public static class ObserverPublicationControl {
             Require(File.ReadAllText(Path.Combine(folder,role+".observed"))=="retained","observation marker missing");
             Require(File.ReadAllText(Path.Combine(folder,role+".pid"))==Process.GetCurrentProcess().Id.ToString(),"PID bytes changed");
             Require(Directory.GetFiles(folder,"*.writing").Length==0,"publication temporary file left behind");
-            Console.WriteLine("PASS "+phase+" "+role+": invisible during both open-writer stages, real identity retained after close/publish");
+            Console.WriteLine("PASS "+phase+" "+role+": "+(repeat ? "previous complete identity readable" : "new identity invisible")+" during both open-writer stages, real identity retained after close/publish");
         }
     }
     static void Refusal(string folder, string mode) {
@@ -91,9 +103,9 @@ public static class ObserverPublicationControl {
     }
     public static int Main(string[] args) {
         try {
-            if(args[0]=="publish") {
+            if(args[0]=="publish" || args[0]=="publish-repeat") {
                 PublicationFile.SharingConflict=args[4]=="sharing-conflict";
-                Publication(args[1],args[2],args[3]);
+                Publication(args[1],args[2],args[3],args[0]=="publish-repeat");
             }
             else Refusal(args[1],args[0]);
             return 0;
