@@ -5,17 +5,24 @@ using System.IO;
 using System.Reflection;
 using System.Threading;
 public static class UsbipdBoundsFixture {
+    static void PublishPid(string folder, string role) {
+        string path=Path.Combine(folder,role+".pid");
+        // Existence is the observer's ready signal. Close the complete PID
+        // before publishing it; a direct WriteAllText exposes an open writer.
+        File.WriteAllText(path+".writing",Process.GetCurrentProcess().Id.ToString());
+        File.Move(path+".writing",path);
+    }
     public static int Main(string[] args) {
         string folder=Environment.GetEnvironmentVariable("USBIPD_BOUNDS_DIRECTORY");
         string mode=Environment.GetEnvironmentVariable("USBIPD_BOUNDS_MODE") ?? "healthy";
         if(String.IsNullOrEmpty(folder)) return 91;
         if(args.Length==1 && args[0]=="--hold") {
-            File.WriteAllText(Path.Combine(folder,"child.pid"),Process.GetCurrentProcess().Id.ToString());
+            PublishPid(folder,"child");
             Thread.Sleep(60000); return 0;
         }
         if(args.Length!=1 || args[0]!="--version") return 92;
         File.AppendAllText(Path.Combine(folder,"probe.entries"),"version\n");
-        File.WriteAllText(Path.Combine(folder,"parent.pid"),Process.GetCurrentProcess().Id.ToString());
+        PublishPid(folder,"parent");
         if(mode=="hang" || mode=="pipe") {
             ProcessStartInfo info=new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,"--hold");
             info.UseShellExecute=false; info.CreateNoWindow=true;
